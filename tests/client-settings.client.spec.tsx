@@ -5,18 +5,30 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityAuthSettings } from '../src/client/AntigravityAuthSettings.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { AntigravityAuthRpcClient } from '../src/rpc-contract.ts'
-import { createBootstrapStatusService } from '../src/status.ts'
+import { createStatusView } from '../src/status.ts'
+import type { LoginStatusView } from '../src/status.ts'
 
-function rpcFixture(): AntigravityAuthRpcClient {
-  const status = createBootstrapStatusService().status()
+function rpcFixture(
+  login: LoginStatusView = { phase: 'idle', configured: false, projectAvailable: false },
+  riskAcknowledged = false,
+): AntigravityAuthRpcClient {
+  const status = createStatusView(riskAcknowledged, login)
   return {
     status: vi.fn().mockResolvedValue({ ok: true, value: { status } }),
     acknowledgeRisk: vi.fn().mockResolvedValue({ ok: true, value: { acknowledged: true } }),
-    login: vi.fn().mockResolvedValue({ ok: true, value: { started: false, reason: 'poc-pending' } }),
+    login: vi.fn().mockResolvedValue({ ok: true, value: {
+      started: true,
+      phase: 'pending',
+      authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=abcdefghijklmnopqrstuvwxyz123456',
+      expiresAt: '2026-08-21T00:00:00.000Z',
+    } }),
+    cancelLogin: vi.fn().mockResolvedValue({ ok: true, value: { phase: 'cancelled', errorCode: 'cancelled' } }),
+    completeCallback: vi.fn().mockResolvedValue({ ok: true, value: { completed: false, phase: 'failed', errorCode: 'no-pending-flow' } }),
   }
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   document.body.innerHTML = ''
 })
 
@@ -31,7 +43,7 @@ describe('Antigravity bootstrap settings', () => {
     expect(await screen.findByRole('heading', { name: 'Unofficial / Experimental' })).toBeTruthy()
     expect(screen.getByText(/Google does not support third-party/i)).toBeTruthy()
     expect(screen.getByText(/Single-account only/i)).toBeTruthy()
-    expect(screen.getByRole('button', { name: en.loginUnavailable })).toHaveProperty('disabled', true)
+    expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', true)
     expect(screen.getAllByText('POC pending')).toHaveLength(4)
     expect(screen.getAllByRole('listitem')).toHaveLength(4)
     expect(screen.queryByLabelText(/token|client secret|endpoint/i)).toBeNull()
@@ -40,9 +52,13 @@ describe('Antigravity bootstrap settings', () => {
     const acknowledgement = screen.getByRole('checkbox', { name: en.riskAcknowledgement })
     fireEvent.click(acknowledgement)
     await waitFor(() => expect(rpc.acknowledgeRisk).toHaveBeenCalledOnce())
-    expect(screen.getByRole('button', { name: en.loginUnavailable })).toHaveProperty('disabled', true)
-    expect(screen.getByText(en.loginPending)).toBeTruthy()
-    expect(rpc.login).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', false)
+    expect(screen.getByText(en.loginReady)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: en.login }))
+    await waitFor(() => expect(rpc.login).toHaveBeenCalledOnce())
+    expect(screen.getByRole('link', { name: en.openAuthorization }).getAttribute('target')).toBe('_blank')
+    expect(screen.getByRole('button', { name: en.cancelLogin })).toBeTruthy()
 
     unmount()
     expect(unsubscribe).toHaveBeenCalledOnce()
@@ -55,6 +71,53 @@ describe('Antigravity bootstrap settings', () => {
     expect(await screen.findByRole('heading', { name: '非官方 / 实验性' })).toBeTruthy()
     expect(screen.getByText(/Google 不支持第三方/i)).toBeTruthy()
     expect(screen.getAllByText('POC 待验证')).toHaveLength(4)
+  })
+
+  it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
+    const cases = [
+      ['pending', { phase: 'pending', configured: false, projectAvailable: false, authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`, expiresAt: '2026-08-21T00:00:00.000Z' }, en.loginPending],
+      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.loginSuccess],
+      ['cancelled', { phase: 'cancelled', configured: false, projectAvailable: false, errorCode: 'cancelled' }, en.loginCancelled],
+      ['expired', { phase: 'expired', configured: false, projectAvailable: false, errorCode: 'expired' }, en.loginExpired],
+      ['port-conflict', { phase: 'port-conflict', configured: false, projectAvailable: false, errorCode: 'port-conflict' }, en.loginPortConflict],
+      ['failed', { phase: 'failed', configured: false, projectAvailable: false, errorCode: 'project-unavailable' }, en.loginFailed],
+    ] as const
+    for (const [_name, login, copy] of cases) {
+      const { unmount } = render(<AntigravityAuthSettings rpc={rpcFixture(login, true)} t={key => en[key]} subscribe={() => () => {}} />)
+      expect((await screen.findAllByText(copy)).length).toBeGreaterThan(0)
+      if (_name === 'success') {
+        expect(screen.getByText('a***@example.com')).toBeTruthy()
+        expect(screen.getByText(en.projectAvailable)).toBeTruthy()
+      }
+      unmount()
+      document.body.innerHTML = ''
+    }
+  })
+
+  it('polls Host status while pending so callback completion reaches the settings UI', async () => {
+    vi.useFakeTimers()
+    const pending: LoginStatusView = {
+      phase: 'pending',
+      configured: false,
+      projectAvailable: false,
+      authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`,
+      expiresAt: '2026-08-21T00:00:00.000Z',
+    }
+    const completed: LoginStatusView = { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }
+    const base = rpcFixture(pending, true)
+    const status = vi.fn()
+      .mockResolvedValueOnce({ ok: true, value: { status: createStatusView(true, pending) } })
+      .mockResolvedValueOnce({ ok: true, value: { status: createStatusView(true, completed) } })
+    const rpc = { ...base, status: status as typeof base.status }
+    const { unmount } = render(<AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />)
+
+    await vi.waitFor(() => expect(status).toHaveBeenCalledOnce())
+    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2))
+    expect(screen.getAllByText(en.loginSuccess).length).toBeGreaterThan(0)
+    expect(screen.getByText('a***@example.com')).toBeTruthy()
+    unmount()
+    vi.useRealTimers()
   })
 
   it('aborts an in-flight status read and unsubscribes on unmount', async () => {

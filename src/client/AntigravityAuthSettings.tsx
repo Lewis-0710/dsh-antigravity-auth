@@ -1,4 +1,4 @@
-/** Settings shell for the value-free Antigravity bootstrap status. */
+/** Settings shell for value-safe Antigravity login status. */
 
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
@@ -26,6 +26,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
   const [error, setError] = useState<string | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
   const [acknowledgeBusy, setAcknowledgeBusy] = useState(false)
+  const [loginBusy, setLoginBusy] = useState(false)
   const [resetTick, setResetTick] = useState(0)
 
   useEffect(() => subscribe(() => { setResetTick(value => value + 1) }), [subscribe])
@@ -57,6 +58,16 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
     return () => controller.abort()
   }, [load, resetTick])
 
+  useEffect(() => {
+    if (status?.login.phase !== 'pending') return
+    const controller = new AbortController()
+    const timer = globalThis.setInterval(() => { void load(controller.signal) }, 1_000)
+    return () => {
+      globalThis.clearInterval(timer)
+      controller.abort()
+    }
+  }, [load, status?.login.phase])
+
   const acknowledge = useCallback(async (checked: boolean) => {
     if (!checked) {
       setAcknowledged(false)
@@ -76,6 +87,62 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
       setError(messageOf(cause, t('acknowledgeFailed')))
     } finally {
       setAcknowledgeBusy(false)
+    }
+  }, [rpc, t])
+
+  const startLogin = useCallback(async () => {
+    setLoginBusy(true)
+    setError(null)
+    try {
+      const result = await rpc.login()
+      if (!result.ok) {
+        setError(result.error.message || t('loginFailed'))
+        await load()
+        return
+      }
+      setStatus(previous => {
+        if (previous === null) return previous
+        const { errorCode: _ignoredErrorCode, ...login } = previous.login
+        return {
+          ...previous,
+          login: {
+            ...login,
+            phase: 'pending',
+            authorizationUrl: result.value.authorizationUrl,
+            expiresAt: result.value.expiresAt,
+          },
+        }
+      })
+    } catch (cause) {
+      setError(messageOf(cause, t('loginFailed')))
+    } finally {
+      setLoginBusy(false)
+    }
+  }, [load, rpc, t])
+
+  const cancelLogin = useCallback(async () => {
+    setLoginBusy(true)
+    setError(null)
+    try {
+      const result = await rpc.cancelLogin()
+      if (!result.ok) {
+        setError(result.error.message || t('cancelLoginFailed'))
+        return
+      }
+      setStatus(previous => {
+        if (previous === null) return previous
+        const { errorCode: _ignoredErrorCode, ...login } = previous.login
+        return {
+          ...previous,
+          login: result.value.errorCode === undefined
+            ? { ...login, phase: result.value.phase }
+            : { ...login, phase: result.value.phase, errorCode: result.value.errorCode },
+        }
+      })
+    } catch (cause) {
+      setError(messageOf(cause, t('cancelLoginFailed')))
+    } finally {
+      setLoginBusy(false)
     }
   }, [rpc, t])
 
@@ -109,10 +176,34 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
           {acknowledgeBusy ? t('acknowledgeBusy') : t('riskAcknowledgement')}
         </label>
         {acknowledged ? <p role="status">{t('acknowledged')}</p> : null}
-        <button type="button" disabled={!acknowledged || status?.capabilities.some(capability => capability.id === 'auth-llm' && capability.state !== 'available')}>
-          {t('loginUnavailable')}
-        </button>
-        <p role="status">{acknowledged ? t('loginPending') : t('loginRequiresAck')}</p>
+        {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+          <p>
+            <a href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+              {t('openAuthorization')}
+            </a>
+            <button type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+              {t('cancelLogin')}
+            </button>
+          </p>
+        ) : (
+          <button type="button" disabled={!acknowledged || status === null || loginBusy} onClick={() => { void startLogin() }}>
+            {loginBusy ? t('startingLogin') : t('login')}
+          </button>
+        )}
+        <p role="status">{loginStatusText(status?.login.phase, acknowledged, t)}</p>
+        {status?.login.phase === 'success' ? <p role="status">{t('loginSuccess')}</p> : null}
+        {status?.login.phase === 'expired' ? <p role="alert">{t('loginExpired')}</p> : null}
+        {status?.login.phase === 'port-conflict' ? <p role="alert">{t('loginPortConflict')}</p> : null}
+        {status?.login.phase === 'failed' ? <p role="alert">{t('loginFailed')}</p> : null}
+        {status?.login.maskedEmail === undefined ? null : (
+          <p>{t('account')}: <code>{status.login.maskedEmail}</code></p>
+        )}
+        {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
+          <p>{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
+        ) : null}
+        {status?.login.configured ? (
+          <p role="status">{status.login.projectAvailable ? t('projectAvailable') : t('projectUnavailable')}</p>
+        ) : null}
       </article>
 
       <article>
@@ -156,6 +247,21 @@ function stateLabel(state: CapabilityGateState, t: AntigravityAuthSettingsProps[
 
 function reasonLabel(reason: CapabilityGateReasonCode, t: AntigravityAuthSettingsProps['t']): string {
   return reason === 'login-not-implemented' ? t('loginNotImplemented') : t('gateNotRun')
+}
+
+function loginStatusText(
+  phase: AntigravityStatusView['login']['phase'] | undefined,
+  acknowledged: boolean,
+  t: AntigravityAuthSettingsProps['t'],
+): string {
+  if (!acknowledged) return t('loginRequiresAck')
+  if (phase === 'pending') return t('loginPending')
+  if (phase === 'success') return t('loginSuccess')
+  if (phase === 'cancelled') return t('loginCancelled')
+  if (phase === 'expired') return t('loginExpired')
+  if (phase === 'port-conflict') return t('loginPortConflict')
+  if (phase === 'failed') return t('loginFailed')
+  return t('loginReady')
 }
 
 function messageOf(error: unknown, fallback: string): string {

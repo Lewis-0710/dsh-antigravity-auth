@@ -1,7 +1,7 @@
 {
   "name": "dsh-antigravity-auth",
   "version": "0.1.0",
-  "description": "Private, single-account, unofficial Antigravity capability bundle shell for DeepSeek Harness",
+  "description": "Private, single-account, unofficial Antigravity OAuth capability bundle for DeepSeek Harness",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@11.7.0",

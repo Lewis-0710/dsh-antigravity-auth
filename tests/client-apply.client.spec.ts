@@ -4,7 +4,7 @@ import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../src/client/index.ts'
 import type { AntigravityAuthKey } from '../src/client/locales.ts'
-import { createBootstrapStatusService } from '../src/status.ts'
+import { createStatusView } from '../src/status.ts'
 
 interface SlotRecord {
   options: Record<string, unknown>
@@ -14,7 +14,7 @@ interface SlotRecord {
 function bench() {
   const call = vi.fn().mockResolvedValue({
     ok: true as const,
-    value: { status: createBootstrapStatusService().status() },
+    value: { status: createStatusView(false, { phase: 'idle', configured: false, projectAvailable: false }) },
   })
   const disposers: Array<() => void> = []
   const dictionaries = new Map<string, { zh: Record<AntigravityAuthKey, string>; en: Record<AntigravityAuthKey, string> }>()

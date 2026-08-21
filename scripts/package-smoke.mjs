@@ -35,7 +35,16 @@ try {
   }
   if (patch.includes('deepseek-harness')) throw new Error('package smoke: patch unexpectedly mentions DSH core')
 
-  for (const key of ['.', './client', './search', './image', './video', './rpc-contract', './wire-identity', './invariant']) {
+  for (const key of [
+    '.',
+    './client',
+    './search',
+    './image',
+    './video',
+    './rpc-contract',
+    './wire-identity',
+    './invariant',
+  ]) {
     const target = manifest.exports?.[key]?.default
     const types = manifest.exports?.[key]?.types
     if (typeof target !== 'string' || typeof types !== 'string') throw new Error(`package smoke: incomplete export ${key}`)
