@@ -7,12 +7,15 @@ import { en, zh } from '../src/client/locales.ts'
 import type { AntigravityAuthRpcClient } from '../src/rpc-contract.ts'
 import { createStatusView } from '../src/status.ts'
 import type { LoginStatusView } from '../src/status.ts'
+import type { CredentialStatusView, RevokeStatusView } from '../src/credential-coordinator.ts'
 
 function rpcFixture(
   login: LoginStatusView = { phase: 'idle', configured: false, projectAvailable: false },
   riskAcknowledged = false,
+  credential?: CredentialStatusView,
+  revoke?: RevokeStatusView,
 ): AntigravityAuthRpcClient {
-  const status = createStatusView(riskAcknowledged, login)
+  const status = createStatusView(riskAcknowledged, login, credential, revoke)
   return {
     status: vi.fn().mockResolvedValue({ ok: true, value: { status } }),
     acknowledgeRisk: vi.fn().mockResolvedValue({ ok: true, value: { acknowledged: true } }),
@@ -23,6 +26,8 @@ function rpcFixture(
       expiresAt: '2026-08-21T00:00:00.000Z',
     } }),
     cancelLogin: vi.fn().mockResolvedValue({ ok: true, value: { phase: 'cancelled', errorCode: 'cancelled' } }),
+    logout: vi.fn().mockResolvedValue({ ok: true, value: { state: 'logged-out' } }),
+    revoke: vi.fn().mockResolvedValue({ ok: true, value: { state: 'revoked' } }),
     completeCallback: vi.fn().mockResolvedValue({ ok: true, value: { completed: false, phase: 'failed', errorCode: 'no-pending-flow' } }),
   }
 }
@@ -62,6 +67,25 @@ describe('Antigravity bootstrap settings', () => {
 
     unmount()
     expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('renders Host-only logout and separately confirmed revoke controls', async () => {
+    const rpc = rpcFixture(
+      { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' },
+      true,
+      { state: 'logged-in', configured: true },
+      { state: 'idle' },
+    )
+    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
+    render(<AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />)
+
+    expect(await screen.findByRole('button', { name: en.logout })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.logout }))
+    await waitFor(() => expect(rpc.logout).toHaveBeenCalledOnce())
+    fireEvent.click(screen.getByRole('button', { name: en.revoke }))
+    await waitFor(() => expect(rpc.revoke).toHaveBeenCalledOnce())
+    expect(confirm).toHaveBeenCalledWith(en.revokeConfirm)
+    confirm.mockRestore()
   })
 
   it('renders the same status shell with Chinese copy', async () => {

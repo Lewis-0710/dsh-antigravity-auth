@@ -21,6 +21,7 @@ export function apply(ctx: Context): void {
   disposableContext.effect?.(() => () => service.dispose(), 'antigravity-auth: OAuth operations')
 }
 
+export * from './credential-coordinator.ts'
 export * from './rpc-contract.ts'
 export * from './status.ts'
 export * from './wire-identity.ts'

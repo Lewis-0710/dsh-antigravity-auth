@@ -4,6 +4,7 @@ import {
   parseStatusResult,
 } from '../src/rpc-contract.ts'
 import { handleAntigravityAuthRpc } from '../src/rpc.ts'
+import { createMemoryAuthStore } from '../src/auth-store.ts'
 import { createBootstrapStatusService } from '../src/bootstrap-service.ts'
 import { createStatusView } from '../src/status.ts'
 
@@ -37,8 +38,10 @@ describe('Antigravity login RPC', () => {
           riskAcknowledgementRequired: true,
           riskAcknowledged: false,
           login: { phase: 'idle', configured: false, projectAvailable: false },
+          credential: { state: 'logged-out', configured: false },
+          revoke: { state: 'idle' },
           capabilities: [
-            { id: 'auth-llm', state: 'poc-pending', reasonCode: 'login-not-implemented' },
+            { id: 'auth-llm', state: 'poc-pending', reasonCode: 'llm-not-implemented' },
             { id: 'search', state: 'poc-pending', reasonCode: 'gate-not-run' },
             { id: 'image', state: 'poc-pending', reasonCode: 'gate-not-run' },
             { id: 'video', state: 'poc-pending', reasonCode: 'gate-not-run' },
@@ -81,6 +84,27 @@ describe('Antigravity login RPC', () => {
     await service.dispose()
   })
 
+  it('keeps local logout separate from confirmed grant revocation', async () => {
+    const localStore = createMemoryAuthStore()
+    await localStore.commit({ refreshToken: 'local-refresh', projectId: 'project-id' })
+    const localRevoke = vi.fn(async () => {})
+    const localService = createBootstrapStatusService({ store: localStore, credentialOptions: { revokeGrant: localRevoke } })
+    await expect(handleAntigravityAuthRpc(localService, 'logout', {}, signal)).resolves.toEqual({ ok: true, value: { state: 'logged-out' } })
+    await expect(localStore.read()).resolves.toBeUndefined()
+    expect(localRevoke).not.toHaveBeenCalled()
+    await localService.dispose()
+
+    const revokeStore = createMemoryAuthStore()
+    await revokeStore.commit({ refreshToken: 'grant-refresh', projectId: 'project-id' })
+    const revoke = vi.fn(async () => {})
+    const revokeService = createBootstrapStatusService({ store: revokeStore, credentialOptions: { revokeGrant: revoke } })
+    await expect(handleAntigravityAuthRpc(revokeService, 'revoke', { confirmed: false }, signal)).resolves.toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    await expect(handleAntigravityAuthRpc(revokeService, 'revoke', { confirmed: true }, signal)).resolves.toEqual({ ok: true, value: { state: 'revoked' } })
+    expect(revoke).toHaveBeenCalledWith(expect.objectContaining({ token: 'grant-refresh', signal: expect.any(AbortSignal) }))
+    await expect(revokeStore.read()).resolves.toBeUndefined()
+    await revokeService.dispose()
+  })
+
   it('rejects malformed payloads and unknown endpoints without evaluating the service', async () => {
     const service = createBootstrapStatusService()
     const status = vi.spyOn(service, 'status')
@@ -90,6 +114,8 @@ describe('Antigravity login RPC', () => {
       ['login', { callbackUrl: 'secret' }],
       ['cancel', { extra: true }],
       ['complete-callback', { callbackUrl: '' }],
+      ['logout', { extra: true }],
+      ['revoke', { confirmed: false }],
       ['private', {}],
     ] as const) {
       const result = await handleAntigravityAuthRpc(service, endpoint, payload, signal)
@@ -103,12 +129,19 @@ describe('Antigravity login RPC', () => {
   it('validates the browser response as a closed, value-free status schema', () => {
     const valid = {
       status: {
-        ...createStatusView(false, { phase: 'idle', configured: false, projectAvailable: false }),
+        ...createStatusView(
+          false,
+          { phase: 'idle', configured: false, projectAvailable: false },
+          { state: 're-login-required', configured: true, errorCode: 'invalid-grant' },
+          { state: 'failed', errorCode: 'storage' },
+        ),
       },
     }
     expect(parseStatusResult(valid)).toMatchObject({ pluginId: 'dsh-antigravity-auth' })
     expect(parseStatusResult({ ...valid, leaked: 'value' })).toBeUndefined()
     expect(parseStatusResult({ ...valid, status: { ...valid.status, login: { ...valid.status.login, authorizationUrl: 'http://evil.test' } } })).toBeUndefined()
+    expect(parseStatusResult({ ...valid, status: { ...valid.status, credential: { state: 'logged-in', configured: true, expiresAt: 'access-token' } } })).toBeUndefined()
+    expect(parseStatusResult({ ...valid, status: { ...valid.status, revoke: { state: 'failed', errorCode: 'invalid-grant' } } })).toBeUndefined()
   })
 
   it('keeps the browser face typed and forwards only fixed operations', async () => {
@@ -119,6 +152,8 @@ describe('Antigravity login RPC', () => {
         .mockResolvedValueOnce({ ok: true, value: { acknowledged: true } })
         .mockResolvedValueOnce({ ok: true, value: loginFixture() })
         .mockResolvedValueOnce({ ok: true, value: { phase: 'cancelled', errorCode: 'cancelled' } })
+        .mockResolvedValueOnce({ ok: true, value: { state: 'logged-out' } })
+        .mockResolvedValueOnce({ ok: true, value: { state: 'revoked' } })
         .mockResolvedValueOnce({ ok: true, value: { completed: false, phase: 'failed', errorCode: 'oauth-error' } }),
     }
     const client = createAntigravityAuthRpcClient(rpc)
@@ -127,6 +162,8 @@ describe('Antigravity login RPC', () => {
     await client.acknowledgeRisk()
     await client.login()
     await client.cancelLogin()
+    await client.logout()
+    await client.revoke()
     await client.completeCallback('http://localhost:51121/oauth-callback?state=state&code=code')
 
     expect(rpc.call.mock.calls.map(call => call.slice(0, 3))).toEqual([
@@ -134,6 +171,8 @@ describe('Antigravity login RPC', () => {
       ['/antigravity-auth', 'acknowledge-risk', { acknowledge: true }],
       ['/antigravity-auth', 'login', {}],
       ['/antigravity-auth', 'cancel', {}],
+      ['/antigravity-auth', 'logout', {}],
+      ['/antigravity-auth', 'revoke', { confirmed: true }],
       ['/antigravity-auth', 'complete-callback', { callbackUrl: 'http://localhost:51121/oauth-callback?state=state&code=code' }],
     ])
   })

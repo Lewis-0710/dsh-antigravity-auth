@@ -15,6 +15,8 @@ export interface AuthRecordDraft {
   readonly refreshToken: string
   readonly projectId: string
   readonly email?: string
+  /** Keep the same lineage for a refresh; a new login omits it to fence older work. */
+  readonly lineage?: string
 }
 
 export interface AntigravityAuthRecord {
@@ -24,6 +26,8 @@ export interface AntigravityAuthRecord {
   readonly email?: string
   readonly revision: number
   readonly updatedAt: string
+  /** A per-login lineage fence; absent only on records written by older versions. */
+  readonly lineage?: string
 }
 
 export interface AuthStoreOptions {
@@ -33,7 +37,13 @@ export interface AuthStoreOptions {
 export interface AntigravityAuthStore {
   read(): Promise<AntigravityAuthRecord | undefined>
   commit(draft: AuthRecordDraft): Promise<AntigravityAuthRecord>
-  compareAndCommit(expectedRevision: number, draft: AuthRecordDraft): Promise<AntigravityAuthRecord | undefined>
+  compareAndCommit(
+    expectedRevision: number,
+    draft: AuthRecordDraft,
+    expectedLineage?: string,
+  ): Promise<AntigravityAuthRecord | undefined>
+  /** Clear only when the observed record is still the same account lineage. */
+  clearIfCurrent(expectedRevision: number, expectedLineage?: string): Promise<boolean>
   clear(): Promise<void>
 }
 
@@ -87,12 +97,26 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
       await writeAuthRecord(path, record)
       return record
     })),
-    compareAndCommit: (expectedRevision, draft) => enqueue(() => withStoreLock(path, async () => {
+    compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
       const current = await readAuthRecord(path)
       if ((current?.revision ?? 0) !== expectedRevision) return undefined
+      const lineage = expectedLineage ?? draft.lineage
+      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
       const record = makeRecord(draft, expectedRevision + 1, now())
       await writeAuthRecord(path, record)
       return record
+    })),
+    clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
+      const current = await readAuthRecord(path)
+      if ((current?.revision ?? 0) !== expectedRevision) return false
+      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
+      try {
+        await unlink(path)
+      } catch (error) {
+        if (!isNotFound(error)) throw storeIoError()
+      }
+      await syncDirectory(dirname(path))
+      return true
     })),
     clear: () => enqueue(() => withStoreLock(path, async () => {
       try {
@@ -116,10 +140,18 @@ export function createMemoryAuthStore(initial?: AntigravityAuthRecord, options: 
       current = makeRecord(draft, (current?.revision ?? 0) + 1, now())
       return cloneRecord(current)
     }),
-    compareAndCommit: (expectedRevision, draft) => enqueue(async () => {
+    compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(async () => {
       if ((current?.revision ?? 0) !== expectedRevision) return undefined
+      const lineage = expectedLineage ?? draft.lineage
+      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
       current = makeRecord(draft, expectedRevision + 1, now())
       return cloneRecord(current)
+    }),
+    clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(async () => {
+      if ((current?.revision ?? 0) !== expectedRevision) return false
+      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
+      current = undefined
+      return true
     }),
     clear: () => enqueue(async () => { current = undefined }),
   }
@@ -260,6 +292,7 @@ function makeRecord(draft: AuthRecordDraft, revision: number, now: number): Anti
     || !safeText(draft.refreshToken)
     || typeof draft.projectId !== 'string'
     || !safeText(draft.projectId)
+    || (draft.lineage !== undefined && (typeof draft.lineage !== 'string' || !safeText(draft.lineage)))
     || !Number.isSafeInteger(revision)
     || revision < 1
     || !Number.isFinite(now)) {
@@ -271,6 +304,7 @@ function makeRecord(draft: AuthRecordDraft, revision: number, now: number): Anti
     projectId: draft.projectId,
     revision,
     updatedAt: new Date(now).toISOString(),
+    lineage: draft.lineage ?? randomUUID(),
     ...(draft.email === undefined ? {} : { email: validateEmail(draft.email) }),
   }
   return record
@@ -282,16 +316,24 @@ function parseRecord(value: unknown): AntigravityAuthRecord {
   const keys = Object.keys(value).sort()
   const required = ['projectId', 'refreshToken', 'revision', 'updatedAt', 'version']
   const withEmail = [...required, 'email'].sort()
-  const expected = keys.length === required.length ? required : withEmail
+  const withLineage = [...required, 'lineage'].sort()
+  const withEmailAndLineage = [...required, 'email', 'lineage'].sort()
+  const expected = keys.length === required.length
+    ? required
+    : keys.includes('lineage')
+      ? (keys.includes('email') ? withEmailAndLineage : withLineage)
+      : withEmail
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) throw corruptError()
   const refreshToken = value.refreshToken
   const projectId = value.projectId
   const revision = value.revision
   const updatedAt = value.updatedAt
+  const lineage = value.lineage
   if (typeof refreshToken !== 'string' || !safeText(refreshToken)
     || typeof projectId !== 'string' || !safeText(projectId)
     || typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1
-    || typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt))) {
+    || typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt))
+    || (lineage !== undefined && (typeof lineage !== 'string' || !safeText(lineage)))) {
     throw corruptError()
   }
   const email = value.email
@@ -303,6 +345,7 @@ function parseRecord(value: unknown): AntigravityAuthRecord {
     revision,
     updatedAt,
     ...(email === undefined ? {} : { email }),
+    ...(lineage === undefined ? {} : { lineage }),
   }
 }
 

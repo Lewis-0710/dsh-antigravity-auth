@@ -58,6 +58,25 @@ describe('single-account Antigravity auth store', () => {
     await expect(store.read()).rejects.toMatchObject({ code: 'AUTH_STORE_CORRUPT' })
   })
 
+  it('fences an older refresh after logout followed by a new login', async () => {
+    const { path } = await storeFixture()
+    const first = createAuthStore(path)
+    const second = createAuthStore(path)
+    const old = await first.commit({ refreshToken: 'old-refresh', projectId: 'old-project' })
+
+    await first.clear()
+    const newer = await second.commit({ refreshToken: 'new-refresh', projectId: 'new-project' })
+    await expect(first.compareAndCommit(old.revision, {
+      refreshToken: 'stale-rotated-refresh',
+      projectId: 'old-project',
+    }, old.lineage)).resolves.toBeUndefined()
+    await expect(first.read()).resolves.toMatchObject({
+      revision: newer.revision,
+      refreshToken: 'new-refresh',
+      projectId: 'new-project',
+    })
+  })
+
   it('clears the one account without treating an absent file as corruption', async () => {
     const { path } = await storeFixture()
     const store = createAuthStore(path)

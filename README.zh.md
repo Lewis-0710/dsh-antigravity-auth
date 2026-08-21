@@ -4,10 +4,10 @@
 
 ## 当前阶段
 
-本仓库提供一个 Host-only、可离线验证的**单账号 OAuth 登录路径**，以及插件自有的
-**Wire Identity（线路身份） seam**。Host 与浏览器入口通过仅返回安全值的 loopback RPC
-挂载，并展示独立的 Auth/LLM、搜索、图片和视频能力门禁。LLM、搜索、图片和视频仍是
-`POC 待验证`，本版本不是完整的模型提供方。
+本仓库提供一个 Host-only、可离线验证的**单账号 OAuth 登录路径**、**凭据生命周期
+协调器**，以及插件自有的 **Wire Identity（线路身份） seam**。Host 与浏览器入口通过
+仅返回安全值的 loopback RPC 挂载，并展示独立的 Auth/LLM、搜索、图片和视频能力门禁。
+LLM、搜索、图片和视频仍是 `POC 待验证`，本版本不是完整的模型提供方。
 
 登录路径明确分级：
 
@@ -22,6 +22,19 @@
 5. Host 注入的 project validator 必须成功，新凭据才会替换已有账号。版本化存储采用
    原子提交和 owner-only 权限（`0700`/`0600`），只保存单账号允许的长期 refresh credential
    与元数据；access token 始终留在 Host 内存。
+
+## 凭据生命周期
+
+- Host 内存中的新鲜 access token 会在有界 refresh lead time 内复用；并发调用共享一次
+  refresh 操作。
+- refresh token 轮换只有在 revision 和每次登录的 lineage 都未变化时才提交；晚到的
+  refresh 结果不能覆盖更新的登录或登出。
+- `invalid_grant` 会显示为**需要重新登录**，同时保留诊断记录。网络、超时、限流和服务端
+  失败都有界处理，不会选择备用账号、endpoint、quota pool 或 identity。
+- **本地登出**只清除 Host 内存和本地持久化，不联系 Google。**撤销 Google grant** 是单独的
+  确认操作；token 放在 form body 中发送，只有成功完成后才清除本地状态。
+- RPC 与设置页会在不携带 token 的前提下展示已登录、刷新中、刷新失败、需要重新登录、已登出
+  以及撤销结果状态。
 
 默认 package 检查使用 fake endpoint、确定性的随机数/时钟适配器和内存 store。
 `pnpm test`、`pnpm run check` 与 package smoke test 都不会发起 OAuth 或私有 endpoint 请求。

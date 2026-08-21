@@ -5,10 +5,10 @@ Private, single-account, unofficial Antigravity integration experiments for Deep
 ## Current phase
 
 This repository ships a Host-only, offline-verifiable **single-account OAuth login
-path** plus the plugin-owned **Wire Identity** seam. The Host and browser entries
-mount through a value-safe loopback RPC and render independently addressable
-Auth/LLM, Search, Image, and Video gate rows. LLM, Search, Image, and Video remain
-`POC pending`; this is not a complete model provider.
+path** and **credential lifecycle coordinator** plus the plugin-owned **Wire Identity**
+seam. The Host and browser entries mount through a value-safe loopback RPC and
+render independently addressable Auth/LLM, Search, Image, and Video gate rows. LLM,
+Search, Image, and Video remain `POC pending`; this is not a complete model provider.
 
 The login path is deliberately gated:
 
@@ -26,6 +26,21 @@ The login path is deliberately gated:
    the existing account. The versioned store is atomic and owner-only (`0700`/
    `0600`); it contains only the single account's long-lived refresh credential and
    allowed metadata. Access tokens remain Host memory.
+
+## Credential lifecycle
+
+- A fresh Host access token is reused until its bounded refresh lead time; concurrent
+  callers share one refresh operation.
+- Refresh-token rotation is committed only when the observed revision and per-login
+  lineage still match. A late refresh cannot overwrite a newer login or logout.
+- `invalid_grant` is surfaced as **re-login required** while the diagnostic record is
+  retained. Network, timeout, rate-limit, and server failures are bounded and never
+  select a fallback account, endpoint, quota pool, or identity.
+- **Log out locally** clears Host memory and local persistence without contacting Google.
+  **Revoke Google grant** is a separate confirmed action; the token is sent in a form
+  body and local state is cleared only after successful completion.
+- RPC and settings status expose logged-in, refreshing, refresh-failed, re-login-required,
+  logged-out, and revoke-result states without token material.
 
 The default package checks use fake endpoints, deterministic adapters, and an
 in-memory store. No OAuth or private endpoint request is made by `pnpm test`,

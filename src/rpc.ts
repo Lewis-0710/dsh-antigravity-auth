@@ -2,13 +2,14 @@
 
 import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { OAuthFlowError } from './oauth-flow.ts'
+import { CredentialOperationError, credentialErrorMessage } from './credential-coordinator.ts'
 import type { BootstrapStatusService } from './status.ts'
 
 export { ANTIGRAVITY_AUTH_RPC_CHANNEL } from './rpc-contract.ts'
 
 /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
 export async function handleAntigravityAuthRpc(
-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'completeCallback'>,
+  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'completeCallback' | 'logout' | 'revoke'>,
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -32,6 +33,14 @@ export async function handleAntigravityAuthRpc(
       if (!isEmptyRecord(payload)) return badRequest('cancel expects an empty payload')
       return { ok: true, value: await service.cancelLogin() }
     }
+    if (endpoint === 'logout') {
+      if (!isEmptyRecord(payload)) return badRequest('logout expects an empty payload')
+      return { ok: true, value: await service.logout() }
+    }
+    if (endpoint === 'revoke') {
+      if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
+      return { ok: true, value: await service.revoke(true, signal) }
+    }
     if (endpoint === 'complete-callback' || endpoint === 'complete-manual-callback') {
       if (!isCallbackPayload(payload)) return badRequest('complete-callback expects a callback URL')
       return { ok: true, value: await service.completeCallback(payload.callbackUrl) }
@@ -51,12 +60,17 @@ function cancelled(): RpcResult<never> {
 }
 
 function safeFailure(error: unknown): RpcResult<never> {
-  const code = error instanceof OAuthFlowError ? error.code : 'internal'
+  const credentialError = error instanceof CredentialOperationError ? error : undefined
+  const code = error instanceof OAuthFlowError
+    ? error.code
+    : credentialError?.code ?? 'internal'
   return {
     ok: false,
     error: {
       code: code as never,
-      message: messageFor(code),
+      message: credentialError === undefined
+        ? messageFor(code)
+        : credentialErrorMessage(credentialError.code) ?? 'antigravity-auth: operation failed',
       details: {},
     },
   }
@@ -94,6 +108,12 @@ function isAcknowledgement(value: unknown): value is { acknowledge: true } {
   return isRecord(value)
     && Object.keys(value).length === 1
     && value.acknowledge === true
+}
+
+function isRevokePayload(value: unknown): value is { confirmed: true } {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && value.confirmed === true
 }
 
 function isCallbackPayload(value: unknown): value is { callbackUrl: string } {

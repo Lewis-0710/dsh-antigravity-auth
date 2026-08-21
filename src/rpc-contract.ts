@@ -15,6 +15,7 @@ import type {
   RiskAcknowledgementResult,
 } from './status.ts'
 import type { OAuthFlowCompletionResult } from './oauth-flow.ts'
+import type { CredentialErrorCode, CredentialState, CredentialStatusView, RevokeActionResult, RevokeErrorCode, RevokeState, RevokeStatusView } from './credential-coordinator.ts'
 
 export const ANTIGRAVITY_AUTH_RPC_CHANNEL = '/antigravity-auth' as const
 
@@ -23,6 +24,8 @@ export interface AntigravityAuthRpcClient {
   acknowledgeRisk(signal?: AbortSignal): Promise<RpcResult<RiskAcknowledgementResult>>
   login(signal?: AbortSignal): Promise<RpcResult<LoginStartResult>>
   cancelLogin(signal?: AbortSignal): Promise<RpcResult<LoginActionResult>>
+  logout(signal?: AbortSignal): Promise<RpcResult<{ state: 'logged-out' }>>
+  revoke(signal?: AbortSignal): Promise<RpcResult<RevokeActionResult>>
   completeCallback(callbackUrl: string, signal?: AbortSignal): Promise<RpcResult<OAuthFlowCompletionResult>>
 }
 
@@ -64,6 +67,17 @@ export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc
       const cancellation = parseActionResult(result.value)
       return cancellation === undefined ? invalidResponse('cancel') : { ok: true, value: cancellation }
     },
+    logout: async signal => {
+      const result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, 'logout', {}, signal)
+      if (!result.ok) return result
+      return parseLogoutResult(result.value) === undefined ? invalidResponse('logout') : { ok: true, value: { state: 'logged-out' } }
+    },
+    revoke: async signal => {
+      const result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, 'revoke', { confirmed: true }, signal)
+      if (!result.ok) return result
+      const revocation = parseRevokeResult(result.value)
+      return revocation === undefined ? invalidResponse('revoke') : { ok: true, value: revocation }
+    },
     completeCallback: async (callbackUrl, signal) => {
       const result = await rpc.call(
         ANTIGRAVITY_AUTH_RPC_CHANNEL,
@@ -86,7 +100,7 @@ export function parseStatusResult(value: unknown): AntigravityStatusView | undef
 
 function parseStatus(value: unknown): AntigravityStatusView | undefined {
   if (!isRecord(value)
-    || !hasExactKeys(value, [
+    || !hasAllowedKeys(value, [
       'pluginId',
       'phase',
       'privateSelfUse',
@@ -94,6 +108,8 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
       'riskAcknowledgementRequired',
       'riskAcknowledged',
       'login',
+      'credential',
+      'revoke',
       'capabilities',
     ])
     || value.pluginId !== 'dsh-antigravity-auth'
@@ -106,6 +122,10 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
 
   const login = parseLoginStatus(value.login)
   if (login === undefined) return undefined
+  const credential = value.credential === undefined ? undefined : parseCredentialStatus(value.credential)
+  if (value.credential !== undefined && credential === undefined) return undefined
+  const revoke = value.revoke === undefined ? undefined : parseRevokeStatus(value.revoke)
+  if (value.revoke !== undefined && revoke === undefined) return undefined
   const seen = new Set<string>()
   const capabilities: CapabilityGateStatus[] = []
   for (const capability of value.capabilities) {
@@ -124,7 +144,39 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
     riskAcknowledgementRequired: true,
     riskAcknowledged: value.riskAcknowledged,
     login,
+    ...(credential === undefined ? {} : { credential }),
+    ...(revoke === undefined ? {} : { revoke }),
     capabilities,
+  }
+}
+
+function parseCredentialStatus(value: unknown): CredentialStatusView | undefined {
+  if (!isRecord(value)
+    || typeof value.state !== 'string'
+    || !isCredentialState(value.state)
+    || typeof value.configured !== 'boolean'
+    || !hasAllowedKeys(value, ['state', 'configured', 'expiresAt', 'lastRefreshAt', 'errorCode'])) return undefined
+  if (value.expiresAt !== undefined && (typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt)))) return undefined
+  if (value.lastRefreshAt !== undefined && (typeof value.lastRefreshAt !== 'string' || !Number.isFinite(Date.parse(value.lastRefreshAt)))) return undefined
+  if (value.errorCode !== undefined && (typeof value.errorCode !== 'string' || !isCredentialErrorCode(value.errorCode))) return undefined
+  return {
+    state: value.state,
+    configured: value.configured,
+    ...(typeof value.expiresAt === 'string' ? { expiresAt: value.expiresAt } : {}),
+    ...(typeof value.lastRefreshAt === 'string' ? { lastRefreshAt: value.lastRefreshAt } : {}),
+    ...(typeof value.errorCode === 'string' ? { errorCode: value.errorCode } : {}),
+  }
+}
+
+function parseRevokeStatus(value: unknown): RevokeStatusView | undefined {
+  if (!isRecord(value)
+    || typeof value.state !== 'string'
+    || !isRevokeState(value.state)
+    || !hasAllowedKeys(value, ['state', 'errorCode'])) return undefined
+  if (value.errorCode !== undefined && (typeof value.errorCode !== 'string' || !isRevokeErrorCode(value.errorCode))) return undefined
+  return {
+    state: value.state,
+    ...(typeof value.errorCode === 'string' ? { errorCode: value.errorCode } : {}),
   }
 }
 
@@ -196,6 +248,26 @@ function parseActionResult(value: unknown): LoginActionResult | undefined {
     phase: value.phase,
     ...(typeof value.errorCode === 'string' ? { errorCode: value.errorCode } : {}),
   }
+}
+
+function parseLogoutResult(value: unknown): { readonly state: 'logged-out' } | undefined {
+  return isRecord(value) && hasExactKeys(value, ['state']) && value.state === 'logged-out'
+    ? { state: 'logged-out' }
+    : undefined
+}
+
+function parseRevokeResult(value: unknown): RevokeActionResult | undefined {
+  if (!isRecord(value) || typeof value.state !== 'string') return undefined
+  if (value.state === 'confirmation-required' || value.state === 'revoked' || value.state === 'logged-out' || value.state === 'superseded') {
+    return hasExactKeys(value, ['state']) ? { state: value.state } : undefined
+  }
+  if (value.state === 'failed'
+    && hasExactKeys(value, ['state', 'errorCode'])
+    && typeof value.errorCode === 'string'
+    && isRevokeErrorCode(value.errorCode)) {
+    return { state: 'failed', errorCode: value.errorCode }
+  }
+  return undefined
 }
 
 function parseCompletionResult(value: unknown): OAuthFlowCompletionResult | undefined {
@@ -284,7 +356,52 @@ function isCapabilityGateState(value: unknown): value is CapabilityGateState {
 }
 
 function isCapabilityReasonCode(value: unknown): value is CapabilityGateReasonCode {
-  return value === 'login-not-implemented' || value === 'gate-not-run'
+  return value === 'login-not-implemented' || value === 'llm-not-implemented' || value === 'gate-not-run'
+}
+
+function isCredentialState(value: unknown): value is CredentialState {
+  return value === 'logged-out'
+    || value === 'logged-in'
+    || value === 'refreshing'
+    || value === 'refresh-failed'
+    || value === 're-login-required'
+}
+
+function isCredentialErrorCode(value: unknown): value is CredentialErrorCode {
+  return value === 'invalid-grant'
+    || value === 'network'
+    || value === 'timeout'
+    || value === 'rate-limited'
+    || value === 'server-error'
+    || value === 'http-error'
+    || value === 'invalid-response'
+    || value === 'conflict'
+    || value === 'storage'
+    || value === 'cancelled'
+}
+
+function isRevokeState(value: unknown): value is RevokeState {
+  return value === 'idle'
+    || value === 'pending'
+    || value === 'confirmation-required'
+    || value === 'revoked'
+    || value === 'logged-out'
+    || value === 'failed'
+    || value === 'superseded'
+}
+
+function isRevokeErrorCode(value: unknown): value is RevokeErrorCode {
+  return value === 'network'
+    || value === 'timeout'
+    || value === 'rate-limited'
+    || value === 'server-error'
+    || value === 'http-error'
+    || value === 'invalid-response'
+    || value === 'storage'
+}
+
+function hasAllowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
+  return Object.keys(value).every(key => allowed.includes(key))
 }
 
 function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
+import type { CredentialState, RevokeState } from '../credential-coordinator.ts'
 import type {
   AntigravityStatusView,
   CapabilityGateReasonCode,
@@ -19,7 +20,7 @@ export interface AntigravityAuthSettingsProps {
 
 type LoadState = 'loading' | 'ready' | 'error'
 
-/** One navigable settings section; no credential or endpoint controls are rendered. */
+/** One navigable settings section; credentials remain Host-only and actions use typed RPC. */
 export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSettingsProps): ReactNode {
   const [status, setStatus] = useState<AntigravityStatusView | null>(null)
   const [loadState, setLoadState] = useState<LoadState>('loading')
@@ -27,6 +28,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
   const [acknowledged, setAcknowledged] = useState(false)
   const [acknowledgeBusy, setAcknowledgeBusy] = useState(false)
   const [loginBusy, setLoginBusy] = useState(false)
+  const [actionBusy, setActionBusy] = useState(false)
   const [resetTick, setResetTick] = useState(0)
 
   useEffect(() => subscribe(() => { setResetTick(value => value + 1) }), [subscribe])
@@ -146,6 +148,44 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
     }
   }, [rpc, t])
 
+  const logout = useCallback(async () => {
+    setActionBusy(true)
+    setError(null)
+    try {
+      const result = await rpc.logout()
+      if (!result.ok) {
+        setError(result.error.message || t('logoutFailed'))
+        return
+      }
+      await load()
+    } catch (cause) {
+      setError(messageOf(cause, t('logoutFailed')))
+    } finally {
+      setActionBusy(false)
+    }
+  }, [load, rpc, t])
+
+  const revoke = useCallback(async () => {
+    const confirm = globalThis.confirm
+    if (typeof confirm === 'function' && !confirm(t('revokeConfirm'))) return
+    setActionBusy(true)
+    setError(null)
+    try {
+      const result = await rpc.revoke()
+      if (!result.ok) {
+        setError(result.error.message || t('revokeFailed'))
+        return
+      }
+      if (result.value.state === 'failed') setError(t('revokeFailed'))
+      if (result.value.state === 'superseded') setError(t('revokeSuperseded'))
+      await load()
+    } catch (cause) {
+      setError(messageOf(cause, t('revokeFailed')))
+    } finally {
+      setActionBusy(false)
+    }
+  }, [load, rpc, t])
+
   return (
     <section data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
       <header>
@@ -204,6 +244,20 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
         {status?.login.configured ? (
           <p role="status">{status.login.projectAvailable ? t('projectAvailable') : t('projectUnavailable')}</p>
         ) : null}
+        {status?.credential === undefined ? null : (
+          <>
+            <p role="status">{credentialStatusText(status.credential.state, t)}</p>
+            {status.credential.configured ? (
+              <p>
+                <button type="button" disabled={actionBusy} onClick={() => { void logout() }}>{t('logout')}</button>{' '}
+                <button type="button" disabled={actionBusy} onClick={() => { void revoke() }}>{t('revoke')}</button>
+              </p>
+            ) : null}
+          </>
+        )}
+        {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
+          <p role="status">{revokeStatusText(status.revoke.state, t)}</p>
+        )}
       </article>
 
       <article>
@@ -246,7 +300,26 @@ function stateLabel(state: CapabilityGateState, t: AntigravityAuthSettingsProps[
 }
 
 function reasonLabel(reason: CapabilityGateReasonCode, t: AntigravityAuthSettingsProps['t']): string {
-  return reason === 'login-not-implemented' ? t('loginNotImplemented') : t('gateNotRun')
+  if (reason === 'login-not-implemented') return t('loginNotImplemented')
+  if (reason === 'llm-not-implemented') return t('llmNotImplemented')
+  return t('gateNotRun')
+}
+
+function credentialStatusText(state: CredentialState, t: AntigravityAuthSettingsProps['t']): string {
+  if (state === 'logged-in') return t('credentialLoggedIn')
+  if (state === 'refreshing') return t('credentialRefreshing')
+  if (state === 'refresh-failed') return t('credentialRefreshFailed')
+  if (state === 're-login-required') return t('credentialReloginRequired')
+  return t('credentialLoggedOut')
+}
+
+function revokeStatusText(state: RevokeState, t: AntigravityAuthSettingsProps['t']): string {
+  if (state === 'pending') return t('revokePending')
+  if (state === 'revoked') return t('revokeSuccess')
+  if (state === 'failed') return t('revokeFailed')
+  if (state === 'superseded') return t('revokeSuperseded')
+  if (state === 'confirmation-required') return t('revokeConfirmationRequired')
+  return t('credentialLoggedOut')
 }
 
 function loginStatusText(

@@ -114,6 +114,8 @@ export interface OAuthFlowStatus {
 export type OAuthFlowCompletionResult = LoginCompletionResult
 
 export interface OAuthFlow {
+  /** Current one-shot flow generation used to fence late commits. */
+  generation(): number
   start(): Promise<LoginStartResult>
   status(): OAuthFlowStatus
   completeCallbackUrl(callbackUrl: string): Promise<OAuthFlowCompletionResult>
@@ -147,6 +149,7 @@ export function createOAuthFlow(options: OAuthFlowOptions = {}): OAuthFlow {
   let pending: PendingFlow | undefined
   let processing: PendingFlow | undefined
   let generation = 0
+  let committingGeneration: number | undefined
   let currentStatus: OAuthFlowStatus = { phase: 'idle' }
   let disposed = false
   let listenerClosing: Promise<void> = Promise.resolve()
@@ -163,6 +166,7 @@ export function createOAuthFlow(options: OAuthFlowOptions = {}): OAuthFlow {
   }
 
   const flow: OAuthFlow = {
+    generation: () => committingGeneration ?? generation,
     start: async () => {
       if (disposed) throw new OAuthFlowError('internal', 'The OAuth flow is unavailable')
       if (pending !== undefined) await cancelPending(pending, 'cancelled')
@@ -319,7 +323,12 @@ export function createOAuthFlow(options: OAuthFlowOptions = {}): OAuthFlow {
       try {
         if (operation.signal.aborted) throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
         candidate.commitStarted = true
-        await commit(token, project, operation.signal)
+        committingGeneration = candidate.generation
+        try {
+          await commit(token, project, operation.signal)
+        } finally {
+          committingGeneration = undefined
+        }
       } catch (error) {
         if (operation.signal.aborted) throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
         throw error instanceof OAuthFlowError ? error : new OAuthFlowError('persistence-failed', 'The login could not be saved')
