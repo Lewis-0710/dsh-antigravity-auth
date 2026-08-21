@@ -15,6 +15,15 @@ This file supplements the workspace-level `AGENTS.md`. The workspace guide remai
 
 The repository and issue tracker are private. Do not publish, change visibility, push, install into a live profile, or run live OAuth/private endpoint probes unless the user explicitly requests that separate action.
 
+## DSH compatibility baseline
+
+- The minimum and tested DSH package baseline is `dsh-v0.1.1-rc.1` (`0.1.1-rc.1` on npm). The upgrade impact source is `../dsh-update-notes/dsh-v0.1.1-rc.1-plugin-impact.md`.
+- DSH peer dependencies use `^0.1.1-rc.1`; development dependencies and the lockfile resolve the exact `0.1.1-rc.1` line. Do not reintroduce `0.1.0-rc.7` or mixed rc.8 transitive peers.
+- A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
+- rc.1 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here. Do not add `dsh-authorization`, PiAiAdapter auth, or session projection work unless a later issue actually consumes those interfaces.
+- Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
+- Credential lifecycle Issue `#5` is already implemented at `dbc8783`. The one-time rc.1 migration Issue `#17` (`[05A]`) is the current active frontier and the only active blocker before project discovery Issue `#6`; it does not reopen or expand the already implemented bootstrap Issue `#3`.
+
 ## Required session startup
 
 For every implementation, review, spec, or ticket command targeting this project:

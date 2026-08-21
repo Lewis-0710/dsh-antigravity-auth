@@ -79,10 +79,26 @@ without modifying DSH core.
 - DeepSeek Harness core, installed packages, user profiles, and generated bundles
   are not modified.
 
+## DSH compatibility
+
+The minimum and tested development baseline is **DSH `0.1.1-rc.1`**. DSH peer
+ranges start at `^0.1.1-rc.1`, while the development graph and lockfile use the
+exact rc.1 packages. A clean install must have no mixed rc.7/rc.8 DSH peers and
+must pass `pnpm peers check` before `pnpm run check`.
+
+The rc.1 credentials/authorization and session-projection additions do not change
+this plugin's current design: credentials remain behind the plugin-owned Host
+modules, the provider uses a custom `LlmAdapter` rather than PiAiAdapter, and the
+public `attributionHeaders()` interface remains the Wire Identity formatter. See
+the official [DSH `v0.1.1-rc.1` release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1)
+and the workspace impact report named `dsh-v0.1.1-rc.1-plugin-impact.md` for the
+upgrade evidence.
+
 ## Development
 
 ```sh
 pnpm install
+pnpm peers check
 pnpm test
 pnpm run check
 ```

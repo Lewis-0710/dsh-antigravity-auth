@@ -65,10 +65,23 @@ HTTP/1.1 framing 的选择（`Content-Length` 或流式 chunked），不修改 D
 - 默认构建和测试不会执行 profile 安装、npm 发布或真实请求。
 - 不修改 DeepSeek Harness core、已安装的 package、用户 profile 或生成的 bundle。
 
+## DSH 兼容性
+
+最低且已经测试的开发基线是 **DSH `0.1.1-rc.1`**。DSH peer range 从
+`^0.1.1-rc.1` 开始，开发依赖和 lockfile 固定使用 rc.1 package。干净安装不能混入
+rc.7/rc.8 DSH peers；必须先通过 `pnpm peers check`，再运行 `pnpm run check`。
+
+rc.1 新增的 credentials/authorization 和 session-projection interface 不改变本插件当前
+设计：凭据继续由插件自有 Host modules 管理，provider 使用自定义 `LlmAdapter` 而不是
+PiAiAdapter，公开 `attributionHeaders()` 仍是 Wire Identity formatter。升级证据见官方
+[DSH `v0.1.1-rc.1` release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1)
+以及 workspace 中的 `dsh-v0.1.1-rc.1-plugin-impact.md` 影响报告。
+
 ## 开发
 
 ```sh
 pnpm install
+pnpm peers check
 pnpm test
 pnpm run check
 ```
