@@ -5,9 +5,14 @@
 ## 当前阶段
 
 本仓库提供一个 Host-only、可离线验证的**单账号 OAuth 登录路径**、**凭据生命周期
-协调器**，以及插件自有的 **Wire Identity（线路身份） seam**。Host 与浏览器入口通过
-仅返回安全值的 loopback RPC 挂载，并展示独立的 Auth/LLM、搜索、图片和视频能力门禁。
-LLM、搜索、图片和视频仍是 `POC 待验证`，本版本不是完整的模型提供方。
+协调器**、只读 **project discovery**，以及插件自有的 **Wire Identity（线路身份）
+seam**。token exchange 后，固定的 `v1internal:loadCodeAssist` probe 必须为当前账号
+返回规范化 project，凭据才会提交。project 验证成功后，插件会启用自有的
+`google-antigravity` LLM adapter、有 grounding 的网页搜索、受限图片生成/编辑、
+配额查询，以及默认关闭的视频理解 POC。Host 与浏览器入口通过仅返回安全值的
+loopback RPC 挂载，并展示独立的 Auth/LLM、搜索、图片和视频能力门禁。project
+验证失败时所有私有能力都会安全禁用。不会执行 onboarding、project 创建，也没有
+hard-coded 或用户提供的 fallback project。
 
 登录路径明确分级：
 
@@ -19,9 +24,13 @@ LLM、搜索、图片和视频仍是 `POC 待验证`，本版本不是完整的�
    返回安全且可区分的错误。
 4. 远程用户可以通过 typed RPC 提交完整 callback URL；Host 仍然只绑定 loopback，也不会
    回显该 URL、code、state 或 token。
-5. Host 注入的 project validator 必须成功，新凭据才会替换已有账号。版本化存储采用
-   原子提交和 owner-only 权限（`0700`/`0600`），只保存单账号允许的长期 refresh credential
-   与元数据；access token 始终留在 Host 内存。
+5. Host 通过统一的 Wire Identity 与 endpoint policy 执行固定的只读
+   `loadCodeAssist` project probe。只接受 authenticated token 返回的规范化 project；空结果
+   是 `project-unavailable`，authentication、forbidden、rate-limit、offline、malformed 与
+   protocol-drift discovery failure 保持可区分的安全状态。
+6. Project validation 必须成功，新凭据才会替换已有账号。版本化存储采用原子提交和
+   owner-only 权限（`0700`/`0600`），只保存单账号允许的长期 refresh credential 与规范化元数据；
+   access token 始终留在 Host 内存。
 
 ## 凭据生命周期
 
@@ -35,10 +44,30 @@ LLM、搜索、图片和视频仍是 `POC 待验证`，本版本不是完整的�
   确认操作；token 放在 form body 中发送，只有成功完成后才清除本地状态。
 - RPC 与设置页会在不携带 token 的前提下展示已登录、刷新中、刷新失败、需要重新登录、已登出
   以及撤销结果状态。
+- status refresh 与 retry 只读取已保存的规范化 project 状态，永远不会调用 onboarding 或创建
+  project；只有新登录会执行只读 discovery probe。
 
 默认 package 检查使用 fake endpoint、确定性的随机数/时钟适配器和内存 store。
 `pnpm test`、`pnpm run check` 与 package smoke test 都不会发起 OAuth 或私有 endpoint 请求。
 只有用户确认风险并打开授权 URL 后，真实登录才会开始。
+
+## 能力包
+
+- **LLM** 通过 DSH 公开的 `LlmAdapter` seam 提供固定模型快照、受限 SSE/JSON 翻译、
+  一次仅限响应首个 delta 前的认证重放；不会进行普通重试。provider 签发的 thinking
+  signature 只会以有界、按 block 对齐的 replay metadata 保存。
+- **搜索** 使用 DSH `WebSearchProvider`，要求 provider 返回 grounding source。只有校验过的
+  HTTP(S) URL、有界标题/摘要和回答文本会跨越结果边界。
+- **图片** 提供 `generate_image` 与 `list_images`。引用只能是当前 session 明确授权的
+  `image:<id>` handle，或经 DSH workspace filesystem admission 的文件。字节由
+  `AttachmentStore` 校验和保存，原始 base64 不进入 session、RPC、日志或浏览器。
+- **配额** 通过 value-safe `usage` RPC 展示五小时及每周窗口的剩余比例和 reset 时间；
+  结果 30 秒内缓存/合并请求，原始 provider 字段、project ID 不会跨边界。
+- **视频** 是默认关闭的 gated POC，只接受 active workspace 内受限的 MP4 文件并返回文本
+  理解结果，不声称支持原生持久化视频 attachment。
+
+搜索、图片和视频分别拥有命名空间化的 Host 设置；浏览器通过公开 `SettingsScope`
+显示开关。只有登录、project 验证和可写设置 scope 都准备好时，开关才可用。
 
 设置页仍明确标记为**非官方 / 实验性**。产品只支持单账号：没有账号数组、切换、轮换、
 quota pool、identity fallback、fingerprint regeneration 或自动 onboarding。

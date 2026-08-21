@@ -106,7 +106,7 @@ export interface CredentialCoordinatorOptions {
 }
 
 export interface CredentialCoordinator {
-  credential(signal?: AbortSignal): Promise<HostCredential | undefined>
+  credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
   replaceFromLogin(credential: HostCredential, record: AntigravityAuthRecord): void
   status(): Promise<CredentialStatusView>
   revokeStatus(): RevokeStatusView
@@ -153,7 +153,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
   const operations = new Set<AbortController>()
 
   const coordinator: CredentialCoordinator = {
-    credential: async signal => {
+    credential: async (signal, credentialOptions) => {
       ensureNotDisposed()
       if (signal?.aborted === true) throw new CredentialOperationError('cancelled')
       const record = await options.store.read()
@@ -163,7 +163,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       }
       observe(record)
       if (state === 're-login-required') return undefined
-      if (cached !== undefined && sameRecord(cached, record) && isFresh(cached.value, now(), refreshLeadMs)) {
+      if (credentialOptions?.forceRefresh !== true && cached !== undefined && sameRecord(cached, record) && isFresh(cached.value, now(), refreshLeadMs)) {
         state = 'logged-in'
         errorCode = undefined
         return await waitForCaller(Promise.resolve(cached.value), signal)

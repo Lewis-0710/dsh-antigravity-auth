@@ -118,6 +118,27 @@ describe('Antigravity bootstrap settings', () => {
     }
   })
 
+  it.each([
+    ['project-authentication-failed', en.projectAuthenticationFailed],
+    ['project-forbidden', en.projectForbidden],
+    ['project-rate-limited', en.projectRateLimited],
+    ['project-offline', en.projectOffline],
+    ['project-malformed', en.projectMalformed],
+    ['project-protocol-drift', en.projectProtocolDrift],
+  ] as const)('renders a safe project discovery state for %s', async (errorCode, copy) => {
+    const { unmount } = render(
+      <AntigravityAuthSettings
+        rpc={rpcFixture({ phase: 'failed', configured: false, projectAvailable: false, errorCode }, true)}
+        t={key => en[key]}
+        subscribe={() => () => {}}
+      />,
+    )
+    expect(await screen.findByText(copy)).toBeTruthy()
+    expect(screen.getAllByText(en.projectUnavailable).length).toBeGreaterThan(0)
+    unmount()
+    document.body.innerHTML = ''
+  })
+
   it('polls Host status while pending so callback completion reaches the settings UI', async () => {
     vi.useFakeTimers()
     const pending: LoginStatusView = {

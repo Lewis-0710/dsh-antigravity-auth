@@ -42,8 +42,14 @@ try {
     './image',
     './video',
     './rpc-contract',
+    './project-context',
     './wire-identity',
     './invariant',
+    './llm-adapter',
+    './private-transport',
+    './replay',
+    './quota',
+    './media-admission',
   ]) {
     const target = manifest.exports?.[key]?.default
     const types = manifest.exports?.[key]?.types
@@ -54,6 +60,18 @@ try {
       const loaded = await import(pathToFileURL(resolve(packageRoot, target)).href)
       if (key === '.' && typeof loaded.createWireIdentity !== 'function') {
         throw new Error('package smoke: root entry has no Wire Identity export')
+      }
+      if (key === './project-context' && typeof loaded.createProjectDiscovery !== 'function') {
+        throw new Error('package smoke: project-context export has no discovery factory')
+      }
+      if (key === './llm-adapter' && typeof loaded.AntigravityAdapter !== 'function') {
+        throw new Error('package smoke: llm-adapter export has no adapter')
+      }
+      if (key === './quota' && typeof loaded.normalizeQuotaResponse !== 'function') {
+        throw new Error('package smoke: quota export has no normalizer')
+      }
+      if (key === './media-admission' && typeof loaded.admitWorkspaceImage !== 'function') {
+        throw new Error('package smoke: media-admission export has no workspace admission')
       }
     }
   }
@@ -87,7 +105,7 @@ try {
     throw new Error('package smoke: client factory did not expose an apply function')
   }
 
-  console.log(`package smoke: ${filename} exposes private Host/client entries, gated rows, Wire Identity, and value-free types`)
+  console.log(`package smoke: ${filename} exposes private Host/client entries, project discovery, gated rows, Wire Identity, and value-free types`)
 } finally {
   await rm(temporary, { recursive: true, force: true })
 }

@@ -9,6 +9,8 @@ import {
   ANTIGRAVITY_REDIRECT_URI,
   ANTIGRAVITY_SCOPES,
 } from '@cortexkit/antigravity-auth-core'
+import { ProjectDiscoveryError, normalizeProjectId } from './project-context.ts'
+import type { ProjectDiscoveryErrorCode } from './project-context.ts'
 import type { LoginCompletionResult, LoginErrorCode, LoginPhase, LoginStartResult } from './login-types.ts'
 
 export const ANTIGRAVITY_CALLBACK_PORT = 51121 as const
@@ -314,11 +316,15 @@ export function createOAuthFlow(options: OAuthFlowOptions = {}): OAuthFlow {
         project = await validateProject(token.accessToken, operation.signal)
       } catch (error) {
         if (operation.signal.aborted) throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
+        if (error instanceof ProjectDiscoveryError) {
+          if (error.code === 'cancelled') throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
+          throw new OAuthFlowError(projectErrorCode(error.code), projectErrorMessage(error.code))
+        }
         throw error instanceof OAuthFlowError ? error : new OAuthFlowError('project-validation-failed', 'Project validation failed')
       }
       if (operation.signal.aborted) throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
       if (project === undefined) throw new OAuthFlowError('project-unavailable', 'No usable project is available for this account')
-      assertProject(project)
+      project = normalizeProject(project)
 
       try {
         if (operation.signal.aborted) throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
@@ -593,10 +599,37 @@ function assertToken(value: OAuthToken): asserts value is OAuthToken {
   }
 }
 
-function assertProject(value: ProjectValidation): asserts value is ProjectValidation {
-  if (!isRecord(value) || typeof value.projectId !== 'string' || !safeCallbackValue(value.projectId)) {
-    throw new OAuthFlowError('project-validation-failed', 'Project validation failed')
-  }
+function normalizeProject(value: ProjectValidation): ProjectValidation {
+  if (!isRecord(value)) throw new OAuthFlowError('project-validation-failed', 'Project validation failed')
+  const projectId = normalizeProjectId(value.projectId)
+  if (projectId === undefined) throw new OAuthFlowError('project-validation-failed', 'Project validation failed')
+  return { projectId, ...(typeof value.email === 'string' ? { email: value.email } : {}) }
+}
+
+function projectErrorCode(code: ProjectDiscoveryErrorCode): Extract<LoginErrorCode,
+  | 'project-authentication-failed'
+  | 'project-forbidden'
+  | 'project-rate-limited'
+  | 'project-offline'
+  | 'project-malformed'
+  | 'project-protocol-drift'
+> {
+  if (code === 'authentication') return 'project-authentication-failed'
+  if (code === 'forbidden') return 'project-forbidden'
+  if (code === 'rate-limited') return 'project-rate-limited'
+  if (code === 'offline') return 'project-offline'
+  if (code === 'malformed') return 'project-malformed'
+  return 'project-protocol-drift'
+}
+
+function projectErrorMessage(code: ProjectDiscoveryErrorCode): string {
+  if (code === 'authentication') return 'The Antigravity project probe requires authentication'
+  if (code === 'forbidden') return 'The Antigravity project probe was forbidden'
+  if (code === 'rate-limited') return 'The Antigravity project probe is rate-limited'
+  if (code === 'offline') return 'The Antigravity project probe is offline'
+  if (code === 'malformed') return 'The Antigravity project response was malformed'
+  if (code === 'protocol-drift') return 'The Antigravity project protocol changed'
+  return 'The Antigravity project probe was cancelled'
 }
 
 function callbackResponse(status: number, outcome: string): LoopbackCallbackResponse {

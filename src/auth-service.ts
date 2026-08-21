@@ -11,6 +11,8 @@ import type {
   OAuthToken,
   ProjectValidation,
 } from './oauth-flow.ts'
+import { createProjectDiscovery } from './project-context.ts'
+import type { ProjectDiscoveryOptions } from './project-context.ts'
 import type {
   AntigravityStatusView,
   BootstrapStatusService,
@@ -20,12 +22,16 @@ import type {
   LoginStatusView,
 } from './status.ts'
 import { createStatusView } from './status.ts'
+import { createQuotaService, type QuotaService, type QuotaServiceOptions } from './quota.ts'
 
 export interface AntigravityAuthServiceOptions {
   readonly store?: AntigravityAuthStore
   readonly storePath?: string
-  readonly flowOptions?: Omit<OAuthFlowOptions, 'commit'>
+  readonly flowOptions?: Omit<OAuthFlowOptions, 'commit' | 'validateProject'>
+  /** Inject transport/identity dependencies only for deterministic Host tests. */
+  readonly projectOptions?: ProjectDiscoveryOptions
   readonly credentialOptions?: Omit<CredentialCoordinatorOptions, 'store'>
+  readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'>
 }
 
 export type { HostCredential } from './credential-coordinator.ts'
@@ -34,9 +40,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly store: AntigravityAuthStore
   private readonly credentials: CredentialCoordinator
   private readonly flow: OAuthFlow
+  private readonly quota: QuotaService
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
+  private readonly statusListeners = new Set<() => void>()
 
   constructor(options: AntigravityAuthServiceOptions = {}) {
     this.store = options.store ?? createAuthStore(options.storePath ?? defaultAuthStorePath())
@@ -44,8 +52,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
       ...options.credentialOptions,
       store: this.store,
     })
+    this.quota = createQuotaService({
+      ...options.quotaOptions,
+      auth: this.credentials,
+    })
+    const projectDiscovery = createProjectDiscovery(options.projectOptions)
     this.flow = createOAuthFlow({
       ...options.flowOptions,
+      validateProject: (accessToken, signal) => projectDiscovery.discover(accessToken, signal),
       commit: (token, project, signal) => this.commitCredential(token, project, signal),
     })
   }
@@ -70,7 +84,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   async acknowledgeRisk(): Promise<RiskAcknowledgementResult> {
     this.riskAcknowledged = true
+    this.notifyStatus()
     return { acknowledged: true }
+  }
+
+  /** Observe value-safe gate changes so capability rows can register without polling secrets. */
+  watchStatus(listener: () => void): () => void {
+    this.statusListeners.add(listener)
+    return () => { this.statusListeners.delete(listener) }
   }
 
   async startLogin(): Promise<LoginStartResult> {
@@ -80,25 +101,35 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const started = await this.flow.start()
     this.activeFlowGeneration = this.flow.generation()
+    this.notifyStatus()
     return started
   }
 
   async completeCallback(callbackUrl: string): Promise<OAuthFlowCompletionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-    return this.flow.completeCallbackUrl(callbackUrl)
+    try {
+      return await this.flow.completeCallbackUrl(callbackUrl)
+    } finally {
+      this.notifyStatus()
+    }
   }
 
   async cancelLogin(): Promise<LoginActionResult> {
     const status = await this.flow.cancel()
     if (status.phase !== 'success') this.activeFlowGeneration = 0
+    this.notifyStatus()
     return {
       phase: status.phase,
       ...(status.errorCode === undefined ? {} : { errorCode: status.errorCode }),
     }
   }
 
-  async credential(signal?: AbortSignal): Promise<HostCredential | undefined> {
-    return await this.credentials.credential(signal)
+  async credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined> {
+    return await this.credentials.credential(signal, options)
+  }
+
+  async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {
+    return await this.quota.refresh(signal, force)
   }
 
   async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
@@ -106,7 +137,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.activeFlowGeneration = 0
     await this.flow.cancel()
     try {
-      return await this.credentials.logout()
+      const result = await this.credentials.logout()
+      this.notifyStatus()
+      return result
     } catch {
       throw new OAuthFlowError('persistence-failed', 'The local Antigravity credential could not be cleared')
     }
@@ -114,14 +147,17 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-    return await this.credentials.revoke(confirmed, signal)
+    const result = await this.credentials.revoke(confirmed, signal)
+    this.notifyStatus()
+    return result
   }
 
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
     this.activeFlowGeneration = 0
-    await Promise.all([this.flow.dispose(), this.credentials.dispose()])
+    this.statusListeners.clear()
+    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose()])
   }
 
   private async commitCredential(token: OAuthToken, project: ProjectValidation, signal: AbortSignal): Promise<void> {
@@ -150,6 +186,12 @@ export class AntigravityAuthService implements BootstrapStatusService {
       expiresAt: token.expiresAt,
       projectId: project.projectId,
     }, committed)
+  }
+
+  private notifyStatus(): void {
+    for (const listener of this.statusListeners) {
+      try { listener() } catch { /* observer failures cannot change auth state */ }
+    }
   }
 
   private async readRecord(): Promise<AntigravityAuthRecord | undefined> {

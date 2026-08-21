@@ -9,6 +9,7 @@ export default defineConfig({
     alias: {
       'dsh-antigravity-auth/wire-identity': resolve(projectRoot, 'src/wire-identity.ts'),
       'dsh-antigravity-auth/invariant': resolve(projectRoot, 'src/invariant.ts'),
+      'dsh-antigravity-auth/project-context': resolve(projectRoot, 'src/project-context.ts'),
       'dsh-antigravity-auth': resolve(projectRoot, 'src/index.ts'),
     },
   },

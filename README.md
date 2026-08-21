@@ -5,10 +5,16 @@ Private, single-account, unofficial Antigravity integration experiments for Deep
 ## Current phase
 
 This repository ships a Host-only, offline-verifiable **single-account OAuth login
-path** and **credential lifecycle coordinator** plus the plugin-owned **Wire Identity**
-seam. The Host and browser entries mount through a value-safe loopback RPC and
-render independently addressable Auth/LLM, Search, Image, and Video gate rows. LLM,
-Search, Image, and Video remain `POC pending`; this is not a complete model provider.
+path**, **credential lifecycle coordinator**, read-only **project discovery**, and the
+plugin-owned **Wire Identity** seam. After token exchange, the fixed
+`v1internal:loadCodeAssist` probe must return a normalized project for that account
+before the credential is committed. A validated project enables the plugin-owned
+`google-antigravity` LLM adapter, grounded Web Search provider, bounded image
+generation/editing tools, quota/usage query, and a disabled-by-default video
+understanding POC. The Host and browser entries mount through value-safe loopback RPC
+and render independently addressable Auth/LLM, Search, Image, and Video rows. A failed
+project gate disables every private capability. No onboarding, project creation,
+hard-coded fallback, or user-supplied fallback is used.
 
 The login path is deliberately gated:
 
@@ -22,10 +28,15 @@ The login path is deliberately gated:
    duplicate, denied, expired, cancelled, or conflicting flows.
 4. Remote users may submit a complete callback URL through the typed RPC; the Host
    still binds only loopback and never echoes that URL, code, state, or token.
-5. A Host-injected project validator must succeed before the new credential replaces
-   the existing account. The versioned store is atomic and owner-only (`0700`/
-   `0600`); it contains only the single account's long-lived refresh credential and
-   allowed metadata. Access tokens remain Host memory.
+5. The Host performs the fixed, read-only `loadCodeAssist` project probe through the
+   centralized Wire Identity and endpoint policy. It accepts only a normalized project
+   returned for the authenticated token; an empty result is `project-unavailable`, and
+   authentication, forbidden, rate-limit, offline, malformed, and protocol-drift
+   failures remain distinct safe states.
+6. Project validation must succeed before the new credential replaces the existing
+   account. The versioned store is atomic and owner-only (`0700`/`0600`); it contains
+   only the single account's long-lived refresh credential and allowed normalized
+   metadata. Access tokens remain Host memory.
 
 ## Credential lifecycle
 
@@ -41,11 +52,39 @@ The login path is deliberately gated:
   body and local state is cleared only after successful completion.
 - RPC and settings status expose logged-in, refreshing, refresh-failed, re-login-required,
   logged-out, and revoke-result states without token material.
+- Status refresh and retry read the stored normalized project state; they never invoke
+  onboarding or project creation. A new login is the only path that performs the
+  read-only discovery probe.
 
 The default package checks use fake endpoints, deterministic adapters, and an
 in-memory store. No OAuth or private endpoint request is made by `pnpm test`,
 `pnpm run check`, or the package smoke test. A real login starts only after a user
 acknowledges the warning and opens the authorization URL.
+
+## Capability bundle
+
+- **LLM** uses the public DSH `LlmAdapter` seam, a pinned community model snapshot,
+  bounded SSE/JSON translation, one pre-delta authentication replay, and no normal
+  retries. Provider-issued thinking signatures are retained only as bounded,
+  block-aligned replay metadata.
+- **Search** registers DSH's `WebSearchProvider` seam and requires provider grounding
+  sources. Only validated HTTP(S) source URLs, bounded titles/snippets, and answer
+  text cross the result boundary.
+- **Image** exposes `generate_image` and `list_images`. References may be an
+  explicitly authorized session handle (`image:<id>`) or a file admitted through the
+  DSH workspace filesystem. Bytes are validated and saved by `AttachmentStore`; raw
+  media base64 never enters session text, RPC, logs, or the browser.
+- **Quota** exposes normalized five-hour and weekly remaining fractions and reset
+  timestamps through a value-safe `usage` RPC. Results are cached/coalesced for 30
+  seconds, have bounded transport lifetimes, and never expose project IDs or raw
+  provider quota fields.
+- **Video** is a gated proof of concept, disabled by default. It accepts only a
+  bounded MP4 selected inside the active workspace and returns text understanding;
+  it does not claim native durable video attachment support.
+
+Search, Image, and Video each own a namespaced Host settings section and the browser
+settings card uses the public `SettingsScope` seam. Toggles are disabled until login,
+project validation, and a writable settings scope are all ready.
 
 The settings section remains explicitly **Unofficial / Experimental**. This is
 single-account only: there are no account arrays, switching, rotation, quota pools,

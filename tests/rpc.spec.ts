@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   createAntigravityAuthRpcClient,
   parseStatusResult,
+  parseUsageResult,
 } from '../src/rpc-contract.ts'
 import { handleAntigravityAuthRpc } from '../src/rpc.ts'
 import { createMemoryAuthStore } from '../src/auth-store.ts'
@@ -124,6 +125,40 @@ describe('Antigravity login RPC', () => {
     }
     expect(status).not.toHaveBeenCalled()
     await service.dispose()
+  })
+
+  it.each([
+    'project-unavailable',
+    'project-authentication-failed',
+    'project-forbidden',
+    'project-rate-limited',
+    'project-offline',
+    'project-malformed',
+    'project-protocol-drift',
+  ] as const)('disables every private capability for project discovery state %s', errorCode => {
+    const status = createStatusView(false, {
+      phase: 'failed',
+      configured: false,
+      projectAvailable: false,
+      errorCode,
+    })
+    expect(status.capabilities).toHaveLength(4)
+    expect(status.capabilities.every(capability => (
+      capability.state === 'disabled' && capability.reasonCode === 'project-unavailable'
+    ))).toBe(true)
+    expect(parseStatusResult({ status })).toMatchObject({ capabilities: status.capabilities })
+  })
+
+  it('validates the browser response as a closed, value-safe quota schema', () => {
+    const valid = {
+      state: 'available',
+      checkedAt: '2030-01-01T00:00:00.000Z',
+      groups: [{ group: 'gemini', modelCount: 2, windows: [{ window: '5h', remainingFraction: 0.5, resetTime: '2030-01-02T00:00:00.000Z' }] }],
+    }
+    expect(parseUsageResult(valid)).toEqual(valid)
+    expect(parseUsageResult({ ...valid, leaked: 'value' })).toBeUndefined()
+    expect(parseUsageResult({ state: 'available' })).toBeUndefined()
+    expect(parseUsageResult({ state: 'available', groups: [{ group: 'gemini', modelCount: 2, windows: [{ window: '5h', remainingFraction: 2, resetTime: '2030-01-02T00:00:00.000Z' }] }] })).toBeUndefined()
   })
 
   it('validates the browser response as a closed, value-free status schema', () => {

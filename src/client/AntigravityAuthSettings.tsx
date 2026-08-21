@@ -1,14 +1,20 @@
 /** Settings shell for value-safe Antigravity login status. */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
+import type { QuotaStatusView } from '../quota.ts'
+import type { AntigravitySearchSettings } from '../search.ts'
+import type { AntigravityImageSettings } from '../image.ts'
+import type { AntigravityVideoSettings } from '../video.ts'
 import type { CredentialState, RevokeState } from '../credential-coordinator.ts'
 import type {
   AntigravityStatusView,
   CapabilityGateReasonCode,
   CapabilityGateState,
   CapabilityRowId,
+  LoginErrorCode,
 } from '../status.ts'
 import type { AntigravityAuthKey } from './locales.ts'
 
@@ -16,13 +22,33 @@ export interface AntigravityAuthSettingsProps {
   rpc: AntigravityAuthRpcClient
   t: (key: AntigravityAuthKey) => string
   subscribe: (listener: () => void) => () => void
+  searchScope?: SettingsScope<AntigravitySearchSettings>
+  imageScope?: SettingsScope<AntigravityImageSettings>
+  videoScope?: SettingsScope<AntigravityVideoSettings>
 }
 
 type LoadState = 'loading' | 'ready' | 'error'
+type BooleanSettings = { readonly enabled: boolean }
+type SettingsSnapshot = ReturnType<SettingsScope<BooleanSettings>['getSnapshot']>
+const EMPTY_SETTINGS_SNAPSHOT: SettingsSnapshot = { status: 'unavailable', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'memory' }
+
+function useCapabilitySettings<T extends BooleanSettings>(scope: SettingsScope<T> | undefined): SettingsSnapshot & { readonly value: T | undefined } {
+  return useSyncExternalStore(
+    scope?.subscribe ?? (() => () => {}),
+    scope === undefined ? () => EMPTY_SETTINGS_SNAPSHOT : () => scope.getSnapshot(),
+    () => EMPTY_SETTINGS_SNAPSHOT,
+  ) as SettingsSnapshot & { readonly value: T | undefined }
+}
 
 /** One navigable settings section; credentials remain Host-only and actions use typed RPC. */
-export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSettingsProps): ReactNode {
+export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageScope, videoScope }: AntigravityAuthSettingsProps): ReactNode {
   const [status, setStatus] = useState<AntigravityStatusView | null>(null)
+  const searchSettings = useCapabilitySettings(searchScope)
+  const imageSettings = useCapabilitySettings(imageScope)
+  const videoSettings = useCapabilitySettings(videoScope)
+  const [quota, setQuota] = useState<QuotaStatusView | null>(null)
+  const [quotaBusy, setQuotaBusy] = useState(false)
+  const [quotaError, setQuotaError] = useState<string | null>(null)
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [error, setError] = useState<string | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
@@ -53,6 +79,36 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
       setError(messageOf(cause, t('statusFailed')))
     }
   }, [rpc, t])
+
+  const loadQuota = useCallback(async (force = false, signal?: AbortSignal) => {
+    if (rpc.usage === undefined) return
+    setQuotaBusy(true)
+    setQuotaError(null)
+    try {
+      const result = await rpc.usage(signal, force)
+      if (signal?.aborted === true) return
+      if (!result.ok) {
+        setQuotaError(result.error.message || t('quotaFailed'))
+        return
+      }
+      setQuota(result.value)
+    } catch (cause) {
+      if (signal?.aborted === true) return
+      setQuotaError(messageOf(cause, t('quotaFailed')))
+    } finally {
+      setQuotaBusy(false)
+    }
+  }, [rpc, t])
+
+  useEffect(() => {
+    if (status?.login.projectAvailable !== true || rpc.usage === undefined) {
+      setQuota(null)
+      return
+    }
+    const controller = new AbortController()
+    void loadQuota(false, controller.signal)
+    return () => controller.abort()
+  }, [loadQuota, rpc.usage, status?.login.projectAvailable, resetTick])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -186,6 +242,8 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
     }
   }, [load, rpc, t])
 
+  const projectError = projectErrorText(status?.login.errorCode, t)
+
   return (
     <section data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
       <header>
@@ -235,6 +293,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
         {status?.login.phase === 'expired' ? <p role="alert">{t('loginExpired')}</p> : null}
         {status?.login.phase === 'port-conflict' ? <p role="alert">{t('loginPortConflict')}</p> : null}
         {status?.login.phase === 'failed' ? <p role="alert">{t('loginFailed')}</p> : null}
+        {projectError === undefined ? null : <p role="alert">{projectError}</p>}
         {status?.login.maskedEmail === undefined ? null : (
           <p>{t('account')}: <code>{status.login.maskedEmail}</code></p>
         )}
@@ -281,8 +340,117 @@ export function AntigravityAuthSettings({ rpc, t, subscribe }: AntigravityAuthSe
           </ul>
         )}
       </article>
+
+      <article aria-labelledby="antigravity-capability-settings-title">
+        <h2 id="antigravity-capability-settings-title">{t('settingsTitle')}</h2>
+        <CapabilityToggle
+          label={t('toggleSearch')}
+          snapshot={searchSettings}
+          available={capabilityAvailable(status, 'search')}
+          unavailableText={t('settingsUnavailable')}
+          onSet={value => searchScope?.set('enabled', value) ?? Promise.resolve()}
+        />
+        <CapabilityToggle
+          label={t('toggleImage')}
+          snapshot={imageSettings}
+          available={capabilityAvailable(status, 'image')}
+          unavailableText={t('settingsUnavailable')}
+          onSet={value => imageScope?.set('enabled', value) ?? Promise.resolve()}
+        />
+        <CapabilityToggle
+          label={t('toggleVideo')}
+          snapshot={videoSettings}
+          available={capabilityAvailable(status, 'video')}
+          unavailableText={t('settingsUnavailable')}
+          onSet={value => videoScope?.set('enabled', value) ?? Promise.resolve()}
+        />
+      </article>
+
+      <QuotaCard quota={quota} busy={quotaBusy} error={quotaError} onRefresh={() => { void loadQuota(true) }} t={t} />
     </section>
   )
+}
+
+function capabilityAvailable(status: AntigravityStatusView | null, id: CapabilityRowId): boolean {
+  return status?.login.projectAvailable === true && status.capabilities.some(capability => capability.id === id && capability.state === 'available')
+}
+
+function CapabilityToggle({
+  label,
+  snapshot,
+  available,
+  unavailableText,
+  onSet,
+}: {
+  readonly label: string
+  readonly snapshot: SettingsSnapshot
+  readonly available: boolean
+  readonly unavailableText: string
+  readonly onSet: (value: boolean) => Promise<void>
+}): ReactNode {
+  const [busy, setBusy] = useState(false)
+  const [writeError, setWriteError] = useState<string | null>(null)
+  const value = snapshot.value?.enabled ?? false
+  const disabled = !available || snapshot.status !== 'ready' || !snapshot.writable || busy
+  const change = async (next: boolean): Promise<void> => {
+    setBusy(true)
+    setWriteError(null)
+    try { await onSet(next) } catch (error) { setWriteError(messageOf(error, 'Settings write failed')) } finally { setBusy(false) }
+  }
+  return (
+    <div data-settings-toggle={label}>
+      <label>
+        <input type="checkbox" checked={value} disabled={disabled} onChange={event => { void change(event.target.checked) }} />
+        {label}
+      </label>
+      {snapshot.status !== 'ready' || !snapshot.writable || !available ? <small>{unavailableText}</small> : null}
+      {writeError === null ? null : <p role="alert">{writeError}</p>}
+    </div>
+  )
+}
+
+function QuotaCard({
+  quota,
+  busy,
+  error,
+  onRefresh,
+  t,
+}: {
+  readonly quota: QuotaStatusView | null
+  readonly busy: boolean
+  readonly error: string | null
+  readonly onRefresh: () => void
+  readonly t: AntigravityAuthSettingsProps['t']
+}): ReactNode {
+  const state = quota?.state ?? 'unknown'
+  return (
+    <article aria-labelledby="antigravity-quota-title">
+      <h2 id="antigravity-quota-title">{t('quotaTitle')}</h2>
+      <p role="status">{quotaStateLabel(state, t)}</p>
+      {quota?.state === 'available' && quota.groups !== undefined ? (
+        <ul>
+          {quota.groups.flatMap(group => group.windows.map(window => (
+            <li key={`${group.group}-${window.window}`}>
+              {window.window === '5h' ? t('quotaFiveHour') : t('quotaWeekly')}: {Math.round(window.remainingFraction * 100)}% · {window.resetTime}
+            </li>
+          )))}
+        </ul>
+      ) : null}
+      {error === null ? null : <p role="alert">{error}</p>}
+      <button type="button" disabled={busy} onClick={onRefresh}>{busy ? t('quotaLoading') : t('quotaRefresh')}</button>
+    </article>
+  )
+}
+
+function quotaStateLabel(state: QuotaStatusView['state'] | 'unknown', t: AntigravityAuthSettingsProps['t']): string {
+  if (state === 'available') return t('quotaAvailable')
+  if (state === 'unauthenticated') return t('quotaUnauthenticated')
+  if (state === 'rate-limited') return t('quotaRateLimited')
+  if (state === 'offline') return t('quotaOffline')
+  if (state === 'timeout') return t('quotaOffline')
+  if (state === 'protocol-drift') return t('quotaProtocolDrift')
+  if (state === 'forbidden') return t('quotaForbidden')
+  return t('quotaUnknown')
 }
 
 function capabilityLabel(id: CapabilityRowId, t: AntigravityAuthSettingsProps['t']): string {
@@ -302,7 +470,23 @@ function stateLabel(state: CapabilityGateState, t: AntigravityAuthSettingsProps[
 function reasonLabel(reason: CapabilityGateReasonCode, t: AntigravityAuthSettingsProps['t']): string {
   if (reason === 'login-not-implemented') return t('loginNotImplemented')
   if (reason === 'llm-not-implemented') return t('llmNotImplemented')
+  if (reason === 'project-unavailable') return t('projectUnavailable')
+  if (reason === 'capability-ready') return t('available')
   return t('gateNotRun')
+}
+
+function projectErrorText(
+  errorCode: LoginErrorCode | undefined,
+  t: AntigravityAuthSettingsProps['t'],
+): string | undefined {
+  if (errorCode === 'project-unavailable') return t('projectUnavailable')
+  if (errorCode === 'project-authentication-failed') return t('projectAuthenticationFailed')
+  if (errorCode === 'project-forbidden') return t('projectForbidden')
+  if (errorCode === 'project-rate-limited') return t('projectRateLimited')
+  if (errorCode === 'project-offline') return t('projectOffline')
+  if (errorCode === 'project-malformed') return t('projectMalformed')
+  if (errorCode === 'project-protocol-drift') return t('projectProtocolDrift')
+  return undefined
 }
 
 function credentialStatusText(state: CredentialState, t: AntigravityAuthSettingsProps['t']): string {

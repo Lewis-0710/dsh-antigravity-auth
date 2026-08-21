@@ -16,6 +16,7 @@ import type {
 } from './status.ts'
 import type { OAuthFlowCompletionResult } from './oauth-flow.ts'
 import type { CredentialErrorCode, CredentialState, CredentialStatusView, RevokeActionResult, RevokeErrorCode, RevokeState, RevokeStatusView } from './credential-coordinator.ts'
+import type { QuotaGroupView, QuotaState, QuotaStatusView, QuotaWindowKind } from './quota.ts'
 
 export const ANTIGRAVITY_AUTH_RPC_CHANNEL = '/antigravity-auth' as const
 
@@ -27,6 +28,7 @@ export interface AntigravityAuthRpcClient {
   logout(signal?: AbortSignal): Promise<RpcResult<{ state: 'logged-out' }>>
   revoke(signal?: AbortSignal): Promise<RpcResult<RevokeActionResult>>
   completeCallback(callbackUrl: string, signal?: AbortSignal): Promise<RpcResult<OAuthFlowCompletionResult>>
+  usage?(signal?: AbortSignal, force?: boolean): Promise<RpcResult<QuotaStatusView>>
 }
 
 export interface AntigravityAuthConnectionRpc {
@@ -89,7 +91,38 @@ export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc
       const completion = parseCompletionResult(result.value)
       return completion === undefined ? invalidResponse('complete-callback') : { ok: true, value: completion }
     },
+    usage: async (signal, force = false) => {
+      const result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, 'usage', { force }, signal)
+      if (!result.ok) return result
+      const usage = parseUsageResult(result.value)
+      return usage === undefined ? invalidResponse('usage') : { ok: true, value: usage }
+    },
   }
+}
+
+/** Parse a value-safe, normalized quota envelope received by the browser. */
+export function parseUsageResult(value: unknown): QuotaStatusView | undefined {
+  if (!isRecord(value) || !hasExactKeys(value, ['state', ...(value.checkedAt === undefined ? [] : ['checkedAt']), ...(value.groups === undefined ? [] : ['groups'])])) return undefined
+  if (!isQuotaState(value.state)) return undefined
+  if (value.checkedAt !== undefined && !isIsoTime(value.checkedAt)) return undefined
+  if (value.state === 'available' && value.groups === undefined) return undefined
+  if (value.groups !== undefined) {
+    if (!Array.isArray(value.groups) || value.groups.length === 0) return undefined
+    const groups: QuotaGroupView[] = []
+    for (const rawGroup of value.groups) {
+      if (!isRecord(rawGroup) || !hasExactKeys(rawGroup, ['group', 'modelCount', 'windows']) || (rawGroup.group !== 'gemini' && rawGroup.group !== 'non-gemini') || !Number.isSafeInteger(rawGroup.modelCount) || (rawGroup.modelCount as number) < 0 || !Array.isArray(rawGroup.windows)) return undefined
+      const modelCount = rawGroup.modelCount as number
+      if (rawGroup.windows.length === 0) return undefined
+      const windows: Array<{ window: QuotaWindowKind; remainingFraction: number; resetTime: string }> = []
+      for (const rawWindow of rawGroup.windows) {
+        if (!isRecord(rawWindow) || !hasExactKeys(rawWindow, ['window', 'remainingFraction', 'resetTime']) || (rawWindow.window !== '5h' && rawWindow.window !== 'weekly') || typeof rawWindow.remainingFraction !== 'number' || !Number.isFinite(rawWindow.remainingFraction) || rawWindow.remainingFraction < 0 || rawWindow.remainingFraction > 1 || !isIsoTime(rawWindow.resetTime)) return undefined
+        windows.push({ window: rawWindow.window, remainingFraction: rawWindow.remainingFraction, resetTime: rawWindow.resetTime })
+      }
+      groups.push({ group: rawGroup.group, modelCount, windows })
+    }
+    return { state: value.state, ...(typeof value.checkedAt === 'string' ? { checkedAt: value.checkedAt } : {}), groups }
+  }
+  return { state: value.state, ...(typeof value.checkedAt === 'string' ? { checkedAt: value.checkedAt } : {}) }
 }
 
 /** Parse the closed status envelope received by the browser. */
@@ -336,12 +369,26 @@ function isLoginErrorCode(value: unknown): value is LoginErrorCode {
     || value === 'port-conflict'
     || value === 'token-exchange-failed'
     || value === 'project-unavailable'
+    || value === 'project-authentication-failed'
+    || value === 'project-forbidden'
+    || value === 'project-rate-limited'
+    || value === 'project-offline'
+    || value === 'project-malformed'
+    || value === 'project-protocol-drift'
     || value === 'project-validation-failed'
     || value === 'persistence-failed'
     || value === 'credential-conflict'
     || value === 'invalid-callback-url'
     || value === 'risk-acknowledgement-required'
     || value === 'internal'
+}
+
+function isQuotaState(value: unknown): value is QuotaState {
+  return value === 'available' || value === 'unauthenticated' || value === 'forbidden' || value === 'rate-limited' || value === 'offline' || value === 'timeout' || value === 'protocol-drift'
+}
+
+function isIsoTime(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 64 && Number.isFinite(Date.parse(value))
 }
 
 function isCapabilityRowId(value: unknown): value is CapabilityRowId {
@@ -356,7 +403,11 @@ function isCapabilityGateState(value: unknown): value is CapabilityGateState {
 }
 
 function isCapabilityReasonCode(value: unknown): value is CapabilityGateReasonCode {
-  return value === 'login-not-implemented' || value === 'llm-not-implemented' || value === 'gate-not-run'
+  return value === 'login-not-implemented'
+    || value === 'llm-not-implemented'
+    || value === 'gate-not-run'
+    || value === 'project-unavailable'
+    || value === 'capability-ready'
 }
 
 function isCredentialState(value: unknown): value is CredentialState {

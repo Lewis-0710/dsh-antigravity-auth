@@ -4,12 +4,13 @@ import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { OAuthFlowError } from './oauth-flow.ts'
 import { CredentialOperationError, credentialErrorMessage } from './credential-coordinator.ts'
 import type { BootstrapStatusService } from './status.ts'
+import type { QuotaStatusView } from './quota.ts'
 
 export { ANTIGRAVITY_AUTH_RPC_CHANNEL } from './rpc-contract.ts'
 
 /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
 export async function handleAntigravityAuthRpc(
-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'completeCallback' | 'logout' | 'revoke'>,
+  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'completeCallback' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -20,6 +21,11 @@ export async function handleAntigravityAuthRpc(
     if (endpoint === 'status') {
       if (!isEmptyRecord(payload)) return badRequest('status expects an empty payload')
       return { ok: true, value: { status: await service.status() } }
+    }
+    if (endpoint === 'usage') {
+      if (!isUsagePayload(payload)) return badRequest('usage expects {} or { force: boolean }')
+      if (service.usage === undefined) return { ok: true, value: { state: 'protocol-drift' as const } }
+      return { ok: true, value: await service.usage(signal, payload.force) }
     }
     if (endpoint === 'acknowledge-risk') {
       if (!isAcknowledgement(payload)) return badRequest('acknowledge-risk expects { acknowledge: true }')
@@ -92,6 +98,12 @@ function messageFor(code: string): string {
   if (code === 'cancelled') return 'The OAuth login was cancelled'
   if (code === 'no-pending-flow') return 'There is no pending OAuth login'
   if (code === 'project-unavailable') return 'No usable project is available for this account'
+  if (code === 'project-authentication-failed') return 'The Antigravity project probe requires authentication'
+  if (code === 'project-forbidden') return 'The Antigravity project probe was forbidden'
+  if (code === 'project-rate-limited') return 'The Antigravity project probe is rate-limited'
+  if (code === 'project-offline') return 'The Antigravity project probe is offline'
+  if (code === 'project-malformed') return 'The Antigravity project response was malformed'
+  if (code === 'project-protocol-drift') return 'The Antigravity project protocol changed'
   if (code === 'project-validation-failed') return 'Project validation failed'
   if (code === 'credential-conflict') return 'The login changed while it was completing'
   if (code === 'persistence-failed') return 'The login could not be saved'
@@ -102,6 +114,12 @@ function messageFor(code: string): string {
 
 function isEmptyRecord(value: unknown): value is Record<string, never> {
   return isRecord(value) && Object.keys(value).length === 0
+}
+
+function isUsagePayload(value: unknown): value is { force?: boolean } {
+  return isRecord(value)
+    && Object.keys(value).every(key => key === 'force')
+    && (value.force === undefined || typeof value.force === 'boolean')
 }
 
 function isAcknowledgement(value: unknown): value is { acknowledge: true } {

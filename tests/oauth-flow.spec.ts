@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { ANTIGRAVITY_CLIENT_ID } from '@cortexkit/antigravity-auth-core'
 import { createGoogleTokenExchanger, createOAuthFlow } from '../src/oauth-flow.ts'
 import type { LoopbackCallbackHandler } from '../src/oauth-flow.ts'
+import { ProjectDiscoveryError } from '../src/project-context.ts'
 
 function deterministicRandomBytes(size: number): Uint8Array {
   return Uint8Array.from({ length: size }, (_, index) => (index + 1) & 0xff)
@@ -240,6 +241,31 @@ describe('Antigravity OAuth flow', () => {
     })
     await expect(conflict.start()).rejects.toMatchObject({ code: 'port-conflict' })
     expect(conflict.status()).toMatchObject({ phase: 'port-conflict', errorCode: 'port-conflict' })
+  })
+
+  it.each([
+    ['authentication', 'project-authentication-failed'],
+    ['forbidden', 'project-forbidden'],
+    ['rate-limited', 'project-rate-limited'],
+    ['offline', 'project-offline'],
+    ['malformed', 'project-malformed'],
+    ['protocol-drift', 'project-protocol-drift'],
+  ] as const)('keeps project discovery failure %s distinct', async (discoveryCode, loginCode) => {
+    const flow = createOAuthFlow({
+      randomBytes: deterministicRandomBytes,
+      listenerFactory: { listen: vi.fn(async () => ({ close: vi.fn(async () => {}) })) },
+      exchangeCode: vi.fn(async () => ({ accessToken: 'access', refreshToken: 'refresh', expiresAt: 9_000 })),
+      validateProject: vi.fn(async () => { throw new ProjectDiscoveryError(discoveryCode) }),
+      commit: vi.fn(),
+    })
+    const started = await flow.start()
+    const state = new URL(started.authorizationUrl).searchParams.get('state')
+
+    await expect(flow.completeCallbackUrl(`http://localhost:51121/oauth-callback?state=${state}&code=code`)).resolves.toEqual({
+      completed: false,
+      phase: 'failed',
+      errorCode: loginCode,
+    })
   })
 
   it('sends the matching PKCE verifier to the fake token endpoint and never echoes a failed response body', async () => {

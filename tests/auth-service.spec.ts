@@ -22,6 +22,9 @@ describe('Antigravity auth service', () => {
     const fixture = listenerFixture()
     const service = createAntigravityAuthService({
       store,
+      projectOptions: {
+        fetchImpl: vi.fn(async () => new Response(JSON.stringify({ cloudaicompanionProject: { id: 'project-secret' } }))),
+      },
       flowOptions: {
         randomBytes: size => Uint8Array.from({ length: size }, (_, index) => index + 1),
         listenerFactory: fixture.listenerFactory,
@@ -31,7 +34,6 @@ describe('Antigravity auth service', () => {
           expiresAt: 9_000,
           email: 'alice@example.com',
         })),
-        validateProject: vi.fn(async () => ({ projectId: 'project-secret' })),
       },
     })
 
@@ -56,16 +58,55 @@ describe('Antigravity auth service', () => {
     await service.dispose()
   })
 
+  it('uses the default read-only project probe before replacing a credential', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    const fixture = listenerFixture()
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.method).toBe('POST')
+      expect(String(init?.body)).not.toContain('onboardUser')
+      return new Response(JSON.stringify({ cloudaicompanionProject: { id: 'discovered-project' } }))
+    })
+    const service = createAntigravityAuthService({
+      store,
+      projectOptions: { fetchImpl },
+      flowOptions: {
+        randomBytes: size => Uint8Array.from({ length: size }, (_, index) => index + 1),
+        listenerFactory: fixture.listenerFactory,
+        exchangeCode: vi.fn(async () => ({
+          accessToken: 'access-secret',
+          refreshToken: 'refresh-secret',
+          expiresAt: 9_000,
+        })),
+      },
+    })
+    await service.acknowledgeRisk()
+    const started = await service.startLogin()
+    const state = new URL(started.authorizationUrl).searchParams.get('state')
+
+    await expect(service.completeCallback(`http://localhost:51121/oauth-callback?state=${state}&code=code`)).resolves.toMatchObject({
+      completed: true,
+      phase: 'success',
+    })
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    await expect(store.read()).resolves.toMatchObject({ projectId: 'discovered-project', refreshToken: 'refresh-secret' })
+    await service.dispose()
+  })
+
   it('preserves the existing single-account record when project validation fails', async () => {
     const store = createMemoryAuthStore(undefined, { now: () => 3_000 })
     await store.commit({ refreshToken: 'old-refresh', projectId: 'old-project', email: 'o***@example.com' })
     const fixture = listenerFixture()
     const service = createAntigravityAuthService({
       store,
+      projectOptions: {
+        fetchImpl: vi.fn(async () => new Response(JSON.stringify({ currentTier: { id: 'free' } }))),
+      },
+      credentialOptions: {
+        refreshToken: vi.fn(async () => ({ accessToken: 'old-access', expiresAt: 9_000 })),
+      },
       flowOptions: {
         listenerFactory: fixture.listenerFactory,
         exchangeCode: vi.fn(async () => ({ accessToken: 'new-access', refreshToken: 'new-refresh', expiresAt: 9_000 })),
-        validateProject: vi.fn(async () => undefined),
       },
     })
     await service.acknowledgeRisk()
@@ -78,6 +119,8 @@ describe('Antigravity auth service', () => {
       errorCode: 'project-unavailable',
     })
     expect(await store.read()).toMatchObject({ refreshToken: 'old-refresh', projectId: 'old-project' })
+    await expect(service.credential()).resolves.toMatchObject({ accessToken: 'old-access', projectId: 'old-project' })
+    await expect(service.status()).resolves.toMatchObject({ login: { configured: true, projectAvailable: true } })
     await service.dispose()
   })
 })
