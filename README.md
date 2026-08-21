@@ -4,10 +4,21 @@ Private, single-account, unofficial Antigravity integration experiments for Deep
 
 ## Current phase
 
-This repository currently contains only the plugin-owned **Wire Identity** seam.
-It is not a complete Antigravity login or model provider and does not auto-mount
-any capability row. Later OAuth, LLM, Search, Image, Video, and Usage work must
-pass separate offline and explicitly authorized live gates.
+This repository currently ships a minimal private **bootstrap shell** plus the
+plugin-owned **Wire Identity** seam. The Host and browser entries mount cleanly,
+expose a value-free loopback status RPC, and render independently addressable
+Auth/LLM, Search, Image, and Video gate rows. The rows are intentionally
+`POC pending`: this release is not a complete Antigravity login or model provider
+and does not make OAuth or private endpoint requests.
+
+The settings section is explicitly **Unofficial / Experimental**. It explains
+the Google Terms account-suspension risk, limits the product to one account, and
+requires an acknowledgement before the shell can ask the Host to check the login gate.
+The acknowledgement is process-local; the bootstrap login endpoint remains
+disabled until a later, separately authorized OAuth gate.
+
+Later OAuth, LLM, Search, Image, Video, and Usage work must pass separate offline
+and explicitly authorized live gates.
 
 The Wire Identity module keeps the fixed audited Antigravity provider headers and
 adds the truthful DSH identity returned by DSH's public `attributionHeaders()`

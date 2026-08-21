@@ -4,10 +4,18 @@
 
 ## 当前阶段
 
-本仓库当前只包含插件自有的 **Wire Identity（线路身份）** seam，尚不是完整的
-Antigravity 登录或模型提供方，也不会自动挂载任何能力行。后续 OAuth、LLM、搜索、
-图片、视频和用量能力必须分别通过离线测试门禁，并在得到单独明确授权后才能运行
-真实 live gate。
+本仓库当前提供一个最小的私有 **bootstrap shell（启动骨架）**，以及插件自有的
+**Wire Identity（线路身份） seam**。Host 与浏览器入口可以干净挂载，通过仅返回安全状态
+的 loopback RPC 展示独立的 Auth/LLM、搜索、图片和视频能力门禁。所有能力行当前都是
+`POC 待验证`：本版本不是完整的 Antigravity 登录或模型提供方，也不会发起 OAuth 或私有
+endpoint 请求。
+
+设置页明确标记为 **非官方 / 实验性**，会说明 Google Terms 的账号暂停风险，并限制为
+单账号使用；只有完成风险确认后，shell 才会向 Host 请求检查登录门禁。确认只存在于当前
+进程，bootstrap login endpoint 仍会保持禁用，直到未来单独授权的 OAuth gate 完成。
+
+后续 OAuth、LLM、搜索、图片、视频和用量能力必须分别通过离线测试门禁，并在得到单独
+明确授权后才能运行真实 live gate。
 
 Wire Identity 模块保留经过审计的 Antigravity provider headers，并调用 DSH 公开的
 `attributionHeaders()` formatter，把真实 DSH 身份放入固定的二级 carrier：

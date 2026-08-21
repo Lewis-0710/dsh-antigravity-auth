@@ -1,3 +1,11 @@
-# Phase -1 owns a reusable Host-side wire identity module only.
-# Capability rows are introduced by later phases after their gates pass.
-[]
+# The bootstrap shell keeps the capability rows independently addressable.
+# Every row is gate-visible but intentionally performs no OAuth or private I/O.
+- insert:
+    - id: antigravity-auth
+      name: 'dsh-antigravity-auth'
+    - id: antigravity-search
+      name: 'dsh-antigravity-auth/search'
+    - id: antigravity-image
+      name: 'dsh-antigravity-auth/image'
+    - id: antigravity-video
+      name: 'dsh-antigravity-auth/video'

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /** Verify the private Wire Identity package shape without installing or publishing it. */
 import { execFileSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -29,18 +30,22 @@ try {
     throw new Error(`package smoke: CHANGELOG.md lacks release ${String(manifest.version)}`)
   }
   const patch = await readFile(resolve(packageRoot, 'cordis.patch.yml'), 'utf8')
-  if (!/^\[\]\s*$/mu.test(patch)) throw new Error('package smoke: Wire Identity phase must not auto-mount capability rows')
+  for (const row of ['antigravity-auth', 'antigravity-search', 'antigravity-image', 'antigravity-video']) {
+    if (!patch.includes(`id: ${row}`)) throw new Error(`package smoke: patch lacks independent row ${row}`)
+  }
   if (patch.includes('deepseek-harness')) throw new Error('package smoke: patch unexpectedly mentions DSH core')
 
-  for (const key of ['.', './wire-identity', './invariant']) {
+  for (const key of ['.', './client', './search', './image', './video', './rpc-contract', './wire-identity', './invariant']) {
     const target = manifest.exports?.[key]?.default
     const types = manifest.exports?.[key]?.types
     if (typeof target !== 'string' || typeof types !== 'string') throw new Error(`package smoke: incomplete export ${key}`)
     await access(resolve(packageRoot, target))
     await access(resolve(packageRoot, types))
-    const loaded = await import(pathToFileURL(resolve(packageRoot, target)).href)
-    if (key === '.' && typeof loaded.createWireIdentity !== 'function') {
-      throw new Error('package smoke: root entry has no Wire Identity export')
+    if (key !== './client') {
+      const loaded = await import(pathToFileURL(resolve(packageRoot, target)).href)
+      if (key === '.' && typeof loaded.createWireIdentity !== 'function') {
+        throw new Error('package smoke: root entry has no Wire Identity export')
+      }
     }
   }
   const source = await readFile(resolve(packageRoot, 'lib/wire-identity.js'), 'utf8')
@@ -49,7 +54,31 @@ try {
   }
   if (source.includes('deepseek-harness core')) throw new Error('package smoke: artifact contains an invalid core implementation claim')
 
-  console.log(`package smoke: ${filename} exposes private Wire Identity, invariant, types, and no capability rows`)
+  const clientTarget = manifest.exports?.['./client']?.default
+  if (typeof clientTarget !== 'string') throw new Error('package smoke: client export is missing')
+  const clientSource = await readFile(resolve(packageRoot, clientTarget), 'utf8')
+  for (const marker of ['node:', '@cortexkit/antigravity-auth-core', 'globalThis.fetch']) {
+    if (clientSource.includes(marker)) throw new Error(`package smoke: client artifact contains Host-only marker ${marker}`)
+  }
+  let registration
+  const hadWindow = Object.prototype.hasOwnProperty.call(globalThis, 'window')
+  const originalWindow = globalThis.window
+  globalThis.window = { __ModuleLoader__: { load: value => { registration = value } } }
+  try {
+    await import(pathToFileURL(resolve(packageRoot, clientTarget)).href)
+  } finally {
+    if (hadWindow) globalThis.window = originalWindow
+    else delete globalThis.window
+  }
+  if (registration?.id !== manifest.name || typeof registration.factory !== 'function') {
+    throw new Error('package smoke: client artifact did not register with the DSH module loader')
+  }
+  const clientExports = registration.factory(createRequire(resolve(packageRoot, 'package.json')))
+  if (typeof clientExports?.apply !== 'function') {
+    throw new Error('package smoke: client factory did not expose an apply function')
+  }
+
+  console.log(`package smoke: ${filename} exposes private Host/client entries, gated rows, Wire Identity, and value-free types`)
 } finally {
   await rm(temporary, { recursive: true, force: true })
 }
