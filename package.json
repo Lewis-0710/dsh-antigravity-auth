@@ -1,0 +1,81 @@
+{
+  "name": "dsh-antigravity-auth",
+  "version": "0.1.0",
+  "description": "Private plugin-owned Antigravity wire identity module for DeepSeek Harness experiments",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suntianc/dsh-antigravity-auth.git"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./wire-identity": {
+      "types": "./lib/types/wire-identity.d.ts",
+      "default": "./lib/wire-identity.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js",
+    "lib/*.js.map",
+    "lib/types/**/*.d.ts",
+    "lib/types/**/*.d.ts.map",
+    "cordis.patch.yml",
+    "CHANGELOG.md",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/clean.mjs && tsc -p tsconfig.build.host.json && tsdown",
+    "bundle": "tsdown",
+    "check": "pnpm run lint && pnpm run typecheck && pnpm test && pnpm run build && pnpm run package:smoke && pnpm run publint",
+    "lint": "oxlint src tests build scripts tsdown.config.ts vitest.config.ts",
+    "package:smoke": "node scripts/package-smoke.mjs",
+    "publint": "publint",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@cortexkit/antigravity-auth-core": "2.1.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.7 <0.2.0"
+  },
+  "devDependencies": {
+    "@cortexkit/antigravity-auth-core": "2.1.0",
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.7",
+    "@deepseek-ai/cordis": "4.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.20.0",
+    "jsdom": "29.1.1",
+    "lightningcss": "^1.33.0",
+    "oxlint": "1.76.0",
+    "publint": "^0.3.24",
+    "semver": "^7.8.5",
+    "tsdown": "^0.22.14",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.11"
+  }
+}

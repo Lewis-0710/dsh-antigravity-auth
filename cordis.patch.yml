@@ -1,0 +1,3 @@
+# Phase -1 owns a reusable Host-side wire identity module only.
+# Capability rows are introduced by later phases after their gates pass.
+[]

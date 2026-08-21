@@ -1,0 +1,240 @@
+/**
+ * The only identity seam for Antigravity private requests.
+ *
+ * The community transport snapshot owns the audited provider framing. This
+ * module owns the provider headers that identify that framing and carries the
+ * truthful DSH application identity in a plugin-owned secondary header. No
+ * caller may supply, suppress, rename, or replace either identity.
+ */
+
+import {
+  ANTIGRAVITY_ENDPOINT,
+  ANTIGRAVITY_HEADERS,
+  buildAgyCliHeaderPairs,
+} from '@cortexkit/antigravity-auth-core'
+import { attributionHeaders as dshAttributionHeaders } from '@deepseek-ai/dsh-llm'
+
+export const DSH_ATTRIBUTION_HEADER = 'X-DeepSeek-Harness-Attribution' as const
+export const AGY_PROVIDER_USER_AGENT = ANTIGRAVITY_HEADERS['User-Agent']
+export const ANTIGRAVITY_WIRE_ORIGIN = new URL(ANTIGRAVITY_ENDPOINT).origin
+export const ANTIGRAVITY_WIRE_PATHS = Object.freeze([
+  '/v1internal:loadCodeAssist',
+  '/v1internal:streamGenerateContent',
+  '/v1internal:generateContent',
+  '/v1internal:retrieveUserQuotaSummary',
+  '/v1internal:fetchAvailableModels',
+])
+
+const MAX_HEADER_VALUE_LENGTH = 1024
+const ATTRIBUTION_KEYS = new Set(['user-agent', 'User-Agent'])
+
+export type WireHeaderPair = readonly [name: string, value: string]
+
+export interface WireIdentityHeaders {
+  readonly 'User-Agent': string
+  readonly 'X-Goog-Api-Client': string
+  readonly 'Client-Metadata': string
+  readonly [DSH_ATTRIBUTION_HEADER]: string
+}
+
+export interface WireRequest {
+  /** Host-only OAuth access token; it is never included in an error message. */
+  readonly authorization: string
+  /** JSON request bytes. The community framing decides length vs chunked encoding. */
+  readonly body: string | Uint8Array
+}
+
+export class WireIdentityError extends Error {
+  readonly code: string
+
+  constructor(code: string, message: string) {
+    super(message)
+    this.name = 'WireIdentityError'
+    this.code = code
+  }
+}
+
+/** Build the fixed provider identity plus the one required DSH carrier. */
+export function buildWireIdentityHeaders(): WireIdentityHeaders {
+  const attribution = readAttributionValue()
+  const provider = {
+    'User-Agent': ANTIGRAVITY_HEADERS['User-Agent'],
+    'X-Goog-Api-Client': ANTIGRAVITY_HEADERS['X-Goog-Api-Client'],
+    'Client-Metadata': ANTIGRAVITY_HEADERS['Client-Metadata'],
+  }
+  for (const [name, value] of Object.entries(provider)) assertSafeHeaderValue(name, value, 'WIRE_PROVIDER_HEADER_UNSAFE')
+  return Object.freeze({
+    ...provider,
+    [DSH_ATTRIBUTION_HEADER]: attribution,
+  })
+}
+
+export interface WireIdentity {
+  /** The immutable provider and secondary attribution headers. */
+  headers(): WireIdentityHeaders
+  /**
+   * Build the exact header sequence used by the audited HTTP/1.1 framing.
+   * The caller supplies only the endpoint, bearer value, and body; arbitrary
+   * header injection is intentionally not part of this interface.
+   */
+  headerPairs(url: string, request: WireRequest): readonly WireHeaderPair[]
+}
+
+/** Create one immutable identity policy for all private operation callers. */
+export function createWireIdentity(): WireIdentity {
+  const headers = buildWireIdentityHeaders()
+  return Object.freeze({
+    headers: () => headers,
+    headerPairs: (url: string, request: WireRequest): readonly WireHeaderPair[] => {
+      assertHttpsEndpoint(url)
+      assertClosedObject(request, ['authorization', 'body'], 'WIRE_REQUEST_OVERRIDE')
+      if (typeof request.body !== 'string' && !(request.body instanceof Uint8Array)) {
+        throw new WireIdentityError('WIRE_REQUEST_BODY_INVALID', 'The private request body is not bounded bytes')
+      }
+      const authorization = validateAuthorization(request.authorization)
+      const basePairs = buildAgyCliHeaderPairs(url, {
+        method: 'POST',
+        body: request.body as unknown as BodyInit,
+        headers: {
+          'User-Agent': headers['User-Agent'],
+          Authorization: authorization,
+          'Content-Type': 'application/json',
+          'Accept-Encoding': 'gzip',
+        },
+      })
+      const result: WireHeaderPair[] = []
+      for (const pair of basePairs) {
+        const immutablePair = Object.freeze([pair[0], pair[1]] as const)
+        result.push(immutablePair)
+        if (pair[0] === 'User-Agent') {
+          result.push(
+            Object.freeze(['X-Goog-Api-Client', headers['X-Goog-Api-Client']]),
+            Object.freeze(['Client-Metadata', headers['Client-Metadata']]),
+            Object.freeze([DSH_ATTRIBUTION_HEADER, headers[DSH_ATTRIBUTION_HEADER]]),
+          )
+        }
+      }
+      return Object.freeze(result)
+    },
+  })
+}
+
+/** Validate one complete, provider-fixed Wire Identity header set. */
+export function assertWireIdentityInvariant(value: unknown): asserts value is WireIdentityHeaders {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity headers must be an object')
+  }
+  const headers = value as Record<string, unknown>
+  const expected = ['Client-Metadata', 'User-Agent', 'X-Goog-Api-Client', DSH_ATTRIBUTION_HEADER].sort()
+  const keys = Object.keys(headers).sort()
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity headers contain an unexpected field')
+  }
+  if (
+    headers['User-Agent'] !== ANTIGRAVITY_HEADERS['User-Agent']
+    || headers['X-Goog-Api-Client'] !== ANTIGRAVITY_HEADERS['X-Goog-Api-Client']
+    || headers['Client-Metadata'] !== ANTIGRAVITY_HEADERS['Client-Metadata']
+  ) {
+    throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity provider headers changed')
+  }
+  if (headers[DSH_ATTRIBUTION_HEADER] === ANTIGRAVITY_HEADERS['User-Agent']) {
+    throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity attribution was replaced by the provider')
+  }
+  for (const key of expected) {
+    const header = headers[key]
+    if (typeof header !== 'string') {
+      throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity contains a non-text field')
+    }
+    assertSafeHeaderValue(key, header, 'WIRE_IDENTITY_INVARIANT')
+  }
+}
+
+function readAttributionValue(): string {
+  let value: Readonly<Record<string, string>>
+  try {
+    value = dshAttributionHeaders()
+  } catch {
+    throw new WireIdentityError('WIRE_ATTRIBUTION_UNAVAILABLE', 'DSH attribution could not be constructed')
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new WireIdentityError('WIRE_ATTRIBUTION_INVALID', 'DSH attribution returned an invalid header set')
+  }
+  const keys = Object.keys(value)
+  if (keys.length === 0) {
+    throw new WireIdentityError('WIRE_ATTRIBUTION_MISSING', 'DSH attribution did not contain a User-Agent')
+  }
+  for (const key of keys) {
+    if (!ATTRIBUTION_KEYS.has(key)) {
+      throw new WireIdentityError('WIRE_ATTRIBUTION_UNEXPECTED', 'DSH attribution contained an unapproved header')
+    }
+  }
+  const lower = value['user-agent']
+  const title = value['User-Agent']
+  if (lower !== undefined && title !== undefined) {
+    throw new WireIdentityError('WIRE_ATTRIBUTION_DUPLICATE', 'DSH attribution contained duplicate User-Agent fields')
+  }
+  const attribution = lower ?? title
+  if (attribution === undefined) {
+    throw new WireIdentityError('WIRE_ATTRIBUTION_MISSING', 'DSH attribution did not contain a User-Agent')
+  }
+  if (attribution === ANTIGRAVITY_HEADERS['User-Agent']) {
+    throw new WireIdentityError(
+      'WIRE_ATTRIBUTION_PROVIDER_OVERRIDE',
+      'DSH attribution was replaced by the Antigravity provider identity',
+    )
+  }
+  assertSafeHeaderValue(DSH_ATTRIBUTION_HEADER, attribution, 'WIRE_ATTRIBUTION_UNSAFE')
+  return attribution
+}
+
+function validateAuthorization(value: string): string {
+  if (typeof value !== 'string' || !/^Bearer\s+\S+$/u.test(value)) {
+    throw new WireIdentityError('WIRE_REQUEST_UNSAFE_AUTHORIZATION', 'The private request authorization value is invalid')
+  }
+  assertSafeHeaderValue('Authorization', value, 'WIRE_REQUEST_UNSAFE_AUTHORIZATION')
+  return value
+}
+
+function assertSafeHeaderValue(name: string, value: string, code: string): void {
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_HEADER_VALUE_LENGTH) {
+    throw new WireIdentityError(code, `${name} is outside the safe header-value bounds`)
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    const codePoint = value.charCodeAt(index)
+    if (codePoint < 0x20 || codePoint === 0x7f) {
+      throw new WireIdentityError(code, `${name} contains an unsafe header character`)
+    }
+  }
+}
+
+function assertHttpsEndpoint(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new WireIdentityError('WIRE_REQUEST_ENDPOINT_INVALID', 'The private request endpoint is invalid')
+  }
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.origin !== ANTIGRAVITY_WIRE_ORIGIN
+    || !ANTIGRAVITY_WIRE_PATHS.some(path => path === parsed.pathname)
+    || parsed.search.length > 0
+    || parsed.hash.length > 0
+  ) {
+    throw new WireIdentityError('WIRE_REQUEST_ENDPOINT_INVALID', 'The private request endpoint is not allowlisted')
+  }
+}
+
+function assertClosedObject(
+  value: object,
+  allowedKeys: readonly string[],
+  code: string,
+): void {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new WireIdentityError(code, 'The wire identity input must be a closed object')
+  }
+  const allowed = new Set(allowedKeys)
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new WireIdentityError(code, 'The wire identity input contains an unapproved override')
+  }
+}
