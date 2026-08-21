@@ -208,7 +208,7 @@ PendingOAuthFlow {
 - callback response 使用 `Cache-Control: no-store`、严格 CSP、无远程资源、无 analytics；
 - 只有 token exchange 和持久化完成后才显示 success。
 
-`localhost` 在 IPv4/IPv6 上的解析差异需做 macOS/Linux/Windows fixture。不能为“兼容远程”改绑公网地址；远程 DSH 场景只允许用户复制**完整 callback URL**回 loopback-only DSH RPC，Host 仍校验 state，并且不记录 code/URL。
+`localhost` 在 IPv4/IPv6 上的解析差异需做 macOS/Linux/Windows fixture。不能为“兼容远程”改绑公网地址。安全复核后，callback completion 被收窄为 Host loopback listener only；browser RPC 不接收完整 callback URL、code 或 state。远程 Host 需要另行设计不跨越 browser/RPC secret boundary 的公开 seam，当前插件不提供该 fallback。
 
 ### 3.4 Authorization 与 token exchange
 
@@ -435,7 +435,7 @@ Gate S live fixture 必须证明目标账号/model 返回稳定 grounding metada
 - output `inlineData` 先做 base64 length bound，再 decode；
 - `ctx.attachments.validateImage()` / `saveImage()` 是唯一 admission/persistence seam；
 - 不写 `~/.opencode/generated-images`，不返回 data URL/file URI，不记录 base64；
-- 生成结果作为 durable `ImageBlock`/tool result；
+- 生成结果作为 durable `ImageBlock`/tool result；独立 CLI 的 Gate I 使用 owner-only content-addressed store，并在写入前验证 PNG chunk CRC、IDAT/IEND、有界 zlib decode、row filter 与 pixel dimension；
 - `list_images` 使用 DSH session authorization、pagination/cursor/origin filter。
 
 ### 7.3 参数语义
@@ -600,7 +600,7 @@ Host rows 独立挂载：Auth/LLM、Search、Image、Video。未通过 Gate 的 
 - state entropy、TTL、one-shot、并发 replay；
 - wrong Host/path/method/missing code/error response；
 - port occupied、listener timeout/cancel/close；
-- remote manual full-callback flow；
+- browser RPC 明确拒绝 callback URL/code/state；callback completion 只走 Host loopback listener；
 - code/token/error body leak scan；
 - file permission、corruption、atomic failure；
 - refresh coalescing、cross-process revision race、rotated refresh token；
@@ -722,7 +722,7 @@ Host rows 独立挂载：Auth/LLM、Search、Image、Video。未通过 Gate 的 
 ### Phase 2：完整 LLM parity
 
 - reasoning/tool call/replay/cancel/model discovery；
-- Gemini → Claude → GPT-OSS 分 family gate；
+- Gemini → Claude → GPT-OSS 分 family gate；每个 outcome 单次原子持久化，Auth/LLM 直接从三者派生，不另存 aggregate pass；
 - settings 与 error classification。
 
 ### Phase 3：Usage + Search

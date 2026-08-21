@@ -21,6 +21,8 @@ export default defineConfig([
       'src/replay.ts',
       'src/quota.ts',
       'src/media-admission.ts',
+      'src/live-gates.ts',
+      'src/live-gate-runner.ts',
     ],
     outDir: 'lib',
     format: ['esm'],

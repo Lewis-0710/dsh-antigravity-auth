@@ -9,6 +9,7 @@ import {
   fnv1a64Signed,
   getPublicModelDefinitions,
   getQuotaGroupForModel,
+  getResolverAliasMap,
   resolveModelWithTier,
 } from '@cortexkit/antigravity-auth-core'
 import {
@@ -41,8 +42,8 @@ import {
   createPrivateTransport,
   iteratePrivateSse,
   privateStatusError,
+  readPrivateText,
   type PrivateTransport,
-  type PrivateTransportOptions,
 } from './private-transport.ts'
 import {
   antigravityModelFamily,
@@ -51,16 +52,18 @@ import {
   createReplayState,
   type AntigravityReplayBlock,
 } from './replay.ts'
-import {
-  ANTIGRAVITY_WIRE_ORIGIN,
-  createWireIdentity,
-  type WireIdentity,
-} from './wire-identity.ts'
+import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
+import { classifyPrivateFailure, type PrivateFailureKind } from './private-failure.ts'
+import type { AntigravityModelCatalogState, AntigravityModelCatalogView } from './model-catalog.ts'
 
 export const ANTIGRAVITY_PROVIDER = 'google-antigravity' as const
 export const ANTIGRAVITY_STREAM_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:streamGenerateContent` as const
 export const ANTIGRAVITY_GENERATE_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:generateContent` as const
+export const ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:fetchAvailableModels` as const
 export const ANTIGRAVITY_LLM_ROUTE = ANTIGRAVITY_PROVIDER
+const MODEL_CATALOG_TTL_MS = 30_000
+const MAX_MODEL_CATALOG_BYTES = 256 * 1024
+const MAX_PROVIDER_PARTS = 4096
 
 export interface AntigravityAuthCredentialSource {
   credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
@@ -68,10 +71,8 @@ export interface AntigravityAuthCredentialSource {
 
 export interface AntigravityAdapterOptions {
   readonly auth: Pick<CredentialCoordinator, 'credential'> | AntigravityAuthCredentialSource
-  readonly wireIdentity?: WireIdentity
+  /** Whole-transport injection is the only private-request test seam. */
   readonly transport?: PrivateTransport
-  readonly transportOptions?: PrivateTransportOptions
-  readonly fetchImpl?: typeof fetch
   readonly responseHeaderTimeoutMs?: number
   readonly idleTimeoutMs?: number
   readonly totalTimeoutMs?: number
@@ -113,28 +114,30 @@ export interface AntigravityRequestMetadata {
 /** Adapter that owns exactly one provider route and no fallback route. */
 export class AntigravityAdapter extends LlmAdapter {
   private readonly transport: PrivateTransport
-  private readonly wire: WireIdentity
   private readonly sessions = new AgyRequestSessionStore('dsh-antigravity-auth')
   private readonly options: Required<Pick<AntigravityAdapterOptions, 'idleTimeoutMs' | 'totalTimeoutMs' | 'maxResponseBytes' | 'maxFrameBytes'>> & {
     readonly responseHeaderTimeoutMs: number
   }
   private readonly definitions = getPublicModelDefinitions()
+  private catalogProjectId: string | undefined
+  private catalogExpiresAt = 0
+  private catalogModelIds = new Set<string>()
+  private catalogFailureCode: string | undefined
+  private catalogView: AntigravityModelCatalogView
 
   constructor(private readonly adapterOptions: AntigravityAdapterOptions) {
     super()
-    this.wire = adapterOptions.wireIdentity ?? createWireIdentity()
-    this.transport = adapterOptions.transport ?? createPrivateTransport({
-      ...(adapterOptions.fetchImpl === undefined ? {} : { fetchImpl: adapterOptions.fetchImpl }),
-      wireIdentity: this.wire,
-      ...(adapterOptions.responseHeaderTimeoutMs === undefined ? {} : { responseHeaderTimeoutMs: adapterOptions.responseHeaderTimeoutMs }),
-    })
+    this.transport = adapterOptions.transport ?? createPrivateTransport(
+      adapterOptions.responseHeaderTimeoutMs === undefined ? {} : { responseHeaderTimeoutMs: adapterOptions.responseHeaderTimeoutMs },
+    )
     this.options = {
-      responseHeaderTimeoutMs: positive(adapterOptions.responseHeaderTimeoutMs, DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS),
-      idleTimeoutMs: positive(adapterOptions.idleTimeoutMs, DEFAULT_PRIVATE_IDLE_TIMEOUT_MS),
-      totalTimeoutMs: positive(adapterOptions.totalTimeoutMs, DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS),
-      maxResponseBytes: positive(adapterOptions.maxResponseBytes, DEFAULT_PRIVATE_RESPONSE_BYTES),
-      maxFrameBytes: positive(adapterOptions.maxFrameBytes, DEFAULT_PRIVATE_FRAME_BYTES),
+      responseHeaderTimeoutMs: boundedTimeout(adapterOptions.responseHeaderTimeoutMs, DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS),
+      idleTimeoutMs: boundedTimeout(adapterOptions.idleTimeoutMs, DEFAULT_PRIVATE_IDLE_TIMEOUT_MS),
+      totalTimeoutMs: boundedTimeout(adapterOptions.totalTimeoutMs, DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS),
+      maxResponseBytes: boundedLimit(adapterOptions.maxResponseBytes, DEFAULT_PRIVATE_RESPONSE_BYTES),
+      maxFrameBytes: boundedLimit(adapterOptions.maxFrameBytes, DEFAULT_PRIVATE_FRAME_BYTES),
     }
+    this.catalogView = createCatalogView(this.definitions, 'snapshot')
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -148,15 +151,52 @@ export class AntigravityAdapter extends LlmAdapter {
     return resolveRetryPolicy({ mode: 'normal', maxRetries: 0, retryableCodes: [] }, 'google-antigravity')
   }
 
-  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+  /** Forget account-bound availability when Gate 0 or the credential is replaced. */
+  invalidateModelCatalog(): void {
+    this.catalogProjectId = undefined
+    this.catalogExpiresAt = 0
+    this.catalogModelIds = new Set<string>()
+    this.catalogFailureCode = undefined
+    this.catalogView = createCatalogView(this.definitions, 'snapshot')
+  }
+
+  /** Return the pinned catalog without performing credential or network work. */
+  catalogSnapshot(): AntigravityModelCatalogView {
+    return cloneCatalogView(createCatalogView(this.definitions, 'snapshot'))
+  }
+
+  /** Refresh the advisory catalog and collapse failures into browser-safe state. */
+  async modelCatalog(signal?: AbortSignal, forceRefresh = false): Promise<AntigravityModelCatalogView> {
+    try {
+      const available = await this.readLiveModelIds(signal, forceRefresh)
+      this.catalogView = createCatalogView(this.definitions, 'live-available', available, new Date().toISOString())
+    } catch (error) {
+      const state = error instanceof LlmError && error.code === 'PROTOCOL_DRIFT' ? 'protocol-drift' : 'refresh-failed'
+      this.catalogView = createCatalogView(this.definitions, state, undefined, new Date().toISOString())
+    }
+    return cloneCatalogView(this.catalogView)
+  }
+
+  override async listModels(provider: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     this.providerInfo(provider)
-    return Object.values(this.definitions).filter(definition => !definition.modalities.output.includes('image')).map(definition => ({
-      provider: ANTIGRAVITY_PROVIDER,
-      id: definition.id,
-      name: definition.name,
-      description: `${definition.name} · audited snapshot · quota ${getQuotaGroupForModel(definition.id) ?? 'unknown'}`,
-      inputModalities: definition.modalities.input.filter((item): item is 'text' | 'image' => item === 'text' || item === 'image'),
-    }))
+    let available: ReadonlySet<string>
+    try {
+      available = await this.readLiveModelIds(signal)
+      this.catalogView = createCatalogView(this.definitions, 'live-available', available, new Date().toISOString())
+    } catch (error) {
+      const state = error instanceof LlmError && error.code === 'PROTOCOL_DRIFT' ? 'protocol-drift' : 'refresh-failed'
+      this.catalogView = createCatalogView(this.definitions, state, undefined, new Date().toISOString())
+      throw error
+    }
+    return Object.values(this.definitions)
+      .filter(definition => !definition.modalities.output.includes('image') && available.has(definition.id))
+      .map(definition => ({
+        provider: ANTIGRAVITY_PROVIDER,
+        id: definition.id,
+        name: definition.name,
+        description: `${definition.name} · live account intersection · quota ${getQuotaGroupForModel(definition.id) ?? 'unknown'}`,
+        inputModalities: definition.modalities.input.filter((item): item is 'text' | 'image' => item === 'text' || item === 'image'),
+      }))
   }
 
   override async resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
@@ -281,6 +321,7 @@ export class AntigravityAdapter extends LlmAdapter {
           yield { type: 'block-start', index: current.index, blockType: current.kind }
         }
         if (part.kind === 'tool-call') {
+          if (part.name !== undefined) current.name = assembleFunctionName(current.name, part.name)
           current.text += part.arguments
           hasEmitted.value ||= part.arguments.length > 0 || part.name !== undefined
           yield {
@@ -324,6 +365,80 @@ export class AntigravityAdapter extends LlmAdapter {
     yield finishChunk(mapFinishReason(finish), finish ?? 'STOP', undefined, replayState)
   }
 
+  private async readLiveModelIds(
+    signal: AbortSignal | undefined,
+    bypassCache = false,
+    forceCredentialRefresh = false,
+  ): Promise<ReadonlySet<string>> {
+    const credential = await this.readCredential(signal, forceCredentialRefresh)
+    if (credential === undefined) throw new LlmError('Antigravity login is required before model discovery', 'AUTH')
+    if (!bypassCache && this.catalogProjectId === credential.projectId && Date.now() < this.catalogExpiresAt) {
+      if (this.catalogFailureCode !== undefined) throw new LlmError('The Antigravity live model catalog refresh remains unavailable', this.catalogFailureCode)
+      return this.catalogModelIds
+    }
+    let response: Response
+    try {
+      response = await this.transport.request({
+        url: ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT,
+        accessToken: credential.accessToken,
+        body: JSON.stringify({ project: credential.projectId }),
+        ...(signal === undefined ? {} : { signal }),
+        responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
+      })
+    } catch (error) {
+      const failure = toLlmError(error)
+      this.rememberCatalogFailure(credential.projectId, failure)
+      throw failure
+    }
+    const statusError = privateStatusError(response.status)
+    if (statusError !== undefined) {
+      await cancelResponse(response)
+      if (statusError.code === 'authentication' && !forceCredentialRefresh && !isAborted(signal)) {
+        this.catalogExpiresAt = 0
+        return this.readLiveModelIds(signal, true, true)
+      }
+      const failure = toLlmError(statusError)
+      this.rememberCatalogFailure(credential.projectId, failure)
+      throw failure
+    }
+    let value: unknown
+    try {
+      value = JSON.parse(await readPrivateText(response, {
+        ...(signal === undefined ? {} : { signal }),
+        idleTimeoutMs: this.options.idleTimeoutMs,
+        totalTimeoutMs: this.options.totalTimeoutMs,
+        maxBytes: Math.min(this.options.maxResponseBytes, MAX_MODEL_CATALOG_BYTES),
+      })) as unknown
+    } catch (error) {
+      const failure = error instanceof LlmError
+        ? error
+        : new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+      this.rememberCatalogFailure(credential.projectId, failure)
+      throw failure
+    }
+    let ids: Set<string>
+    try { ids = parseLiveModelIds(value, this.definitions) } catch (error) {
+      const failure = error instanceof LlmError
+        ? error
+        : new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+      this.rememberCatalogFailure(credential.projectId, failure)
+      throw failure
+    }
+    this.catalogProjectId = credential.projectId
+    this.catalogModelIds = ids
+    this.catalogFailureCode = undefined
+    this.catalogExpiresAt = Date.now() + MODEL_CATALOG_TTL_MS
+    return ids
+  }
+
+  private rememberCatalogFailure(projectId: string, failure: LlmError): void {
+    if (failure.code === 'AUTH' || failure.code === 'CANCELLED') return
+    this.catalogProjectId = projectId
+    this.catalogModelIds = new Set<string>()
+    this.catalogFailureCode = failure.code
+    this.catalogExpiresAt = Date.now() + MODEL_CATALOG_TTL_MS
+  }
+
   private async readCredential(signal: AbortSignal | undefined, forceRefresh: boolean): Promise<HostCredential | undefined> {
     try {
       return await this.adapterOptions.auth.credential(signal, forceRefresh ? { forceRefresh: true } : undefined)
@@ -333,11 +448,82 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 }
 
+function createCatalogView(
+  definitions: ReturnType<typeof getPublicModelDefinitions>,
+  state: AntigravityModelCatalogState,
+  available?: ReadonlySet<string>,
+  checkedAt?: string,
+): AntigravityModelCatalogView {
+  const models = Object.values(definitions)
+    .filter(definition => !definition.modalities.output.includes('image'))
+    .map(definition => ({
+      id: definition.id,
+      name: definition.name,
+      state: state === 'live-available'
+        ? available?.has(definition.id) === true ? 'live-available' as const : 'unavailable' as const
+        : 'snapshot' as const,
+    }))
+  return { state, models, ...(checkedAt === undefined ? {} : { checkedAt }) }
+}
+
+function cloneCatalogView(value: AntigravityModelCatalogView): AntigravityModelCatalogView {
+  return {
+    state: value.state,
+    models: value.models.map(model => ({ ...model })),
+    ...(value.checkedAt === undefined ? {} : { checkedAt: value.checkedAt }),
+  }
+}
+
+function parseLiveModelIds(
+  value: unknown,
+  definitions: ReturnType<typeof getPublicModelDefinitions>,
+): Set<string> {
+  const root = isRecord(value) && isRecord(value.response) ? value.response : value
+  if (!isRecord(root) || !isRecord(root.models)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+  const entries = Object.entries(root.models)
+  if (entries.length > 512) throw new LlmError('The Antigravity live model catalog exceeded the model limit', 'PROTOCOL_DRIFT')
+  const aliases = getResolverAliasMap()
+  const live = new Set<string>()
+  for (const [id, rawEntry] of entries) {
+    if (!safeModelId(id) || !isRecord(rawEntry)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+    live.add(canonicalWireModel(id, aliases))
+    if (rawEntry.modelName !== undefined) {
+      if (!safeModelId(rawEntry.modelName)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+      live.add(canonicalWireModel(rawEntry.modelName, aliases))
+    }
+    if (rawEntry.displayName !== undefined && (typeof rawEntry.displayName !== 'string' || rawEntry.displayName.length > 512 || containsControl(rawEntry.displayName))) {
+      throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+    }
+  }
+  const available = new Set<string>()
+  for (const definition of Object.values(definitions)) {
+    const resolved = resolveModelWithTier(definition.id).actualModel
+    if (live.has(canonicalWireModel(resolved, aliases))) available.add(definition.id)
+  }
+  return available
+}
+
+function canonicalWireModel(value: string, aliases: Readonly<Record<string, string>>): string {
+  return aliases[value] ?? value
+}
+
+function safeModelId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 256 && !containsControl(value)
+}
+
+function containsControl(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code < 0x20 || code === 0x7f) return true
+  }
+  return false
+}
+
 interface BlockState {
   readonly index: number
   readonly kind: 'text' | 'reasoning' | 'tool-call'
   readonly id: ReturnType<typeof CallId>
-  readonly name?: string
+  name?: string
   text: string
   signature?: string
 }
@@ -369,6 +555,18 @@ function sameBlock(state: BlockState, part: ProviderPart): boolean {
   return part.kind !== 'tool-call' || (part.id === undefined || part.id === String(state.id))
 }
 
+function assembleFunctionName(current: string | undefined, fragment: string): string {
+  if (fragment.length === 0 || fragment.length > 256 || containsControl(fragment)) {
+    throw new PrivateTransportError('protocol-drift', 'The private tool-call name was invalid')
+  }
+  if (current === undefined || current.length === 0) return fragment
+  if (fragment === current) return current
+  if (fragment.startsWith(current)) return fragment
+  const combined = `${current}${fragment}`
+  if (combined.length > 256) throw new PrivateTransportError('protocol-drift', 'The private tool-call name exceeded the byte limit')
+  return combined
+}
+
 function endBlock(state: BlockState): StreamChunk {
   if (state.kind === 'text') return { type: 'block-end', index: state.index, block: { type: 'text', text: state.text } }
   if (state.kind === 'reasoning') return { type: 'block-end', index: state.index, block: { type: 'reasoning', text: state.text } }
@@ -380,22 +578,26 @@ function endBlock(state: BlockState): StreamChunk {
   }
   if (!isRecord(parsed)) throw new PrivateTransportError('protocol-drift', 'The private tool-call arguments were not an object')
   const args = state.text
+  if (state.name === undefined || !/^[A-Za-z_][A-Za-z0-9_.:-]{0,255}$/u.test(state.name)) {
+    throw new PrivateTransportError('protocol-drift', 'The private tool-call name was missing or invalid')
+  }
   return {
     type: 'block-end',
     index: state.index,
     block: {
       type: 'tool-call',
       id: state.id,
-      name: state.name ?? 'unknown_tool',
+      name: state.name,
       arguments: args,
     },
   }
 }
 
 export function buildAntigravityGeneratePayload(options: GenerateOptions, credential: HostCredential): Record<string, unknown> {
+  const toolNames = new Map<string, string>()
   const contents = options.messages
     .filter(message => message.role !== 'system')
-    .map(message => mapMessage(message, options.model))
+    .map(message => mapMessage(message, options.model, toolNames))
   return buildPayloadFromContents(options, credential, contents)
 }
 
@@ -407,9 +609,10 @@ async function buildAntigravityGeneratePayloadForAdapter(
   attachments: Pick<AttachmentStore, 'readImage'> | undefined,
 ): Promise<Record<string, unknown>> {
   const contents: Record<string, unknown>[] = []
+  const toolNames = new Map<string, string>()
   for (const message of options.messages) {
     if (message.role === 'system') continue
-    contents.push(await mapMessageWithAttachments(message, options.model, attachments, options.signal))
+    contents.push(await mapMessageWithAttachments(message, options.model, toolNames, attachments, options.signal))
   }
   const payload = buildPayloadFromContents(options, credential, contents)
   const metadata = buildAgyAgentRequestMetadata(session, payload.request as Record<string, unknown>, resolveWireModel(options.model), timestamp)
@@ -466,7 +669,7 @@ function buildPayloadFromContents(
   return { project: credential.projectId, model: wireModel, request }
 }
 
-function mapMessage(message: Message, model: string): Record<string, unknown> {
+function mapMessage(message: Message, model: string, toolNames: Map<string, string>): Record<string, unknown> {
   const parts: Record<string, unknown>[] = []
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   let replayIndex = 0
@@ -477,6 +680,7 @@ function mapMessage(message: Message, model: string): Record<string, unknown> {
     } else if (block.type === 'reasoning') {
       parts.push({ text: block.text, thought: true, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
     } else if (block.type === 'tool-call') {
+      rememberToolName(toolNames, block.id, block.name)
       parts.push({
         functionCall: {
           name: block.name,
@@ -485,7 +689,7 @@ function mapMessage(message: Message, model: string): Record<string, unknown> {
         },
       })
     } else if (block.type === 'tool-result') {
-      parts.push({ functionResponse: { name: 'tool', response: { content: blocksToText(block.content) } } })
+      parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
     } else if (block.type === 'image') {
       throw new LlmError('Antigravity text requests do not accept unresolved image blocks', 'UNSUPPORTED_MODALITY')
     }
@@ -499,10 +703,11 @@ function mapMessage(message: Message, model: string): Record<string, unknown> {
 async function mapMessageWithAttachments(
   message: Message,
   model: string,
+  toolNames: Map<string, string>,
   attachments: Pick<AttachmentStore, 'readImage'> | undefined,
   signal: AbortSignal | undefined,
 ): Promise<Record<string, unknown>> {
-  if (!message.content.some(block => block.type === 'image')) return mapMessage(message, model)
+  if (!message.content.some(block => block.type === 'image')) return mapMessage(message, model, toolNames)
   if (attachments === undefined) throw new LlmError('Antigravity image input requires the Host AttachmentStore', 'UNSUPPORTED_MODALITY')
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const parts: Record<string, unknown>[] = []
@@ -517,12 +722,27 @@ async function mapMessageWithAttachments(
     } else if (block.type === 'reasoning') {
       parts.push({ text: block.text, thought: true, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
     } else if (block.type === 'tool-call') {
+      rememberToolName(toolNames, block.id, block.name)
       parts.push({ functionCall: { name: block.name, args: parseJsonObject(block.arguments), ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) } })
     } else if (block.type === 'tool-result') {
-      parts.push({ functionResponse: { name: 'tool', response: { content: blocksToText(block.content) } } })
+      parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
     }
   }
   return { role: message.role === 'assistant' ? 'model' : 'user', parts }
+}
+
+function rememberToolName(toolNames: Map<string, string>, callId: unknown, name: string): void {
+  if (name.length === 0 || name.length > 256 || containsControl(name)) throw new LlmError('The tool call name is invalid', 'INVALID_ARGS')
+  const id = String(callId)
+  const existing = toolNames.get(id)
+  if (existing !== undefined && existing !== name) throw new LlmError('A tool call id was reused with a different name', 'INVALID_ARGS')
+  toolNames.set(id, name)
+}
+
+function requireToolName(toolNames: ReadonlyMap<string, string>, callId: unknown): string {
+  const name = toolNames.get(String(callId))
+  if (name === undefined) throw new LlmError('A tool result did not match a prior tool call', 'INVALID_ARGS')
+  return name
 }
 
 function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): string | undefined {
@@ -584,22 +804,30 @@ function parseProviderEvent(data: string): ProviderEvent {
 }
 
 function findParts(value: Record<string, unknown>): unknown[] {
-  if (Array.isArray(value.parts)) return value.parts
-  if (isRecord(value.content) && Array.isArray(value.content.parts)) return value.content.parts
-  if (isRecord(value.modelTurn) && Array.isArray(value.modelTurn.parts)) return value.modelTurn.parts
+  if (Array.isArray(value.parts)) return boundedParts(value.parts)
+  if (isRecord(value.content) && Array.isArray(value.content.parts)) return boundedParts(value.content.parts)
+  if (isRecord(value.modelTurn) && Array.isArray(value.modelTurn.parts)) return boundedParts(value.modelTurn.parts)
   if (Array.isArray(value.candidates)) {
     const output: unknown[] = []
     for (const candidate of value.candidates) {
       if (!isRecord(candidate)) continue
       const content = isRecord(candidate.content) ? candidate.content : candidate
-      if (Array.isArray(content.parts)) output.push(...content.parts)
+      if (Array.isArray(content.parts)) {
+        if (output.length + content.parts.length > MAX_PROVIDER_PARTS) throw new PrivateTransportError('protocol-drift', 'The private response contained too many parts')
+        output.push(...content.parts)
+      }
     }
     return output
   }
   if (isRecord(value.serverContent) && isRecord(value.serverContent.modelTurn) && Array.isArray(value.serverContent.modelTurn.parts)) {
-    return value.serverContent.modelTurn.parts
+    return boundedParts(value.serverContent.modelTurn.parts)
   }
   return []
+}
+
+function boundedParts(value: unknown[]): unknown[] {
+  if (value.length > MAX_PROVIDER_PARTS) throw new PrivateTransportError('protocol-drift', 'The private response contained too many parts')
+  return value
 }
 
 function parsePart(value: unknown): ProviderPart | undefined {
@@ -712,30 +940,38 @@ function finishChunk(
   return { type: 'finish', reason, ...(replayState === undefined ? {} : { replayState }) }
 }
 
+const LLM_FAILURE_CODES: Readonly<Record<PrivateFailureKind, string>> = {
+  authentication: 'AUTH',
+  forbidden: 'FORBIDDEN',
+  'rate-limited': 'RATE_LIMIT',
+  cancelled: 'CANCELLED',
+  timeout: 'TIMEOUT',
+  'attribution-rejected': 'GATE_0_ATTRIBUTION',
+  'protocol-drift': 'PROTOCOL_DRIFT',
+  'response-limit': 'RESPONSE_LIMIT',
+  'request-limit': 'REQUEST_LIMIT',
+  upstream: 'UPSTREAM',
+  network: 'NETWORK',
+  failed: 'PROVIDER_ERROR',
+}
+
 function toLlmError(error: unknown): LlmError {
   if (error instanceof LlmError) return error
   if (error instanceof PrivateTransportError) {
-    const code = error.code === 'authentication' ? 'AUTH'
-      : error.code === 'forbidden' ? 'FORBIDDEN'
-        : error.code === 'rate-limited' ? 'RATE_LIMIT'
-        : error.code === 'cancelled' ? 'CANCELLED'
-          : error.code === 'timeout' ? 'TIMEOUT'
-            : error.code === 'attribution-rejected' ? 'GATE_0_ATTRIBUTION'
-              : error.code === 'protocol-drift' || error.code === 'invalid-response' ? 'PROTOCOL_DRIFT'
-                : error.code === 'response-too-large' || error.code === 'frame-too-large' ? 'RESPONSE_LIMIT'
-                  : error.code === 'request-too-large' ? 'REQUEST_LIMIT'
-                    : error.code === 'upstream' ? 'UPSTREAM'
-                      : 'NETWORK'
+    const code = LLM_FAILURE_CODES[classifyPrivateFailure(error)]
     return error.status === undefined
-      ? new LlmError(error.message, code)
-      : new LlmError(error.message, code, { status: error.status })
+      ? new LlmError('The Antigravity private request failed safely', code)
+      : new LlmError('The Antigravity private request failed safely', code, { status: error.status })
   }
-  if (error instanceof Error) return new LlmError('The Antigravity provider request failed safely', 'PROVIDER_ERROR', { cause: error })
   return new LlmError('The Antigravity provider request failed safely', 'PROVIDER_ERROR')
 }
 
-function positive(value: number | undefined, fallback: number): number {
+function boundedTimeout(value: number | undefined, fallback: number): number {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.min(Math.floor(value), 10 * 60 * 1000)
+}
+
+function boundedLimit(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.min(Math.floor(value), fallback)
 }
 
 function boundedInteger(value: number, min: number, max: number, field: string): number {
@@ -753,15 +989,7 @@ function numberValue(value: unknown): number | undefined {
 }
 
 function stringValue(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 && value.length <= 16 * 1024 && !hasControl(value) ? value : undefined
-}
-
-function hasControl(value: string): boolean {
-  for (const character of value) {
-    const code = character.charCodeAt(0)
-    if (code < 32 || code === 127) return true
-  }
-  return false
+  return typeof value === 'string' && value.length > 0 && value.length <= 16 * 1024 && !containsControl(value) ? value : undefined
 }
 
 function safeProviderErrorCode(value: string | undefined): string {

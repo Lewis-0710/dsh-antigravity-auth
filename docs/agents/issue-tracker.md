@@ -57,7 +57,7 @@ gh issue view 2 --repo suntianc/dsh-antigravity-auth --json number,title,state,l
 - They do not authorize commits to DeepSeek Harness, another plugin, an installed package, a user profile, or a live deployment.
 - A genuine cross-repository requirement must be stopped and separately specified, approved, and targeted by a new explicit command.
 - Issue `#2` is specifically plugin-only. Its Wire Identity implementation must remain in this repository; prior DSH core experiments are not valid implementations of that ticket.
-- Issue `#5` is already implemented at `dbc8783`. Issue `#17` is the current one-time DSH `0.1.1-rc.1` compatibility frontier and the only active blocker for Issue `#6`; it does not reopen completed Issue `#3`.
+- Issue `#5` is implemented at `dbc8783`, Issue `#17` at `efa4aaa`, and the capability series through Issue `#16` is implemented on `main`. Later repairs do not reopen or expand completed Issue `#3`.
 
 ## External-action guard
 

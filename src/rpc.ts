@@ -5,15 +5,18 @@ import { OAuthFlowError } from './oauth-flow.ts'
 import { CredentialOperationError, credentialErrorMessage } from './credential-coordinator.ts'
 import type { BootstrapStatusService } from './status.ts'
 import type { QuotaStatusView } from './quota.ts'
+import { isSafeRpcErrorCode, safeRpcErrorMessage } from './rpc-vocabulary.ts'
+import type { AntigravityModelCatalogService } from './model-catalog.ts'
 
 export { ANTIGRAVITY_AUTH_RPC_CHANNEL } from './rpc-contract.ts'
 
 /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
 export async function handleAntigravityAuthRpc(
-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'completeCallback' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
+  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
+  modelCatalog?: AntigravityModelCatalogService,
 ): Promise<RpcResult<unknown>> {
   if (signal?.aborted === true) return cancelled()
 
@@ -22,8 +25,18 @@ export async function handleAntigravityAuthRpc(
       if (!isEmptyRecord(payload)) return badRequest('status expects an empty payload')
       return { ok: true, value: { status: await service.status() } }
     }
+    if (endpoint === 'models') {
+      if (!isRefreshPayload(payload)) return badRequest('models expects {} or { force: boolean }')
+      if (modelCatalog === undefined) return badRequest('model catalog is unavailable')
+      const status = await service.status()
+      const gateReady = status.login.projectAvailable
+        && status.capabilities.some(capability => capability.id === 'auth-llm' && capability.state === 'available')
+      return { ok: true, value: gateReady
+        ? await modelCatalog.modelCatalog(signal, payload.force)
+        : modelCatalog.catalogSnapshot() }
+    }
     if (endpoint === 'usage') {
-      if (!isUsagePayload(payload)) return badRequest('usage expects {} or { force: boolean }')
+      if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force: boolean }')
       if (service.usage === undefined) return { ok: true, value: { state: 'protocol-drift' as const } }
       return { ok: true, value: await service.usage(signal, payload.force) }
     }
@@ -47,10 +60,6 @@ export async function handleAntigravityAuthRpc(
       if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
       return { ok: true, value: await service.revoke(true, signal) }
     }
-    if (endpoint === 'complete-callback' || endpoint === 'complete-manual-callback') {
-      if (!isCallbackPayload(payload)) return badRequest('complete-callback expects a callback URL')
-      return { ok: true, value: await service.completeCallback(payload.callbackUrl) }
-    }
     return badRequest('unknown Antigravity auth endpoint')
   } catch (error) {
     return safeFailure(error)
@@ -67,56 +76,27 @@ function cancelled(): RpcResult<never> {
 
 function safeFailure(error: unknown): RpcResult<never> {
   const credentialError = error instanceof CredentialOperationError ? error : undefined
-  const code = error instanceof OAuthFlowError
+  const candidate = error instanceof OAuthFlowError
     ? error.code
     : credentialError?.code ?? 'internal'
+  const code = isSafeRpcErrorCode(candidate) ? candidate : 'internal'
   return {
     ok: false,
     error: {
       code: code as never,
       message: credentialError === undefined
-        ? messageFor(code)
-        : credentialErrorMessage(credentialError.code) ?? 'antigravity-auth: operation failed',
+        ? safeRpcErrorMessage(code)
+        : credentialErrorMessage(credentialError.code) ?? safeRpcErrorMessage(code),
       details: {},
     },
   }
-}
-
-function messageFor(code: string): string {
-  if (code === 'risk-acknowledgement-required') return 'Risk acknowledgement is required before login'
-  if (code === 'port-conflict') return 'The fixed OAuth callback port is already in use'
-  if (code === 'invalid-method') return 'The OAuth callback method is not accepted'
-  if (code === 'invalid-path') return 'The OAuth callback path is not accepted'
-  if (code === 'invalid-host') return 'The OAuth callback host is not accepted'
-  if (code === 'duplicate-parameter') return 'The OAuth callback contains duplicate parameters'
-  if (code === 'invalid-parameters') return 'The OAuth callback parameters are not accepted'
-  if (code === 'missing-state') return 'The OAuth callback state is missing'
-  if (code === 'state-mismatch') return 'The OAuth callback state was not accepted'
-  if (code === 'missing-code') return 'The OAuth callback code is missing'
-  if (code === 'oauth-error') return 'The OAuth provider rejected authorization'
-  if (code === 'expired') return 'The OAuth login expired'
-  if (code === 'cancelled') return 'The OAuth login was cancelled'
-  if (code === 'no-pending-flow') return 'There is no pending OAuth login'
-  if (code === 'project-unavailable') return 'No usable project is available for this account'
-  if (code === 'project-authentication-failed') return 'The Antigravity project probe requires authentication'
-  if (code === 'project-forbidden') return 'The Antigravity project probe was forbidden'
-  if (code === 'project-rate-limited') return 'The Antigravity project probe is rate-limited'
-  if (code === 'project-offline') return 'The Antigravity project probe is offline'
-  if (code === 'project-malformed') return 'The Antigravity project response was malformed'
-  if (code === 'project-protocol-drift') return 'The Antigravity project protocol changed'
-  if (code === 'project-validation-failed') return 'Project validation failed'
-  if (code === 'credential-conflict') return 'The login changed while it was completing'
-  if (code === 'persistence-failed') return 'The login could not be saved'
-  if (code === 'token-exchange-failed') return 'The authorization code could not be exchanged'
-  if (code === 'invalid-callback-url') return 'The callback URL is invalid'
-  return 'antigravity-auth: operation failed'
 }
 
 function isEmptyRecord(value: unknown): value is Record<string, never> {
   return isRecord(value) && Object.keys(value).length === 0
 }
 
-function isUsagePayload(value: unknown): value is { force?: boolean } {
+function isRefreshPayload(value: unknown): value is { force?: boolean } {
   return isRecord(value)
     && Object.keys(value).every(key => key === 'force')
     && (value.force === undefined || typeof value.force === 'boolean')
@@ -132,14 +112,6 @@ function isRevokePayload(value: unknown): value is { confirmed: true } {
   return isRecord(value)
     && Object.keys(value).length === 1
     && value.confirmed === true
-}
-
-function isCallbackPayload(value: unknown): value is { callbackUrl: string } {
-  return isRecord(value)
-    && Object.keys(value).length === 1
-    && typeof value.callbackUrl === 'string'
-    && value.callbackUrl.length > 0
-    && value.callbackUrl.length <= 4096
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

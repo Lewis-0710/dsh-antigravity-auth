@@ -1,10 +1,9 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   createPrivateTransport,
   iteratePrivateSse,
   privateStatusError,
   readPrivateBytes,
-  PrivateTransportError,
 } from '../src/private-transport.ts'
 import { ANTIGRAVITY_WIRE_ORIGIN } from '../src/wire-identity.ts'
 
@@ -21,6 +20,13 @@ describe('bounded private transport', () => {
     expect(plain).toEqual([{ data: '{\n  "ok": true\n}' }])
   })
 
+  it('enforces SSE frame limits in UTF-8 bytes rather than code units', async () => {
+    const collect = async (): Promise<void> => {
+      for await (const _event of iteratePrivateSse(new Response('data: 😀\n\n'), { maxFrameBytes: 9 })) { /* consume */ }
+    }
+    await expect(collect()).rejects.toMatchObject({ code: 'frame-too-large' })
+  })
+
   it('cancels oversized response reads and maps status without exposing bodies', async () => {
     await expect(readPrivateBytes(new Response('12345'), { maxBytes: 4 })).rejects.toMatchObject({ code: 'response-too-large' })
     expect(privateStatusError(401)).toMatchObject({ code: 'authentication', status: 401 })
@@ -28,28 +34,18 @@ describe('bounded private transport', () => {
     expect(privateStatusError(200)).toBeUndefined()
   })
 
-  it('owns the fixed origin and provider identity while forwarding only bearer authorization', async () => {
-    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      const headers = new Headers(init?.headers)
-      expect(headers.get('authorization')).toBe('Bearer access-secret')
-      expect(headers.get('host')).toBeNull()
-      expect(headers.get('content-length')).toBeNull()
-      expect(headers.get('transfer-encoding')).toBeNull()
-      return new Response('{}', { status: 200 })
+  it('rejects oversized or cancelled requests before raw dispatch', async () => {
+    const transport = createPrivateTransport({ maxRequestBytes: 2 })
+    await expect(transport.request({ url: endpoint, accessToken: 'access-secret', body: '123' })).rejects.toMatchObject({
+      code: 'request-too-large',
+      accepted: false,
     })
-    const transport = createPrivateTransport({ fetchImpl })
-    await expect(transport.request({ url: endpoint, accessToken: 'access-secret', body: '{}' })).resolves.toMatchObject({ status: 200 })
-    expect(fetchImpl).toHaveBeenCalledOnce()
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe(endpoint)
-  })
-
-  it('marks response-header timeouts as not accepted and cancellation as terminal', async () => {
-    const fetchImpl = vi.fn(() => new Promise<Response>(() => {}))
-    const transport = createPrivateTransport({ fetchImpl, responseHeaderTimeoutMs: 5 })
-    await expect(transport.request({ url: endpoint, accessToken: 'token', body: '{}' })).rejects.toMatchObject({ code: 'timeout', accepted: false })
 
     const controller = new AbortController()
     controller.abort()
-    await expect(transport.request({ url: endpoint, accessToken: 'token', body: '{}', signal: controller.signal })).rejects.toBeInstanceOf(PrivateTransportError)
+    await expect(transport.request({ url: endpoint, accessToken: 'token', body: '{}', signal: controller.signal })).rejects.toMatchObject({
+      code: 'cancelled',
+      accepted: false,
+    })
   })
 })

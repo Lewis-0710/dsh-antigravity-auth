@@ -12,6 +12,7 @@ import {
 import { ProjectDiscoveryError, normalizeProjectId } from './project-context.ts'
 import type { ProjectDiscoveryErrorCode } from './project-context.ts'
 import type { LoginCompletionResult, LoginErrorCode, LoginPhase, LoginStartResult } from './login-types.ts'
+import { isBoundedSafeText } from './safe-text.ts'
 
 export const ANTIGRAVITY_CALLBACK_PORT = 51121 as const
 export const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback' as const
@@ -537,12 +538,7 @@ function isAllowedCallbackHost(value: string): boolean {
 }
 
 function safeCallbackValue(value: string): boolean {
-  if (value.length === 0 || value.length > MAX_CALLBACK_VALUE_LENGTH) return false
-  for (let index = 0; index < value.length; index += 1) {
-    const codePoint = value.charCodeAt(index)
-    if (codePoint < 0x20 || codePoint === 0x7f) return false
-  }
-  return true
+  return isBoundedSafeText(value, MAX_CALLBACK_VALUE_LENGTH)
 }
 
 function randomBytes(random: (size: number) => Uint8Array, size: number): Uint8Array {

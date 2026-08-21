@@ -12,6 +12,7 @@ import type {
   ProjectValidation,
 } from './oauth-flow.ts'
 import { createProjectDiscovery } from './project-context.ts'
+import { isBoundedSafeText } from './safe-text.ts'
 import type { ProjectDiscoveryOptions } from './project-context.ts'
 import type {
   AntigravityStatusView,
@@ -20,18 +21,29 @@ import type {
   LoginActionResult,
   LoginStartResult,
   LoginStatusView,
+  CapabilityGateEvidence,
+  LlmFamilyId,
 } from './status.ts'
 import { createStatusView } from './status.ts'
 import { createQuotaService, type QuotaService, type QuotaServiceOptions } from './quota.ts'
+import {
+  createFileCapabilityGates,
+  createMemoryCapabilityGates,
+  defaultCapabilityGatePath,
+  type CapabilityGateRegistry,
+} from './capability-gates.ts'
+import type { CapabilityGateOutcome, CapabilityRowId } from './status.ts'
 
 export interface AntigravityAuthServiceOptions {
   readonly store?: AntigravityAuthStore
   readonly storePath?: string
   readonly flowOptions?: Omit<OAuthFlowOptions, 'commit' | 'validateProject'>
-  /** Inject transport/identity dependencies only for deterministic Host tests. */
+  /** Inject a complete private transport only for deterministic Host tests. */
   readonly projectOptions?: ProjectDiscoveryOptions
   readonly credentialOptions?: Omit<CredentialCoordinatorOptions, 'store'>
   readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'>
+  readonly gates?: CapabilityGateRegistry
+  readonly gatePath?: string
 }
 
 export type { HostCredential } from './credential-coordinator.ts'
@@ -41,13 +53,20 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly credentials: CredentialCoordinator
   private readonly flow: OAuthFlow
   private readonly quota: QuotaService
+  private readonly gates: CapabilityGateRegistry
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
   private readonly statusListeners = new Set<() => void>()
 
   constructor(options: AntigravityAuthServiceOptions = {}) {
-    this.store = options.store ?? createAuthStore(options.storePath ?? defaultAuthStorePath())
+    const storePath = options.storePath ?? defaultAuthStorePath()
+    this.store = options.store ?? createAuthStore(storePath)
+    this.gates = options.gates ?? (options.gatePath !== undefined
+      ? createFileCapabilityGates(options.gatePath)
+      : options.store === undefined
+        ? createFileCapabilityGates(defaultCapabilityGatePath(storePath))
+        : createMemoryCapabilityGates())
     this.credentials = createCredentialCoordinator({
       ...options.credentialOptions,
       store: this.store,
@@ -70,6 +89,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     const phase = flowStatus.phase === 'idle' && record !== undefined ? 'success' : flowStatus.phase
     const maskedEmail = maskEmail(record?.email)
     const credentialStatus = await this.credentials.status()
+    const gateEvidence = await this.gateEvidenceFor(record)
     const login: LoginStatusView = {
       phase,
       configured: record !== undefined,
@@ -79,7 +99,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
       ...(maskedEmail === undefined ? {} : { maskedEmail }),
       ...(flowStatus.errorCode === undefined ? {} : { errorCode: flowStatus.errorCode }),
     }
-    return createStatusView(this.riskAcknowledged, login, credentialStatus, this.credentials.revokeStatus())
+    return createStatusView(this.riskAcknowledged, login, credentialStatus, this.credentials.revokeStatus(), gateEvidence)
   }
 
   async acknowledgeRisk(): Promise<RiskAcknowledgementResult> {
@@ -92,6 +112,42 @@ export class AntigravityAuthService implements BootstrapStatusService {
   watchStatus(listener: () => void): () => void {
     this.statusListeners.add(listener)
     return () => { this.statusListeners.delete(listener) }
+  }
+
+  async recordGate0(outcome: CapabilityGateOutcome): Promise<void> {
+    const subject = gateSubject(await this.requireRecord())
+    await this.gates.recordGate0(subject, outcome)
+    this.notifyStatus()
+  }
+
+  async recordLlmFamilyGate(family: LlmFamilyId, outcome: CapabilityGateOutcome): Promise<void> {
+    const record = await this.requireRecord()
+    const subject = gateSubject(record)
+    await this.gates.recordLlmFamily(subject, family, outcome)
+    this.notifyStatus()
+  }
+
+  async recordCapabilityGate(id: CapabilityRowId, outcome: CapabilityGateOutcome): Promise<void> {
+    const record = await this.requireRecord()
+    const subject = gateSubject(record)
+    if (id === 'auth-llm') {
+      throw new OAuthFlowError('internal', 'Auth/LLM availability is derived from independent family evidence')
+    }
+    await this.gates.recordCapability(subject, id, outcome)
+    this.notifyStatus()
+  }
+
+  async capabilityGateEvidence(): Promise<CapabilityGateEvidence> {
+    return this.gateEvidenceFor(await this.readRecord())
+  }
+
+  async gate0Passed(): Promise<boolean> {
+    return (await this.capabilityGateEvidence()).gate0?.outcome === 'passed'
+  }
+
+  async capabilityAvailable(id: CapabilityRowId): Promise<boolean> {
+    const status = await this.status()
+    return status.capabilities.some(capability => capability.id === id && capability.state === 'available')
   }
 
   async startLogin(): Promise<LoginStartResult> {
@@ -138,6 +194,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     await this.flow.cancel()
     try {
       const result = await this.credentials.logout()
+      await this.gates.clear()
       this.notifyStatus()
       return result
     } catch {
@@ -148,6 +205,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     const result = await this.credentials.revoke(confirmed, signal)
+    if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') await this.gates.clear()
     this.notifyStatus()
     return result
   }
@@ -177,9 +235,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
-    if (this.disposed || flowGeneration !== this.activeFlowGeneration || signal.aborted) {
-      throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
-    }
+    // The lineage fence makes prior evidence unusable atomically with this commit.
+    // Physical cleanup is best-effort: a stale file cannot authorize the new lineage.
+    await this.gates.clear().catch(() => {})
+    // The persistent compare-and-commit is the linearization point. A later abort
+    // cannot turn a committed replacement into a reported failed login.
     this.credentials.replaceFromLogin({
       accessToken: token.accessToken,
       refreshToken: token.refreshToken,
@@ -194,6 +254,22 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
   }
 
+  private async gateEvidenceFor(record: AntigravityAuthRecord | undefined): Promise<CapabilityGateEvidence> {
+    try {
+      const evidence = await this.gates.read()
+      if (record === undefined || evidence.subject !== gateSubject(record)) return {}
+      return evidence
+    } catch {
+      return { gate0: { outcome: 'protocol-drift', checkedAt: new Date().toISOString() } }
+    }
+  }
+
+  private async requireRecord(): Promise<AntigravityAuthRecord> {
+    const record = await this.readRecord()
+    if (record === undefined) throw new OAuthFlowError('internal', 'Antigravity login is required')
+    return record
+  }
+
   private async readRecord(): Promise<AntigravityAuthRecord | undefined> {
     try {
       return await this.store.read()
@@ -203,14 +279,18 @@ export class AntigravityAuthService implements BootstrapStatusService {
   }
 }
 
+function gateSubject(record: AntigravityAuthRecord): string {
+  return record.lineage ?? 'legacy-account'
+}
+
 export function createAntigravityAuthService(options: AntigravityAuthServiceOptions = {}): AntigravityAuthService {
   return new AntigravityAuthService(options)
 }
 
 export function maskEmail(value: string | undefined): string | undefined {
-  if (typeof value !== 'string') return undefined
+  if (!isBoundedSafeText(value, 4096)) return undefined
   const at = value.indexOf('@')
-  if (at <= 0 || at === value.length - 1 || value.length > 4096) return undefined
+  if (at <= 0 || at === value.length - 1) return undefined
   const local = value.slice(0, at)
   const domain = value.slice(at + 1)
   if (!/^[^\s@]+$/u.test(local) || !/^[^\s@]+$/u.test(domain)) return undefined

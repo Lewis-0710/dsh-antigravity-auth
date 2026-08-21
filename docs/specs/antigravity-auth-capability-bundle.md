@@ -168,7 +168,7 @@
 - state 是 256-bit random handle，不携带 verifier、project 或 account data。Pending flow 只存在 Host memory，默认五分钟，一次消费；进程重启使其失效。
 - listener 只在 pending login 期间绑定 loopback；固定 callback 端口冲突直接失败，不改绑 `0.0.0.0` 或随机端口。
 - callback 在 state 被原子消费后才执行 token exchange；只有 exchange、project validation 和 auth-store commit 全部成功，浏览器才显示 success。
-- auth store 是单个 versioned record，保存 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。
+- auth store 是单个 versioned record，保存 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。Gate evidence 绑定该 record 的 login lineage；替换 commit 是线性化点，旧 lineage 的证据即使因 crash/清理失败仍留在文件中也不能授权新账号。
 - parent directory 在 POSIX 上为 `0700`，auth file 为 `0600`；不创建明文 backup copy。
 - refresh 使用锁内读取、锁外 network、锁内 lineage compare-and-commit；旧结果不得覆盖较新的 Login、Logout 或 refresh。
 - userinfo 是可选、非关键 operation；插件不解码未验证 access token 来推断账号、plan 或权限。
@@ -189,7 +189,7 @@
 ### LLM decisions
 
 - provider route 固定为 `google-antigravity`。
-- model catalog 初始来自固定 community snapshot，并与登录后的 available-models probe 取 advisory intersection；snapshot 与 live 状态在 UI 中区分。
+- model catalog 初始来自固定 community snapshot，并与登录后的 available-models probe 取 advisory intersection；设置 UI 区分 snapshot、live-available、unavailable、refresh-failed 与 protocol-drift。catalog absence 不得变成 exact pinned-model request rejection。
 - system、messages、image blocks、tool schemas、reasoning effort 和 supported generation options 被转换为 private request envelope；没有证据的 option fail-loud。
 - DSH session id 不直接发送；Private Client 生成 adapter-owned request/session metadata。
 - stream parser 映射 text、reasoning、function call、usage、finish 与 embedded errors；unknown provider parts 触发 bounded protocol-drift error。
@@ -260,7 +260,7 @@
 - state entropy、TTL、one-shot、concurrent replay 与 process-restart invalidation。
 - callback wrong method/path/Host、duplicate/missing state/code、OAuth error、timeout、cancel 与 port collision。
 - loopback only binding；SSH/WSL 环境也不得切换为 `0.0.0.0`。
-- remote manual callback 使用完整 URL，但 code/state 不被日志或 response 回显。
+- callback completion 只经 Host loopback listener；browser typed RPC 不提供 callback URL/code/state submission endpoint。
 - token exchange 与 refresh request/response schema、redaction 和 AbortSignal。
 - auth-store absent、round-trip、owner-only permissions、atomic failure、corruption 与 unsupported version。
 - Login replacement、Logout、Revoke、refresh single-flight、cross-process revision race 和 rotated refresh token。
@@ -327,17 +327,17 @@
 - Cordis rows独立 mount/unmount，未通过 gate 的 capability 不注册。
 - 干净安装解析 exact DSH `0.1.1-rc.1` development graph，`pnpm peers check` 无 warning，lockfile 不包含 rc.7/rc.8 DSH package entries。
 - 完整 `check` gate涵盖 lint、typecheck、unit/integration tests、Host/client build、package smoke与publint。
-- packed file list只包含声明的 runtime、types、client、patch、README、CHANGELOG和license artifacts。
+- packed file list只包含声明的 runtime、types、client、显式 `scripts/live-gates.mjs` CLI、patch、README、CHANGELOG和license artifacts；package smoke 必须验证 script 与其 bundled runner 同时存在。
 
 ### Live gates
 
 - Live tests 永远不属于默认 `check`。
 - Gate A：一次 Login、一次 refresh、可选 userinfo、一次 read-only project discovery；不调用 model/quota/search/image/video，不 onboarding。
-- Gate 0/L：一条最小 text request，exact `agy` identity + secondary DSH attribution，无 tools/media；任何 header rejection立即停止。
-- LLM family gates：逐 family最小 text/reasoning/tool fixture。
+- Gate 0/L：不带 `--family` 时仅发一条最小 text request，exact `agy` identity + secondary DSH attribution，无 catalog/tools/media；只有明确的 secondary attribution rejection 记为 `attribution-rejected`，普通 403 仍安全失败但不冒充 attribution 证据。
+- LLM family gates：Gate 0 通过后，`--family gemini|claude|gpt-oss` 每次只运行一个 family 的独立单请求 fixture；证据分别以单次原子写持久化；Auth/LLM 状态直接从三个 family outcome 派生，只有三者全部通过才开放，不保存可能与 family evidence 分叉的 aggregate pass，也不从任一 family 推断其它 family。
 - Gate S：一条 grounded search并验证真实 source metadata。
-- Gate I：最小 generation与 edit，输出进入 AttachmentStore。
-- Gate V：一条无隐私短 MP4 visual-fact request。
+- Gate I：最小 generation 与 edit，输出进入 auth store 旁 owner-only、content-addressed 的持久 AttachmentStore seam；PNG 必须通过 CRC/chunk、IDAT/IEND、有界 zlib decode、row-filter 与 pixel-dimension admission。
+- Gate V：受控短 MP4 在画面中央显示与产品上下文无关的 `KUMQUAT`，filename/container metadata 不含该词；固定 pixel-only 问题不泄露答案，只有精确验证预期单词才通过。
 - 任何账号 warning、rate-limit anomaly、credential leak、unexpected onboarding、protocol drift或用户撤回授权都终止后续 live gates。
 
 ## Out of Scope

@@ -71,6 +71,10 @@
       "types": "./lib/types/media-admission.d.ts",
       "default": "./lib/media-admission.js"
     },
+    "./live-gates": {
+      "types": "./lib/types/live-gates.d.ts",
+      "default": "./lib/live-gates.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -82,6 +86,7 @@
     "lib/types/**/*.d.ts",
     "lib/types/**/*.d.ts.map",
     "cordis.patch.yml",
+    "scripts/live-gates.mjs",
     "CHANGELOG.md",
     "README.md",
     "README.zh.md",
@@ -92,6 +97,7 @@
     "bundle": "tsdown",
     "check": "pnpm peers check && pnpm run lint && pnpm run typecheck && pnpm test && pnpm run build && pnpm run package:smoke && pnpm run publint",
     "lint": "oxlint src tests build scripts tsdown.config.ts vitest.config.ts",
+    "live:gates": "pnpm run build && node scripts/live-gates.mjs",
     "package:smoke": "node scripts/package-smoke.mjs",
     "prepare": "pnpm run build",
     "prepack": "pnpm run build",

@@ -23,6 +23,8 @@ import {
 } from './private-transport.ts'
 import { admitWorkspaceVideo } from './media-admission.ts'
 import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
+import { classifyPrivateFailure, type PrivateFailureKind } from './private-failure.ts'
+import { mountCapabilityLifecycle, type CapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-video'
 export const inject = ['tools', 'fs', 'antigravityAuth']
@@ -43,15 +45,14 @@ export interface Config extends AntigravityVideoSettings {}
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(false),
   model: z.string().default(ANTIGRAVITY_VIDEO_MODEL),
-  maxBytes: z.number().step(1).min(1).max(128 * 1024 * 1024).default(32 * 1024 * 1024),
+  maxBytes: z.number().step(1).min(1).max(32 * 1024 * 1024).default(32 * 1024 * 1024),
 })
 
 export interface AntigravityVideoToolOptions {
   readonly auth: Pick<CredentialCoordinator, 'credential'> | { credential(signal?: AbortSignal): Promise<HostCredential | undefined> }
-  readonly fs: Pick<FileSystem, 'resolve' | 'contains' | 'readBytes' | 'lstat'>
+  readonly fs: Pick<FileSystem, 'resolve' | 'contains' | 'readBytes' | 'lstat' | 'stat'>
   readonly settings?: () => AntigravityVideoSettings
   readonly transport?: PrivateTransport
-  readonly fetchImpl?: typeof fetch
 }
 
 export class AntigravityVideoError extends HarnessError {}
@@ -62,15 +63,19 @@ export interface VideoAnalysisResult {
 }
 
 export function createAntigravityVideoTools(options: AntigravityVideoToolOptions): readonly ToolDefinition[] {
+  const fixedOptions: AntigravityVideoToolOptions = {
+    ...options,
+    transport: options.transport ?? createPrivateTransport({ maxRequestBytes: 48 * 1024 * 1024 }),
+  }
   return [{
     name: ANALYZE_VIDEO_TOOL_NAME,
     description: 'Analyze an explicit MP4 file inside the active workspace with the gated Antigravity video POC.',
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string', minLength: 1 },
-        prompt: { type: 'string', minLength: 1 },
-        model: { type: 'string' },
+        path: { type: 'string', minLength: 1, maxLength: 4096 },
+        prompt: { type: 'string', minLength: 1, maxLength: 16_384 },
+        model: { type: 'string', maxLength: 256 },
       },
       required: ['path', 'prompt'],
       additionalProperties: false,
@@ -80,7 +85,7 @@ export function createAntigravityVideoTools(options: AntigravityVideoToolOptions
       render: (_args, value) => [{ type: 'text', text: (value as unknown as VideoAnalysisResult).text }],
       presentationMeta: (_args, value) => value,
     },
-    execute: async (args, exec) => executeVideo(options, args, exec),
+    execute: async (args, exec) => executeVideo(fixedOptions, args, exec),
     isConcurrencySafe: () => false,
   }]
 }
@@ -94,7 +99,8 @@ async function executeVideo(options: AntigravityVideoToolOptions, rawArgs: unkno
   if (credential === undefined) throw new AntigravityVideoError('Antigravity Video requires a logged-in account', 'VIDEO_AUTH_REQUIRED')
   const cwd = workspaceCwd(agent)
   const admitted = await admitWorkspaceVideo({ fs: options.fs, ...(settings.maxBytes === undefined ? {} : { maxVideoBytes: settings.maxBytes }) }, cwd, args.path, exec.signal)
-  const transport = options.transport ?? (options.fetchImpl === undefined ? createPrivateTransport() : createPrivateTransport({ fetchImpl: options.fetchImpl }))
+  const transport = options.transport
+  if (transport === undefined) throw new AntigravityVideoError('The Antigravity Video transport is unavailable', 'VIDEO_FAILED')
   let response: Response
   try {
     response = await transport.request({
@@ -144,54 +150,51 @@ export function apply(ctx?: Context, config: Config = { enabled: false, model: A
   }
   if (candidate.tools === undefined || candidate.fs === undefined) return
   let current = (): AntigravityVideoSettings => config
-  let disposers: Array<() => void> = []
-  const unregister = (): void => { for (const dispose of disposers.reverse()) dispose(); disposers = [] }
-  let register = (): void => {}
+  let lifecycle: CapabilityLifecycle | undefined
   installSettingsSection(ctx, ANTIGRAVITY_VIDEO_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source; register() },
-    onChange: () => { register() },
+    setSource: source => { current = source; lifecycle?.sync() },
+    onChange: () => { lifecycle?.sync() },
   })
   const provided = candidate.get?.('antigravityAuth')
   const auth = isAuthService(provided) ? provided : createAntigravityAuthService()
-  const ownsAuth = auth !== provided
-  let projectReady = typeof auth.status !== 'function'
-  let unwatch: (() => void) | undefined
-  register = () => {
-    if (current().enabled && projectReady && disposers.length === 0) disposers = createAntigravityVideoTools({ auth, fs: candidate.fs!, settings: current }).map(tool => candidate.tools!.register(tool))
-    else if ((!current().enabled || !projectReady) && disposers.length > 0) unregister()
-  }
-  const refreshGate = async (): Promise<void> => {
-    if (typeof auth.status !== 'function') return
-    try { projectReady = (await auth.status()).login.projectAvailable } catch { projectReady = false }
-    register()
-  }
-  unwatch = auth.watchStatus?.(() => { void refreshGate() })
-  register()
-  void refreshGate()
-  const lifecycle = ctx as unknown as { effect?: (setup: () => () => Promise<void>, label?: string) => unknown }
-  lifecycle.effect?.(() => async () => { unwatch?.(); unregister(); if (ownsAuth) await auth.dispose() }, 'antigravity-video: tool lifecycle')
+  lifecycle = mountCapabilityLifecycle({
+    ctx,
+    auth,
+    id: 'video',
+    enabled: () => current().enabled,
+    register: () => {
+      const disposers = createAntigravityVideoTools({ auth, fs: candidate.fs!, settings: current }).map(tool => candidate.tools!.register(tool))
+      return () => { for (const dispose of disposers.reverse()) dispose() }
+    },
+    ownsAuth: auth !== provided,
+    label: 'antigravity-video: tool lifecycle',
+  })
 }
 
 function isAuthService(value: unknown): value is AntigravityAuthService {
-  return isRecord(value) && typeof value.credential === 'function'
+  return isRecord(value) && typeof value.credential === 'function' && typeof value.status === 'function'
 }
 
 function extractText(value: unknown): string | undefined {
   const output: string[] = []
-  const visit = (item: unknown): void => {
-    if (Array.isArray(item)) { for (const child of item) visit(child); return }
+  let outputLength = 0
+  const visit = (item: unknown, depth = 0): void => {
+    if (depth > 32 || outputLength >= 64 * 1024) return
+    if (Array.isArray(item)) { for (const child of item) visit(child, depth + 1); return }
     if (!isRecord(item)) return
     if (Array.isArray(item.parts)) {
       for (const part of item.parts) {
         if (!isRecord(part) || typeof part.text !== 'string' || hasControl(part.text)) continue
-        output.push(part.text.slice(0, 64 * 1024))
+        const text = part.text.slice(0, 64 * 1024 - outputLength)
+        output.push(text)
+        outputLength += text.length
       }
     }
-    if (isRecord(item.response)) visit(item.response)
-    if (isRecord(item.content)) visit(item.content)
-    if (Array.isArray(item.candidates)) visit(item.candidates)
-    if (isRecord(item.serverContent)) visit(item.serverContent)
-    if (isRecord(item.modelTurn)) visit(item.modelTurn)
+    if (isRecord(item.response)) visit(item.response, depth + 1)
+    if (isRecord(item.content)) visit(item.content, depth + 1)
+    if (Array.isArray(item.candidates)) visit(item.candidates, depth + 1)
+    if (isRecord(item.serverContent)) visit(item.serverContent, depth + 1)
+    if (isRecord(item.modelTurn)) visit(item.modelTurn, depth + 1)
   }
   visit(value)
   const text = output.join('').trim()
@@ -199,10 +202,11 @@ function extractText(value: unknown): string | undefined {
 }
 
 function extractUsage(value: unknown): TokenUsage | undefined {
-  const visit = (item: unknown): TokenUsage | undefined => {
+  const visit = (item: unknown, depth = 0): TokenUsage | undefined => {
+    if (depth > 32) return undefined
     if (Array.isArray(item)) {
       for (const child of item) {
-        const result = visit(child)
+        const result = visit(child, depth + 1)
         if (result !== undefined) return result
       }
       return undefined
@@ -219,7 +223,7 @@ function extractUsage(value: unknown): TokenUsage | undefined {
       }
     }
     for (const key of ['response', 'candidates', 'serverContent']) {
-      const result = visit(item[key])
+      const result = visit(item[key], depth + 1)
       if (result !== undefined) return result
     }
     return undefined
@@ -232,7 +236,7 @@ function safeCount(value: unknown): number | undefined {
 }
 
 function parseArgs(value: unknown, settings: AntigravityVideoSettings): { path: string; prompt: string; model: string } {
-  if (!isRecord(value) || hasExtra(value, ['path', 'prompt', 'model']) || typeof value.path !== 'string' || typeof value.prompt !== 'string' || value.path.length === 0 || value.prompt.trim().length === 0) {
+  if (!isRecord(value) || hasExtra(value, ['path', 'prompt', 'model']) || typeof value.path !== 'string' || typeof value.prompt !== 'string' || value.path.length === 0 || value.path.length > 4096 || value.prompt.trim().length === 0 || value.prompt.length > 16_384) {
     throw new AntigravityVideoError('analyze_video expects a closed path and prompt object', 'INVALID_ARGS')
   }
   const model = value.model === undefined ? settings.model : value.model
@@ -252,11 +256,25 @@ function workspaceCwd(agent: Agent): string {
   return cwd
 }
 
+const VIDEO_FAILURE_CODES: Readonly<Record<PrivateFailureKind, string>> = {
+  authentication: 'VIDEO_AUTH_REQUIRED',
+  forbidden: 'VIDEO_FORBIDDEN',
+  'rate-limited': 'VIDEO_RATE_LIMITED',
+  cancelled: 'VIDEO_CANCELLED',
+  timeout: 'VIDEO_TIMEOUT',
+  'attribution-rejected': 'VIDEO_PROTOCOL_DRIFT',
+  'protocol-drift': 'VIDEO_PROTOCOL_DRIFT',
+  'response-limit': 'VIDEO_PROTOCOL_DRIFT',
+  'request-limit': 'VIDEO_PROTOCOL_DRIFT',
+  upstream: 'VIDEO_FAILED',
+  network: 'VIDEO_FAILED',
+  failed: 'VIDEO_FAILED',
+}
+
 function toVideoError(error: unknown): AntigravityVideoError {
   if (error instanceof AntigravityVideoError) return error
   if (error instanceof PrivateTransportError) {
-    const code = error.code === 'authentication' ? 'VIDEO_AUTH_REQUIRED' : error.code === 'rate-limited' ? 'VIDEO_RATE_LIMITED' : error.code === 'timeout' ? 'VIDEO_TIMEOUT' : error.code === 'cancelled' ? 'VIDEO_CANCELLED' : 'VIDEO_PROTOCOL_DRIFT'
-    return new AntigravityVideoError('The Antigravity Video request failed safely', code)
+    return new AntigravityVideoError('The Antigravity Video request failed safely', VIDEO_FAILURE_CODES[classifyPrivateFailure(error)])
   }
   return new AntigravityVideoError('The Antigravity Video request failed safely', 'VIDEO_FAILED')
 }

@@ -1,6 +1,6 @@
 # The bootstrap shell keeps the capability rows independently addressable.
 # OAuth and private I/O stay on Host; each row owns its public capability seam and
-# rechecks the single-account/project/settings gates before doing work.
+# rechecks the single-account/project/live-evidence/settings gates before doing work.
 - insert:
     - id: antigravity-auth
       name: 'dsh-antigravity-auth'

@@ -13,6 +13,7 @@ import {
   type PrivateTransport,
   type PrivateTransportOptions,
 } from './private-transport.ts'
+import { classifyPrivateFailure, type PrivateFailureKind } from './private-failure.ts'
 
 export const ANTIGRAVITY_QUOTA_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:retrieveUserQuotaSummary` as const
 export const QUOTA_REFRESH_MIN_INTERVAL_MS = 30_000
@@ -48,7 +49,6 @@ export interface QuotaServiceOptions {
   readonly auth: Pick<CredentialCoordinator, 'credential'> | { credential(signal?: AbortSignal): Promise<HostCredential | undefined> }
   readonly transport?: PrivateTransport
   readonly transportOptions?: PrivateTransportOptions
-  readonly fetchImpl?: typeof fetch
   readonly now?: () => number
   readonly minIntervalMs?: number
 }
@@ -106,9 +106,8 @@ export function createQuotaService(options: QuotaServiceOptions): QuotaService {
   const now = options.now ?? (() => Date.now())
   const minInterval = positive(options.minIntervalMs, QUOTA_REFRESH_MIN_INTERVAL_MS)
   const transport = options.transport ?? createPrivateTransport({
-    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-    ...(options.transportOptions?.wireIdentity === undefined ? {} : { wireIdentity: options.transportOptions.wireIdentity }),
     ...(options.transportOptions?.responseHeaderTimeoutMs === undefined ? {} : { responseHeaderTimeoutMs: options.transportOptions.responseHeaderTimeoutMs }),
+    ...(options.transportOptions?.maxRequestBytes === undefined ? {} : { maxRequestBytes: options.transportOptions.maxRequestBytes }),
   })
   let current: QuotaStatusView = { state: 'unauthenticated' }
   let checkedAt = 0
@@ -174,15 +173,24 @@ async function refreshQuota(
   return normalizeQuotaResponse(value, now())
 }
 
+const QUOTA_FAILURE_STATES: Readonly<Record<PrivateFailureKind, QuotaState>> = {
+  authentication: 'unauthenticated',
+  forbidden: 'forbidden',
+  'rate-limited': 'rate-limited',
+  cancelled: 'offline',
+  timeout: 'timeout',
+  'attribution-rejected': 'protocol-drift',
+  'protocol-drift': 'protocol-drift',
+  'response-limit': 'protocol-drift',
+  'request-limit': 'protocol-drift',
+  upstream: 'offline',
+  network: 'offline',
+  failed: 'offline',
+}
+
 function mapQuotaError(error: unknown, checkedAt: number): QuotaStatusView {
   const state: QuotaState = error instanceof PrivateTransportError
-    ? error.code === 'authentication' ? 'unauthenticated'
-      : error.code === 'forbidden' ? 'forbidden'
-        : error.code === 'rate-limited' ? 'rate-limited'
-          : error.code === 'timeout' ? 'timeout'
-            : error.code === 'cancelled' ? 'offline'
-              : error.code === 'protocol-drift' || error.code === 'invalid-response' ? 'protocol-drift'
-                : 'offline'
+    ? QUOTA_FAILURE_STATES[classifyPrivateFailure(error)]
     : error instanceof QuotaNormalizationError ? 'protocol-drift' : 'offline'
   return { state, checkedAt: new Date(checkedAt).toISOString() }
 }

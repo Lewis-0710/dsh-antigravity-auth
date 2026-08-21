@@ -1,54 +1,18 @@
 /** Bounded Host-only transport primitives for the private Antigravity endpoints. */
 
-import {
-  ANTIGRAVITY_WIRE_ORIGIN,
-  createWireIdentity,
-  type WireIdentity,
-} from './wire-identity.ts'
+import { createRawPrivateDispatcher } from './raw-http.ts'
+import { PrivateTransportError } from './private-transport-error.ts'
+import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
+export { PrivateTransportError } from './private-transport-error.ts'
+export type { PrivateTransportErrorCode } from './private-transport-error.ts'
 
 export const DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS = 15_000
 export const DEFAULT_PRIVATE_IDLE_TIMEOUT_MS = 30_000
 export const DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS = 120_000
 export const DEFAULT_PRIVATE_RESPONSE_BYTES = 8 * 1024 * 1024
 export const DEFAULT_PRIVATE_REQUEST_BYTES = 16 * 1024 * 1024
+export const MAX_PRIVATE_REQUEST_BYTES = 64 * 1024 * 1024
 export const DEFAULT_PRIVATE_FRAME_BYTES = 512 * 1024
-
-const OMIT_FRAMING_HEADERS = new Set(['host', 'content-length', 'transfer-encoding'])
-
-export type PrivateTransportErrorCode =
-  | 'authentication'
-  | 'forbidden'
-  | 'rate-limited'
-  | 'timeout'
-  | 'offline'
-  | 'cancelled'
-  | 'response-too-large'
-  | 'request-too-large'
-  | 'frame-too-large'
-  | 'invalid-response'
-  | 'protocol-drift'
-  | 'upstream'
-  | 'attribution-rejected'
-
-export class PrivateTransportError extends Error {
-  readonly code: PrivateTransportErrorCode
-  readonly status?: number
-  /** Whether an upstream could have accepted the generation request. */
-  readonly accepted: boolean
-
-  constructor(
-    code: PrivateTransportErrorCode,
-    message: string,
-    options: { readonly status?: number; readonly accepted?: boolean } = {},
-  ) {
-    super(message)
-    this.name = 'PrivateTransportError'
-    this.code = code
-    this.accepted = options.accepted ?? true
-    if (options.status === undefined) return
-    this.status = options.status
-  }
-}
 
 export interface PrivateTransportRequest {
   readonly url: string
@@ -59,8 +23,6 @@ export interface PrivateTransportRequest {
 }
 
 export interface PrivateTransportOptions {
-  readonly fetchImpl?: typeof fetch
-  readonly wireIdentity?: WireIdentity
   readonly responseHeaderTimeoutMs?: number
   readonly maxRequestBytes?: number
 }
@@ -69,77 +31,31 @@ export interface PrivateTransport {
   request(input: PrivateTransportRequest): Promise<Response>
 }
 
-/** Build one fixed private request transport. Callers cannot supply headers or origins. */
+/** Build one fixed raw private transport. Callers cannot supply headers, identity, or origins. */
 export function createPrivateTransport(options: PrivateTransportOptions = {}): PrivateTransport {
-  const fetchImpl = options.fetchImpl ?? globalThis.fetch
-  const wire = options.wireIdentity ?? createWireIdentity()
+  let dispatch: ReturnType<typeof createRawPrivateDispatcher> | undefined
   const headerTimeoutMs = boundedTimeout(options.responseHeaderTimeoutMs, DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS)
+  const maxRequestBytes = boundedRequestBytes(options.maxRequestBytes)
 
   return {
     request: async input => {
-      if (isAborted(input.signal)) throw cancelledError()
-      const maxRequestBytes = boundedPositive(options.maxRequestBytes, DEFAULT_PRIVATE_REQUEST_BYTES)
+      if (isAborted(input.signal)) throw cancelledError(false)
       const requestBytes = typeof input.body === 'string' ? new TextEncoder().encode(input.body).byteLength : input.body.byteLength
       if (requestBytes > maxRequestBytes) throw new PrivateTransportError('request-too-large', 'The private request exceeded the byte limit', { accepted: false })
-      const requestController = new AbortController()
-      const removeAbort = forwardAbort(input.signal, requestController)
-      const timeout = boundedTimeout(input.responseHeaderTimeoutMs, headerTimeoutMs)
-      let timer: ReturnType<typeof setTimeout> | undefined
-      let timedOut = false
-      const body = typeof input.body === 'string' ? input.body : input.body
-      let headers: Record<string, string>
-      try {
-        const identityHeaders = wire.headers()
-        const pairs = wire.headerPairs(input.url, {
-          authorization: `Bearer ${input.accessToken}`,
-          body,
-        })
-        headers = {}
-        for (const [name, value] of pairs) {
-          if (OMIT_FRAMING_HEADERS.has(name.toLowerCase())) continue
-          headers[name] = value
+      if (dispatch === undefined) {
+        try { dispatch = createRawPrivateDispatcher() } catch {
+          throw new PrivateTransportError('attribution-rejected', 'The private request identity could not be constructed', { accepted: false })
         }
-        const bearer = headers.Authorization ?? headers.authorization
-        if (typeof bearer !== 'string') throw new PrivateTransportError('protocol-drift', 'The private identity did not produce authorization')
-        for (const name of ['User-Agent', 'X-Goog-Api-Client', 'Client-Metadata', 'X-DeepSeek-Harness-Attribution']) {
-          const expected = identityHeaders[name as keyof typeof identityHeaders]
-          if (typeof expected !== 'string' || headers[name] !== expected) throw new PrivateTransportError('protocol-drift', 'The private identity omitted a mandatory carrier')
-        }
-      } catch (error) {
-        removeAbort()
-        if (error instanceof PrivateTransportError) throw error
-        throw new PrivateTransportError('attribution-rejected', 'The private request identity was rejected')
       }
-
-      const request = Promise.resolve().then(() => fetchImpl(input.url, {
-        method: 'POST',
-        headers,
-        body: body as unknown as BodyInit,
-        signal: requestController.signal,
-      }))
-      request.catch(() => {})
-      try {
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timer = setTimeout(() => {
-            timedOut = true
-            requestController.abort()
-            reject(new PrivateTransportError('timeout', 'The private request timed out before response headers', { accepted: false }))
-          }, timeout)
-        })
-        const response = await Promise.race([request, timeoutPromise])
-        if (!(response instanceof Response)) {
-          throw new PrivateTransportError('invalid-response', 'The private endpoint returned no response')
-        }
-        return response
-      } catch (error) {
-        if (error instanceof PrivateTransportError) throw error
-        if (isAborted(input.signal)) throw cancelledError()
-        if (timedOut) throw new PrivateTransportError('timeout', 'The private request timed out', { accepted: false })
-        throw new PrivateTransportError('offline', 'The private endpoint could not be reached', { accepted: false })
-      } finally {
-        if (timer !== undefined) clearTimeout(timer)
-        removeAbort()
-      }
+      const response = await dispatch({
+        url: input.url,
+        accessToken: input.accessToken,
+        body: input.body,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+        responseHeaderTimeoutMs: boundedTimeout(input.responseHeaderTimeoutMs, headerTimeoutMs),
+      })
+      if (!(response instanceof Response)) throw new PrivateTransportError('invalid-response', 'The private endpoint returned no response')
+      return response
     },
   }
 }
@@ -163,7 +79,7 @@ export interface BoundedReadOptions {
 
 /** Read a response body with byte, idle, total, and cancellation bounds. */
 export async function readPrivateBytes(response: Response, options: BoundedReadOptions = {}): Promise<Uint8Array> {
-  const maxBytes = boundedPositive(options.maxBytes, DEFAULT_PRIVATE_RESPONSE_BYTES)
+  const maxBytes = boundedBytes(options.maxBytes, DEFAULT_PRIVATE_RESPONSE_BYTES)
   if (response.body === null) {
     try {
       const data = new Uint8Array(await response.arrayBuffer())
@@ -227,8 +143,8 @@ export async function* iteratePrivateSse(
   response: Response,
   options: BoundedReadOptions & { readonly maxFrameBytes?: number } = {},
 ): AsyncGenerator<PrivateSseEvent> {
-  const maxBytes = boundedPositive(options.maxBytes, DEFAULT_PRIVATE_RESPONSE_BYTES)
-  const maxFrameBytes = boundedPositive(options.maxFrameBytes, DEFAULT_PRIVATE_FRAME_BYTES)
+  const maxBytes = boundedBytes(options.maxBytes, DEFAULT_PRIVATE_RESPONSE_BYTES)
+  const maxFrameBytes = boundedBytes(options.maxFrameBytes, DEFAULT_PRIVATE_FRAME_BYTES)
   if (response.body === null) {
     const text = await readPrivateText(response, options)
     if (text.trim().length > 0) yield { data: text.trim() }
@@ -276,20 +192,19 @@ export async function* iteratePrivateSse(
         let line = buffer.slice(0, newline)
         buffer = buffer.slice(newline + 1)
         if (line.endsWith('\r')) line = line.slice(0, -1)
-        if (line.length > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
+        if (utf8Bytes(line) > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
         if (line.length === 0) {
           const event = flush()
           if (event !== undefined) yield event
           continue
         }
         if (line.startsWith(':')) continue
+        frameBytes += utf8Bytes(line) + 1
+        if (frameBytes > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
         if (line.startsWith('event:')) {
           eventName = line.slice('event:'.length).trim() || undefined
-          frameBytes += line.length
         } else if (line.startsWith('data:')) {
           const value = line.slice('data:'.length).replace(/^ /u, '')
-          frameBytes += value.length
-          if (frameBytes > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
           dataLines.push(value)
         }
       }
@@ -299,7 +214,8 @@ export async function* iteratePrivateSse(
     plainText += tail
     buffer += tail
     if (buffer.length > 0) {
-      if (buffer.length > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
+      frameBytes += utf8Bytes(buffer)
+      if (frameBytes > maxFrameBytes) throw new PrivateTransportError('frame-too-large', 'The private response frame exceeded the byte limit')
       if (buffer.startsWith('data:')) dataLines.push(buffer.slice(5).replace(/^ /u, ''))
     }
     const event = flush()
@@ -332,13 +248,13 @@ async function readChunk(
     await cancelReader(reader)
     throw cancelledError()
   }
-  const totalTimeout = boundedPositive(options.totalTimeoutMs, DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS)
+  const totalTimeout = boundedTimeout(options.totalTimeoutMs, DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS)
   const elapsed = Date.now() - startedAt
   if (elapsed >= totalTimeout) {
     await cancelReader(reader)
     throw new PrivateTransportError('timeout', 'The private response exceeded the total timeout')
   }
-  const idleTimeout = boundedPositive(options.idleTimeoutMs, DEFAULT_PRIVATE_IDLE_TIMEOUT_MS)
+  const idleTimeout = boundedTimeout(options.idleTimeoutMs, DEFAULT_PRIVATE_IDLE_TIMEOUT_MS)
   let timer: ReturnType<typeof setTimeout> | undefined
   let removeAbort: (() => void) | undefined
   const abort = new Promise<never>((_, reject) => {
@@ -368,30 +284,32 @@ async function readChunk(
   }
 }
 
-function isAborted(signal: AbortSignal | undefined): boolean {
-  return signal !== undefined && signal.aborted
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength
 }
 
-function forwardAbort(signal: AbortSignal | undefined, controller: AbortController): () => void {
-  if (signal === undefined) return () => {}
-  const abort = (): void => { if (!controller.signal.aborted) controller.abort(signal.reason) }
-  if (signal.aborted) abort()
-  else signal.addEventListener('abort', abort, { once: true })
-  return () => signal.removeEventListener('abort', abort)
+function isAborted(signal: AbortSignal | undefined): boolean {
+  return signal !== undefined && signal.aborted
 }
 
 async function cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<void> {
   try { await reader.cancel() } catch { /* best effort */ }
 }
 
-function cancelledError(): PrivateTransportError {
-  return new PrivateTransportError('cancelled', 'The private request was cancelled')
+function cancelledError(accepted = true): PrivateTransportError {
+  return new PrivateTransportError('cancelled', 'The private request was cancelled', { accepted })
 }
 
 function boundedTimeout(value: number | undefined, fallback: number): number {
   return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.min(Math.floor(value), 10 * 60 * 1000)
 }
 
-function boundedPositive(value: number | undefined, fallback: number): number {
-  return boundedTimeout(value, fallback)
+function boundedRequestBytes(value: number | undefined): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0
+    ? DEFAULT_PRIVATE_REQUEST_BYTES
+    : Math.min(Math.floor(value), MAX_PRIVATE_REQUEST_BYTES)
+}
+
+function boundedBytes(value: number | undefined, fallback: number): number {
+  return value === undefined || !Number.isFinite(value) || value <= 0 ? fallback : Math.min(Math.floor(value), fallback)
 }

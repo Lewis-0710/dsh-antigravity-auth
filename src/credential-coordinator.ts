@@ -2,6 +2,7 @@
 
 import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
 import { ANTIGRAVITY_CLIENT_ID, ANTIGRAVITY_CLIENT_SECRET } from '@cortexkit/antigravity-auth-core'
+import { isBoundedSafeText } from './safe-text.ts'
 
 export const ANTIGRAVITY_TOKEN_ENDPOINT = 'https://oauth2.googleapis.com/token' as const
 export const ANTIGRAVITY_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke' as const
@@ -560,7 +561,7 @@ export function createGoogleRefreshTransport(
     }
     const body = await readJsonBody(response)
     if (!response.ok) throw responseError(response.status, body)
-    if (!isRecord(body) || typeof body.access_token !== 'string' || !safeText(body.access_token)) {
+    if (!isRecord(body) || typeof body.access_token !== 'string' || !isBoundedSafeText(body.access_token, 4096)) {
       throw new CredentialOperationError('invalid-response')
     }
     const expiresIn = body.expires_in
@@ -568,7 +569,7 @@ export function createGoogleRefreshTransport(
       throw new CredentialOperationError('invalid-response')
     }
     const nextRefreshToken = body.refresh_token
-    if (nextRefreshToken !== undefined && (typeof nextRefreshToken !== 'string' || !safeText(nextRefreshToken))) {
+    if (nextRefreshToken !== undefined && (typeof nextRefreshToken !== 'string' || !isBoundedSafeText(nextRefreshToken, 4096))) {
       throw new CredentialOperationError('invalid-response')
     }
     return {
@@ -688,11 +689,11 @@ function responseError(status: number, body?: unknown): CredentialOperationError
 }
 
 function validateRefreshResult(value: RefreshAccessTokenResult): void {
-  if (!isRecord(value) || typeof value.accessToken !== 'string' || !safeText(value.accessToken)
+  if (!isRecord(value) || typeof value.accessToken !== 'string' || !isBoundedSafeText(value.accessToken, 4096)
     || typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt)) {
     throw new CredentialOperationError('invalid-response')
   }
-  if (value.refreshToken !== undefined && (typeof value.refreshToken !== 'string' || !safeText(value.refreshToken))) {
+  if (value.refreshToken !== undefined && (typeof value.refreshToken !== 'string' || !isBoundedSafeText(value.refreshToken, 4096))) {
     throw new CredentialOperationError('invalid-response')
   }
 }
@@ -703,15 +704,6 @@ function isCancelled(error: unknown): boolean {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === 'AbortError'
-}
-
-function safeText(value: string): boolean {
-  if (value.length === 0 || value.length > 4096) return false
-  for (let index = 0; index < value.length; index += 1) {
-    const codePoint = value.charCodeAt(index)
-    if (codePoint < 0x20 || codePoint === 0x7f) return false
-  }
-  return true
 }
 
 export function credentialErrorMessage(code: string): string | undefined {

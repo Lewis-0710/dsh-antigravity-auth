@@ -7,6 +7,7 @@
  * caller may supply, suppress, rename, or replace either identity.
  */
 
+import { Buffer } from 'node:buffer'
 import {
   ANTIGRAVITY_ENDPOINT,
   ANTIGRAVITY_HEADERS,
@@ -78,45 +79,60 @@ export interface WireIdentity {
    * header injection is intentionally not part of this interface.
    */
   headerPairs(url: string, request: WireRequest): readonly WireHeaderPair[]
+  /** Serialize the provider-fixed request as literal HTTP/1.1 bytes. */
+  serialize(url: string, request: WireRequest): Uint8Array
 }
 
 /** Create one immutable identity policy for all private operation callers. */
 export function createWireIdentity(): WireIdentity {
   const headers = buildWireIdentityHeaders()
-  return Object.freeze({
-    headers: () => headers,
-    headerPairs: (url: string, request: WireRequest): readonly WireHeaderPair[] => {
-      assertHttpsEndpoint(url)
-      assertClosedObject(request, ['authorization', 'body'], 'WIRE_REQUEST_OVERRIDE')
-      if (typeof request.body !== 'string' && !(request.body instanceof Uint8Array)) {
-        throw new WireIdentityError('WIRE_REQUEST_BODY_INVALID', 'The private request body is not bounded bytes')
+  const headerPairs = (url: string, request: WireRequest): readonly WireHeaderPair[] => {
+    assertHttpsEndpoint(url)
+    assertClosedObject(request, ['authorization', 'body'], 'WIRE_REQUEST_OVERRIDE')
+    if (typeof request.body !== 'string' && !(request.body instanceof Uint8Array)) {
+      throw new WireIdentityError('WIRE_REQUEST_BODY_INVALID', 'The private request body is not bounded bytes')
+    }
+    const authorization = validateAuthorization(request.authorization)
+    const basePairs = buildAgyCliHeaderPairs(url, {
+      method: 'POST',
+      body: request.body as unknown as BodyInit,
+      headers: {
+        'User-Agent': headers['User-Agent'],
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+        'Accept-Encoding': 'gzip',
+      },
+    })
+    const result: WireHeaderPair[] = []
+    for (const pair of basePairs) {
+      const immutablePair = Object.freeze([pair[0], pair[1]] as const)
+      result.push(immutablePair)
+      if (pair[0] === 'User-Agent') {
+        result.push(
+          Object.freeze(['X-Goog-Api-Client', headers['X-Goog-Api-Client']]),
+          Object.freeze(['Client-Metadata', headers['Client-Metadata']]),
+          Object.freeze([DSH_ATTRIBUTION_HEADER, headers[DSH_ATTRIBUTION_HEADER]]),
+        )
       }
-      const authorization = validateAuthorization(request.authorization)
-      const basePairs = buildAgyCliHeaderPairs(url, {
-        method: 'POST',
-        body: request.body as unknown as BodyInit,
-        headers: {
-          'User-Agent': headers['User-Agent'],
-          Authorization: authorization,
-          'Content-Type': 'application/json',
-          'Accept-Encoding': 'gzip',
-        },
-      })
-      const result: WireHeaderPair[] = []
-      for (const pair of basePairs) {
-        const immutablePair = Object.freeze([pair[0], pair[1]] as const)
-        result.push(immutablePair)
-        if (pair[0] === 'User-Agent') {
-          result.push(
-            Object.freeze(['X-Goog-Api-Client', headers['X-Goog-Api-Client']]),
-            Object.freeze(['Client-Metadata', headers['Client-Metadata']]),
-            Object.freeze([DSH_ATTRIBUTION_HEADER, headers[DSH_ATTRIBUTION_HEADER]]),
-          )
-        }
-      }
-      return Object.freeze(result)
-    },
-  })
+    }
+    return Object.freeze(result)
+  }
+  const serialize = (url: string, request: WireRequest): Uint8Array => {
+    const parsed = new URL(url)
+    const pairs = headerPairs(url, request)
+    const body = typeof request.body === 'string' ? Buffer.from(request.body) : Buffer.from(request.body)
+    const lines = pairs.map(([name, value]) => `${name}: ${value}`).join('\r\n')
+    const head = Buffer.from(`POST ${parsed.pathname} HTTP/1.1\r\n${lines}\r\n\r\n`)
+    if (!pairs.some(([name]) => name === 'Transfer-Encoding')) return body.byteLength === 0 ? head : Buffer.concat([head, body])
+    if (body.byteLength === 0) return Buffer.concat([head, Buffer.from('0\r\n\r\n')])
+    return Buffer.concat([
+      head,
+      Buffer.from(`${body.byteLength.toString(16)}\r\n`),
+      body,
+      Buffer.from('\r\n0\r\n\r\n'),
+    ])
+  }
+  return Object.freeze({ headers: () => headers, headerPairs, serialize })
 }
 
 /** Validate one complete, provider-fixed Wire Identity header set. */

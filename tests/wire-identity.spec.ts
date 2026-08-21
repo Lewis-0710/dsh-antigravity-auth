@@ -67,6 +67,40 @@ describe('plugin-owned Wire Identity', () => {
     expect(pairs).not.toContainEqual(['Transfer-Encoding', 'chunked'])
   })
 
+  it('serializes the exact ordered raw HTTP/1.1 request with the DSH carrier on wire', () => {
+    const bytes = identity().serialize('https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent', {
+      authorization: 'Bearer access-token',
+      body: '{}',
+    })
+    const raw = new TextDecoder().decode(bytes)
+    expect(raw).toBe([
+      'POST /v1internal:streamGenerateContent HTTP/1.1',
+      'Host: daily-cloudcode-pa.googleapis.com',
+      `User-Agent: ${ANTIGRAVITY_HEADERS['User-Agent']}`,
+      `X-Goog-Api-Client: ${ANTIGRAVITY_HEADERS['X-Goog-Api-Client']}`,
+      `Client-Metadata: ${ANTIGRAVITY_HEADERS['Client-Metadata']}`,
+      `${DSH_ATTRIBUTION_HEADER}: ${DSH_USER_AGENT}`,
+      'Transfer-Encoding: chunked',
+      'Authorization: Bearer access-token',
+      'Content-Type: application/json',
+      'Accept-Encoding: gzip',
+      '',
+      '2',
+      '{}',
+      '0',
+      '',
+      '',
+    ].join('\r\n'))
+  })
+
+  it('terminates an empty chunked streaming request explicitly', () => {
+    const bytes = identity().serialize('https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent', {
+      authorization: 'Bearer access-token',
+      body: '',
+    })
+    expect(new TextDecoder().decode(bytes)).toMatch(/\r\n\r\n0\r\n\r\n$/u)
+  })
+
   it.each([
     ['missing', () => ({})],
     ['empty', () => ({ 'user-agent': '' })],

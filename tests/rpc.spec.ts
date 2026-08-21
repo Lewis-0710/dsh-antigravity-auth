@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createAntigravityAuthRpcClient,
+  parseModelCatalogResult,
   parseStatusResult,
   parseUsageResult,
 } from '../src/rpc-contract.ts'
+import type { AntigravityAuthConnectionRpc } from '../src/rpc-contract.ts'
 import { handleAntigravityAuthRpc } from '../src/rpc.ts'
 import { createMemoryAuthStore } from '../src/auth-store.ts'
 import { createBootstrapStatusService } from '../src/bootstrap-service.ts'
@@ -42,15 +44,50 @@ describe('Antigravity login RPC', () => {
           credential: { state: 'logged-out', configured: false },
           revoke: { state: 'idle' },
           capabilities: [
-            { id: 'auth-llm', state: 'poc-pending', reasonCode: 'llm-not-implemented' },
-            { id: 'search', state: 'poc-pending', reasonCode: 'gate-not-run' },
-            { id: 'image', state: 'poc-pending', reasonCode: 'gate-not-run' },
-            { id: 'video', state: 'poc-pending', reasonCode: 'gate-not-run' },
+            { id: 'auth-llm', state: 'disabled', reasonCode: 'unauthenticated' },
+            { id: 'search', state: 'disabled', reasonCode: 'unauthenticated' },
+            { id: 'image', state: 'disabled', reasonCode: 'unauthenticated' },
+            { id: 'video', state: 'disabled', reasonCode: 'unauthenticated' },
           ],
         },
       },
     })
     expect(JSON.stringify(result)).not.toMatch(/token|secret|cookie/i)
+  })
+
+  it('keeps model discovery snapshot-only until Gate 0/L passes, then allows one bounded refresh', async () => {
+    const service = createBootstrapStatusService()
+    const snapshot = {
+      state: 'snapshot' as const,
+      models: [{ id: 'antigravity-gemini-3.7-flash', name: 'Gemini 3.7 Flash', state: 'snapshot' as const }],
+    }
+    const live = {
+      state: 'live-available' as const,
+      checkedAt: '2030-01-01T00:00:00.000Z',
+      models: [{ id: 'antigravity-gemini-3.7-flash', name: 'Gemini 3.7 Flash', state: 'live-available' as const }],
+    }
+    const catalog = { catalogSnapshot: vi.fn(() => snapshot), modelCatalog: vi.fn(async () => live) }
+
+    await expect(handleAntigravityAuthRpc(service, 'models', { force: true }, signal, catalog)).resolves.toEqual({ ok: true, value: snapshot })
+    expect(catalog.modelCatalog).not.toHaveBeenCalled()
+
+    vi.spyOn(service, 'status').mockResolvedValue(createStatusView(
+      true,
+      { phase: 'success', configured: true, projectAvailable: true },
+      undefined,
+      undefined,
+      {
+        gate0: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        llmFamilies: {
+          gemini: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+          claude: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+          'gpt-oss': { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        },
+      },
+    ))
+    await expect(handleAntigravityAuthRpc(service, 'models', { force: true }, signal, catalog)).resolves.toEqual({ ok: true, value: live })
+    expect(catalog.modelCatalog).toHaveBeenCalledWith(signal, true)
+    await service.dispose()
   })
 
   it('requires a risk acknowledgement before login can begin', async () => {
@@ -112,8 +149,9 @@ describe('Antigravity login RPC', () => {
     for (const [endpoint, payload] of [
       ['status', { extra: true }],
       ['acknowledge-risk', { acknowledge: true, extra: true }],
-      ['login', { callbackUrl: 'secret' }],
+      ['login', { callbackUrl: 'forbidden-value' }],
       ['cancel', { extra: true }],
+      ['models', { force: 'yes' }],
       ['complete-callback', { callbackUrl: '' }],
       ['logout', { extra: true }],
       ['revoke', { confirmed: false }],
@@ -149,6 +187,54 @@ describe('Antigravity login RPC', () => {
     expect(parseStatusResult({ status })).toMatchObject({ capabilities: status.capabilities })
   })
 
+  it('does not infer live capability gates from project discovery alone', () => {
+    const login = { phase: 'success' as const, configured: true, projectAvailable: true }
+    const pending = createStatusView(true, login)
+    expect(pending.capabilities.every(capability => capability.state === 'poc-pending')).toBe(true)
+    const gate0Failed = createStatusView(true, login, undefined, undefined, {
+      gate0: { outcome: 'failed', checkedAt: '2030-01-01T00:00:00.000Z' },
+    })
+    expect(gate0Failed.capabilities.every(capability => capability.reasonCode === 'gate-0-failed')).toBe(true)
+
+    const passed = createStatusView(true, login, undefined, undefined, {
+      gate0: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+      llmFamilies: {
+        gemini: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        claude: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        'gpt-oss': { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+      },
+      capabilities: {
+        search: { outcome: 'rate-limited', checkedAt: '2030-01-01T00:00:00.000Z' },
+        image: { outcome: 'protocol-drift', checkedAt: '2030-01-01T00:00:00.000Z' },
+        video: { outcome: 'cancelled', checkedAt: '2030-01-01T00:00:00.000Z' },
+      },
+    })
+    expect(passed.capabilities).toEqual([
+      { id: 'auth-llm', state: 'available', reasonCode: 'capability-ready' },
+      { id: 'search', state: 'disabled', reasonCode: 'rate-limited' },
+      { id: 'image', state: 'protocol-drift', reasonCode: 'protocol-drift' },
+      { id: 'video', state: 'disabled', reasonCode: 'cancelled' },
+    ])
+  })
+
+  it('validates closed advisory model-catalog states without private response fields', () => {
+    const valid = {
+      state: 'live-available',
+      checkedAt: '2030-01-01T00:00:00.000Z',
+      models: [
+        { id: 'antigravity-gemini-3.7-flash', name: 'Gemini 3.7 Flash', state: 'live-available' },
+        { id: 'antigravity-claude-sonnet', name: 'Claude Sonnet', state: 'unavailable' },
+      ],
+    }
+    expect(parseModelCatalogResult(valid)).toEqual(valid)
+    expect(parseModelCatalogResult({ ...valid, privateBody: 'forbidden-value' })).toBeUndefined()
+    expect(parseModelCatalogResult({ ...valid, models: [{ ...valid.models[0], state: 'snapshot' }] })).toBeUndefined()
+    expect(parseModelCatalogResult({ state: 'refresh-failed', models: [{ ...valid.models[0], state: 'snapshot' }] })).toEqual({
+      state: 'refresh-failed',
+      models: [{ ...valid.models[0], state: 'snapshot' }],
+    })
+  })
+
   it('validates the browser response as a closed, value-safe quota schema', () => {
     const valid = {
       state: 'available',
@@ -179,7 +265,7 @@ describe('Antigravity login RPC', () => {
     expect(parseStatusResult({ ...valid, status: { ...valid.status, revoke: { state: 'failed', errorCode: 'invalid-grant' } } })).toBeUndefined()
   })
 
-  it('keeps the browser face typed and forwards only fixed operations', async () => {
+  it('keeps callback URLs Host-only and forwards only fixed browser operations', async () => {
     const status = createStatusView(false, { phase: 'idle', configured: false, projectAvailable: false })
     const rpc = {
       call: vi.fn()
@@ -189,7 +275,7 @@ describe('Antigravity login RPC', () => {
         .mockResolvedValueOnce({ ok: true, value: { phase: 'cancelled', errorCode: 'cancelled' } })
         .mockResolvedValueOnce({ ok: true, value: { state: 'logged-out' } })
         .mockResolvedValueOnce({ ok: true, value: { state: 'revoked' } })
-        .mockResolvedValueOnce({ ok: true, value: { completed: false, phase: 'failed', errorCode: 'oauth-error' } }),
+        .mockResolvedValueOnce({ ok: true, value: { state: 'snapshot', models: [{ id: 'model', name: 'Model', state: 'snapshot' }] } }),
     }
     const client = createAntigravityAuthRpcClient(rpc)
 
@@ -199,8 +285,9 @@ describe('Antigravity login RPC', () => {
     await client.cancelLogin()
     await client.logout()
     await client.revoke()
-    await client.completeCallback('http://localhost:51121/oauth-callback?state=state&code=code')
+    await client.models(undefined, true)
 
+    expect(client).not.toHaveProperty('completeCallback')
     expect(rpc.call.mock.calls.map(call => call.slice(0, 3))).toEqual([
       ['/antigravity-auth', 'status', {}],
       ['/antigravity-auth', 'acknowledge-risk', { acknowledge: true }],
@@ -208,7 +295,97 @@ describe('Antigravity login RPC', () => {
       ['/antigravity-auth', 'cancel', {}],
       ['/antigravity-auth', 'logout', {}],
       ['/antigravity-auth', 'revoke', { confirmed: true }],
-      ['/antigravity-auth', 'complete-callback', { callbackUrl: 'http://localhost:51121/oauth-callback?state=state&code=code' }],
+      ['/antigravity-auth', 'models', { force: true }],
     ])
+  })
+
+  it('rejects callback URLs at the browser RPC boundary', async () => {
+    const service = createBootstrapStatusService()
+    const completeCallback = vi.spyOn(service, 'completeCallback')
+    const result = await handleAntigravityAuthRpc(service, 'complete-callback', {
+      callbackUrl: 'forbidden-value',
+    }, signal)
+
+    expect(result).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(completeCallback).not.toHaveBeenCalled()
+    await service.dispose()
+  })
+
+  it('rejects authorization URLs carrying callback codes or unknown query fields', async () => {
+    const rpc = {
+      call: vi.fn(async () => ({
+        ok: true as const,
+        value: {
+          ...loginFixture(),
+          authorizationUrl: `${loginFixture().authorizationUrl}&code=forbidden-value`,
+        },
+      })),
+    } as unknown as AntigravityAuthConnectionRpc
+
+    const result = await createAntigravityAuthRpcClient(rpc).login()
+
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'antigravity-auth: invalid login response from Host',
+        details: {},
+      },
+    })
+    expect(JSON.stringify(result)).not.toContain('forbidden-value')
+  })
+
+  it('sanitizes and validates Host error replies before exposing them to the browser', async () => {
+    const rpc = {
+      call: vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          error: {
+            code: 'internal',
+            message: 'forbidden host detail',
+            details: { callbackUrl: 'forbidden-value' },
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: false,
+          error: {
+            code: 'internal',
+            message: 'forbidden host detail',
+            details: {},
+          },
+        })
+        .mockRejectedValueOnce(new Error('forbidden host detail')),
+    } as unknown as AntigravityAuthConnectionRpc
+    const client = createAntigravityAuthRpcClient(rpc)
+
+    const malformed = await client.status()
+    const sanitized = await client.status()
+    const rejected = await client.status()
+
+    expect(malformed).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'antigravity-auth: invalid status response from Host',
+        details: {},
+      },
+    })
+    expect(sanitized).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'antigravity-auth: operation failed',
+        details: {},
+      },
+    })
+    expect(rejected).toEqual({
+      ok: false,
+      error: {
+        code: 'internal',
+        message: 'antigravity-auth: invalid status response from Host',
+        details: {},
+      },
+    })
+    expect(JSON.stringify([malformed, sanitized, rejected])).not.toMatch(/secret|callbackUrl|access-token/i)
   })
 })

@@ -13,11 +13,8 @@ import {
   type PrivateTransport,
   type PrivateTransportOptions,
 } from './private-transport.ts'
-import {
-  ANTIGRAVITY_WIRE_ORIGIN,
-  createWireIdentity,
-  type WireIdentity,
-} from './wire-identity.ts'
+import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
+import { classifyPrivateFailure, type PrivateFailureKind } from './private-failure.ts'
 
 export const PROJECT_DISCOVERY_PATH = '/v1internal:loadCodeAssist' as const
 export const PROJECT_DISCOVERY_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}${PROJECT_DISCOVERY_PATH}` as const
@@ -48,10 +45,7 @@ export class ProjectDiscoveryError extends Error {
 }
 
 export interface ProjectDiscoveryOptions {
-  /** Inject a deterministic transport for offline tests; the URL remains code-owned. */
-  readonly fetchImpl?: typeof fetch
-  /** Inject only the centralized identity seam; callers cannot provide request headers. */
-  readonly wireIdentity?: WireIdentity
+  /** Inject a complete deterministic transport for offline tests; identity is never injectable. */
   readonly transport?: PrivateTransport
   readonly transportOptions?: PrivateTransportOptions
   readonly operationTimeoutMs?: number
@@ -68,11 +62,8 @@ export type { ProjectValidation }
 
 /** Create the fixed, read-only loadCodeAssist project probe. */
 export function createProjectDiscovery(options: ProjectDiscoveryOptions = {}): ProjectDiscovery {
-  const wire = options.wireIdentity ?? options.transportOptions?.wireIdentity ?? createWireIdentity()
   const timeoutMs = boundedTimeout(options.operationTimeoutMs)
   const transport = options.transport ?? createPrivateTransport({
-    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-    wireIdentity: wire,
     ...(options.transportOptions?.responseHeaderTimeoutMs === undefined ? {} : { responseHeaderTimeoutMs: options.transportOptions.responseHeaderTimeoutMs }),
     ...(options.transportOptions?.maxRequestBytes === undefined ? {} : { maxRequestBytes: options.transportOptions.maxRequestBytes }),
   })
@@ -154,16 +145,24 @@ function boundedTimeout(value: number | undefined): number {
   return Math.min(Math.floor(value), MAX_OPERATION_TIMEOUT_MS)
 }
 
+const PROJECT_FAILURE_CODES: Readonly<Record<PrivateFailureKind, ProjectDiscoveryErrorCode>> = {
+  authentication: 'authentication',
+  forbidden: 'forbidden',
+  'rate-limited': 'rate-limited',
+  cancelled: 'cancelled',
+  timeout: 'offline',
+  'attribution-rejected': 'protocol-drift',
+  'protocol-drift': 'protocol-drift',
+  'response-limit': 'protocol-drift',
+  'request-limit': 'protocol-drift',
+  upstream: 'offline',
+  network: 'offline',
+  failed: 'offline',
+}
+
 function mapTransportError(error: unknown): ProjectDiscoveryError {
   if (error instanceof ProjectDiscoveryError) return error
-  if (error instanceof PrivateTransportError) {
-    if (error.code === 'authentication') return new ProjectDiscoveryError('authentication')
-    if (error.code === 'forbidden') return new ProjectDiscoveryError('forbidden')
-    if (error.code === 'rate-limited') return new ProjectDiscoveryError('rate-limited')
-    if (error.code === 'cancelled') return new ProjectDiscoveryError('cancelled')
-    if (error.code === 'protocol-drift' || error.code === 'invalid-response' || error.code === 'attribution-rejected') return new ProjectDiscoveryError('protocol-drift')
-    return new ProjectDiscoveryError('offline')
-  }
+  if (error instanceof PrivateTransportError) return new ProjectDiscoveryError(PROJECT_FAILURE_CODES[classifyPrivateFailure(error)])
   return new ProjectDiscoveryError('offline')
 }
 

@@ -20,8 +20,9 @@ import {
   privateStatusError,
   type PrivateTransport,
 } from './private-transport.ts'
-import { ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
+import { classifyPrivateFailure, type PrivateFailureKind } from './private-failure.ts'
+import { mountCapabilityLifecycle, type CapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-search'
 export const inject = ['web', 'antigravityAuth']
@@ -49,16 +50,17 @@ export interface AntigravitySearchProviderOptions {
   readonly enabled?: () => boolean
   readonly settings?: () => AntigravitySearchSettings
   readonly transport?: PrivateTransport
-  readonly fetchImpl?: typeof fetch
   readonly maxResponseBytes?: number
 }
 
 export class AntigravitySearchProvider implements WebSearchProvider {
   readonly id = ANTIGRAVITY_SEARCH_PROVIDER_ID
   private readonly enabled: () => boolean
+  private readonly transport: PrivateTransport
 
   constructor(private readonly options: AntigravitySearchProviderOptions) {
     this.enabled = options.enabled ?? (() => options.settings?.().enabled ?? true)
+    this.transport = options.transport ?? createPrivateTransport()
   }
 
   available(): boolean {
@@ -77,8 +79,7 @@ export class AntigravitySearchProvider implements WebSearchProvider {
     const maxResults = Math.min(configuredMax, requestedMax)
     const credential = await this.options.auth.credential(signal)
     if (credential === undefined) throw new WebError('Antigravity Web Search requires a logged-in account', 'ANTIGRAVITY_SEARCH_AUTH_REQUIRED')
-    const transport = this.options.transport ?? (this.options.fetchImpl === undefined ? createPrivateTransport() : createPrivateTransport({ fetchImpl: this.options.fetchImpl }))
-    const response = await transport.request({
+    const response = await this.transport.request({
       url: ANTIGRAVITY_SEARCH_ENDPOINT,
       accessToken: credential.accessToken,
       body: JSON.stringify(buildGroundedSearchPayload(request.query.trim(), credential, settings.model)),
@@ -135,31 +136,22 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
   const candidate = ctx as unknown as { web?: { registerSearchProvider: (value: WebSearchProvider) => () => void }; get?: (name: string) => unknown }
   if (candidate.web === undefined) return
   let current = (): AntigravitySearchSettings => config
-  let dispose: (() => void) | undefined
-  let sync = (): void => {}
+  let lifecycle: CapabilityLifecycle | undefined
   installSettingsSection(ctx, ANTIGRAVITY_SEARCH_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source; sync() },
-    onChange: () => { sync() },
+    setSource: source => { current = source; lifecycle?.sync() },
+    onChange: () => { lifecycle?.sync() },
   })
   const provided = candidate.get?.('antigravityAuth')
   const auth = isAuthService(provided) ? provided : createAntigravityAuthService()
-  const ownsAuth = auth !== provided
-  let projectReady = typeof auth.status !== 'function'
-  let unwatch: (() => void) | undefined
-  sync = () => {
-    if (current().enabled && projectReady && dispose === undefined) dispose = candidate.web!.registerSearchProvider(new AntigravitySearchProvider({ auth, settings: current }))
-    else if ((!current().enabled || !projectReady) && dispose !== undefined) { dispose(); dispose = undefined }
-  }
-  const refreshGate = async (): Promise<void> => {
-    if (typeof auth.status !== 'function') return
-    try { projectReady = (await auth.status()).login.projectAvailable } catch { projectReady = false }
-    sync()
-  }
-  unwatch = auth.watchStatus?.(() => { void refreshGate() })
-  sync()
-  void refreshGate()
-  const lifecycle = ctx as unknown as { effect?: (setup: () => () => Promise<void>, label?: string) => unknown }
-  lifecycle.effect?.(() => async () => { unwatch?.(); dispose?.(); dispose = undefined; if (ownsAuth) await auth.dispose() }, 'antigravity-search: provider lifecycle')
+  lifecycle = mountCapabilityLifecycle({
+    ctx,
+    auth,
+    id: 'search',
+    enabled: () => current().enabled,
+    register: () => candidate.web!.registerSearchProvider(new AntigravitySearchProvider({ auth, settings: current })),
+    ownsAuth: auth !== provided,
+    label: 'antigravity-search: provider lifecycle',
+  })
 }
 
 function collectSearchFacts(
@@ -174,6 +166,7 @@ function collectSearchFacts(
   const texts = [findText(root)]
   const metadataValues: unknown[] = [root.groundingMetadata, root.grounding_metadata, value.groundingMetadata]
   if (Array.isArray(root.candidates)) {
+    if (root.candidates.length > 512) throw new WebError('Antigravity Search returned too many candidates', 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT')
     for (const candidate of root.candidates) {
       if (!isRecord(candidate)) continue
       texts.push(findText(candidate))
@@ -187,17 +180,18 @@ function collectSearchFacts(
     if (!isRecord(rawMetadata)) continue
     const chunks = rawMetadata.groundingChunks ?? rawMetadata.grounding_chunks
     if (!Array.isArray(chunks)) continue
+    if (chunks.length > 4096) throw new WebError('Antigravity Search returned too many grounding sources', 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT')
     for (const chunk of chunks) {
       if (!isRecord(chunk)) continue
       const web = isRecord(chunk.web) ? chunk.web : isRecord(chunk.webSource) ? chunk.webSource : undefined
       if (web === undefined || typeof web.uri !== 'string' || !isHttpUrl(web.uri)) continue
       const url = web.uri
       if (seen.has(url)) continue
-      seen.add(url)
       if (sources.length >= maxResults) {
         truncated = true
-        continue
+        break
       }
+      seen.add(url)
       const title = safeSourceText(web.title, 1024)
       const snippet = safeSourceText(web.snippet, 4096)
       sources.push({ url, ...(title === undefined ? {} : { title }), ...(snippet === undefined ? {} : { snippet }) })
@@ -215,11 +209,15 @@ function appendBounded(output: string[], value: string | undefined): void {
 function findText(value: Record<string, unknown>): string | undefined {
   const parts = Array.isArray(value.parts) ? value.parts : isRecord(value.content) && Array.isArray(value.content.parts) ? value.content.parts : []
   const output: string[] = []
+  let length = 0
   for (const part of parts) {
     if (!isRecord(part) || typeof part.text !== 'string' || hasControl(part.text)) continue
-    output.push(part.text.slice(0, 64 * 1024))
+    const text = part.text.slice(0, 64 * 1024 - length)
+    output.push(text)
+    length += text.length
+    if (length >= 64 * 1024) break
   }
-  return output.length === 0 ? undefined : output.join('').slice(0, 64 * 1024)
+  return output.length === 0 ? undefined : output.join('')
 }
 
 function safeSourceText(value: unknown, max: number): string | undefined {
@@ -239,25 +237,35 @@ function parseJson(value: string): unknown {
   try { return JSON.parse(normalized) as unknown } catch { throw new WebError('Antigravity Search returned malformed provider data', 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT') }
 }
 
+const SEARCH_FAILURE_CODES: Readonly<Record<PrivateFailureKind, string>> = {
+  authentication: 'ANTIGRAVITY_SEARCH_AUTH_REQUIRED',
+  forbidden: 'ANTIGRAVITY_SEARCH_FORBIDDEN',
+  'rate-limited': 'ANTIGRAVITY_SEARCH_RATE_LIMITED',
+  cancelled: 'ANTIGRAVITY_SEARCH_CANCELLED',
+  timeout: 'ANTIGRAVITY_SEARCH_TIMEOUT',
+  'attribution-rejected': 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT',
+  'protocol-drift': 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT',
+  'response-limit': 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT',
+  'request-limit': 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT',
+  upstream: 'ANTIGRAVITY_SEARCH_FAILED',
+  network: 'ANTIGRAVITY_SEARCH_FAILED',
+  failed: 'ANTIGRAVITY_SEARCH_FAILED',
+}
+
 function toWebError(error: unknown): WebError {
   if (error instanceof WebError) return error
   if (error instanceof PrivateTransportError) {
-    const code = error.code === 'authentication' ? 'ANTIGRAVITY_SEARCH_AUTH_REQUIRED'
-      : error.code === 'forbidden' ? 'ANTIGRAVITY_SEARCH_FORBIDDEN'
-        : error.code === 'rate-limited' ? 'ANTIGRAVITY_SEARCH_RATE_LIMITED'
-          : error.code === 'timeout' ? 'ANTIGRAVITY_SEARCH_TIMEOUT'
-            : error.code === 'cancelled' ? 'ANTIGRAVITY_SEARCH_CANCELLED'
-              : 'ANTIGRAVITY_SEARCH_PROTOCOL_DRIFT'
-    return new WebError('The Antigravity Search request failed safely', code)
+    return new WebError('The Antigravity Search request failed safely', SEARCH_FAILURE_CODES[classifyPrivateFailure(error)])
   }
   return new WebError('The Antigravity Search request failed safely', 'ANTIGRAVITY_SEARCH_FAILED')
 }
 
 function isAuthService(value: unknown): value is AntigravityAuthService {
-  return isRecord(value) && typeof value.credential === 'function'
+  return isRecord(value) && typeof value.credential === 'function' && typeof value.status === 'function'
 }
 
 function isHttpUrl(value: string): boolean {
+  if (value.length === 0 || value.length > 8192 || value.trim() !== value || hasControl(value)) return false
   try {
     const url = new URL(value)
     return (url.protocol === 'http:' || url.protocol === 'https:') && url.username.length === 0 && url.password.length === 0
@@ -272,5 +280,3 @@ function boundedInteger(value: number, min: number, max: number): number {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
-
-void ANTIGRAVITY_PROVIDER

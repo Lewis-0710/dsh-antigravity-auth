@@ -22,7 +22,7 @@ The repository and issue tracker are private. Do not publish, change visibility,
 - A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
 - rc.1 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here. Do not add `dsh-authorization`, PiAiAdapter auth, or session projection work unless a later issue actually consumes those interfaces.
 - Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
-- Credential lifecycle Issue `#5` is already implemented at `dbc8783`. The one-time rc.1 migration Issue `#17` (`[05A]`) is the current active frontier and the only active blocker before project discovery Issue `#6`; it does not reopen or expand the already implemented bootstrap Issue `#3`.
+- Credential lifecycle Issue `#5` is implemented at `dbc8783`, and the one-time rc.1 migration Issue `#17` (`[05A]`) is implemented at `efa4aaa`. The capability series through Issue `#16` is implemented on `main`; later repairs must preserve the scope of the already completed bootstrap Issue `#3`.
 
 ## Required session startup
 

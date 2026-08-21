@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /** Verify the private Wire Identity package shape without installing or publishing it. */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { resolve } from 'node:path'
@@ -50,6 +50,7 @@ try {
     './replay',
     './quota',
     './media-admission',
+    './live-gates',
   ]) {
     const target = manifest.exports?.[key]?.default
     const types = manifest.exports?.[key]?.types
@@ -73,8 +74,31 @@ try {
       if (key === './media-admission' && typeof loaded.admitWorkspaceImage !== 'function') {
         throw new Error('package smoke: media-admission export has no workspace admission')
       }
+      if (key === './live-gates' && typeof loaded.runLiveGateCli !== 'function') {
+        throw new Error('package smoke: live-gates export has no opt-in CLI boundary')
+      }
     }
   }
+  await access(resolve(packageRoot, 'lib/live-gate-runner.js'))
+  const packedLiveGateCli = resolve(packageRoot, 'scripts/live-gates.mjs')
+  await access(packedLiveGateCli)
+  const cliEnvironment = { ...process.env }
+  delete cliEnvironment.DSH_ANTIGRAVITY_LIVE_ACK
+  const cliProbe = spawnSync(process.execPath, [packedLiveGateCli, '--gate', 'S'], {
+    cwd: packageRoot,
+    encoding: 'utf8',
+    env: cliEnvironment,
+  })
+  if (cliProbe.status !== 2 || !cliProbe.stderr.includes('explicit acknowledgement')) {
+    throw new Error('package smoke: packed live gate CLI did not enforce inert dual opt-in')
+  }
+  const liveGateSource = await readFile(resolve(packageRoot, 'lib/live-gates.js'), 'utf8')
+  if (!liveGateSource.includes('live-gate-runner.js')) throw new Error('package smoke: live gate CLI cannot load its packed production runner')
+  const liveGateRunnerSource = await readFile(resolve(packageRoot, 'lib/live-gate-runner.js'), 'utf8')
+  for (const marker of ['live-sha256-', 'gemini', 'claude', 'gpt-oss', 'KUMQUAT']) {
+    if (!liveGateRunnerSource.includes(marker)) throw new Error(`package smoke: packed live gate runner lacks ${marker}`)
+  }
+
   const source = await readFile(resolve(packageRoot, 'lib/wire-identity.js'), 'utf8')
   for (const marker of ['X-DeepSeek-Harness-Attribution', 'buildAgyCliHeaderPairs', 'ANTIGRAVITY_HEADERS']) {
     if (!source.includes(marker)) throw new Error(`package smoke: Wire Identity artifact lacks ${marker}`)
@@ -105,7 +129,7 @@ try {
     throw new Error('package smoke: client factory did not expose an apply function')
   }
 
-  console.log(`package smoke: ${filename} exposes private Host/client entries, project discovery, gated rows, Wire Identity, and value-free types`)
+  console.log(`package smoke: ${filename} exposes private Host/client entries, project discovery, an inert packed live-gate CLI, fixed Wire Identity, and value-free types`)
 } finally {
   await rm(temporary, { recursive: true, force: true })
 }

@@ -14,6 +14,7 @@ function options(overrides: Partial<AntigravityVideoToolOptions> = {}): Antigrav
       resolve: vi.fn(async (value: string) => ({ targetKey: value as never, displayPath: value })),
       contains: vi.fn(() => true),
       lstat: vi.fn(async () => ({ type: 'file' as const, version: 'version' as never })),
+      stat: vi.fn(async () => ({ type: 'file' as const, version: 'version' as never })),
       readBytes: vi.fn(async () => mp4),
     },
     transport: {

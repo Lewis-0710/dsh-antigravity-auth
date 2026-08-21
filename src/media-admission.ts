@@ -11,6 +11,7 @@ import type {
 } from '@deepseek-ai/dsh-attachment'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
+import { isBoundedSafeText } from './safe-text.ts'
 
 export const DEFAULT_VIDEO_BYTES = 32 * 1024 * 1024
 export const DEFAULT_INLINE_IMAGE_BYTES = 20 * 1024 * 1024
@@ -30,7 +31,7 @@ export class MediaAdmissionError extends HarnessError {
 
 export interface MediaAdmissionOptions {
   readonly attachments: Pick<AttachmentStore, 'imageLimits' | 'validateImage' | 'saveImage' | 'readImage'>
-  readonly fs: Pick<FileSystem, 'resolve' | 'contains' | 'readBytes' | 'lstat'>
+  readonly fs: Pick<FileSystem, 'resolve' | 'contains' | 'readBytes' | 'lstat' | 'stat'>
   readonly maxVideoBytes?: number
 }
 
@@ -75,8 +76,8 @@ export async function admitImageBytes(
   }
   try {
     await options.attachments.validateImage(input)
-  } catch (error) {
-    throw new MediaAdmissionError('The image failed AttachmentStore admission', 'MEDIA_IMAGE_INVALID', { cause: error })
+  } catch {
+    throw new MediaAdmissionError('The image failed AttachmentStore admission', 'MEDIA_IMAGE_INVALID')
   }
   return { kind: 'image', input, source }
 }
@@ -93,8 +94,8 @@ export async function admitBase64Image(
     throw new MediaAdmissionError('The encoded image is not bounded canonical base64', 'MEDIA_IMAGE_INVALID')
   }
   let data: Uint8Array
-  try { data = new Uint8Array(Buffer.from(encoded, 'base64')) } catch (error) {
-    throw new MediaAdmissionError('The encoded image could not be decoded', 'MEDIA_IMAGE_INVALID', { cause: error })
+  try { data = new Uint8Array(Buffer.from(encoded, 'base64')) } catch {
+    throw new MediaAdmissionError('The encoded image could not be decoded', 'MEDIA_IMAGE_INVALID')
   }
   return admitImageBytes(options, data, source, name, signal)
 }
@@ -114,8 +115,8 @@ export async function admitSessionImage(
   try {
     const stored = await options.attachments.readImage(ref, signal)
     return { kind: 'image', input: { data: stored.data, mediaType: stored.ref.mediaType, ...(stored.ref.name === undefined ? {} : { name: stored.ref.name }) }, stored, source: 'session' }
-  } catch (error) {
-    throw new MediaAdmissionError('The authorized image could not be read', 'MEDIA_IMAGE_READ_FAILED', { cause: error })
+  } catch {
+    throw new MediaAdmissionError('The authorized image could not be read', 'MEDIA_IMAGE_READ_FAILED')
   }
 }
 
@@ -130,12 +131,14 @@ export async function admitWorkspaceImage(
   if (path.length === 0 || path.length > 4096 || /^https?:\/\//iu.test(path)) {
     throw new MediaAdmissionError('The workspace image reference is invalid', 'MEDIA_WORKSPACE_INVALID')
   }
-  const root = await options.fs.resolve(workspace, fsResolveOptions(workspace, signal))
-  const target = await options.fs.resolve(path, fsResolveOptions(workspace, signal))
-  if (!options.fs.contains(root, target)) throw new MediaAdmissionError('The workspace image is outside the active workspace', 'MEDIA_WORKSPACE_CONTAINMENT')
-  const info = await options.fs.lstat(path, { cwd: workspace }, signal)
-  if (info === undefined || info.type !== 'file') throw new MediaAdmissionError('The workspace image is not a regular file', 'MEDIA_WORKSPACE_NOT_REGULAR')
-  const data = await options.fs.readBytes(target, signal, options.attachments.imageLimits.maxImageBytes)
+  const data = await readStableWorkspaceBytes(
+    options.fs,
+    workspace,
+    path,
+    options.attachments.imageLimits.maxImageBytes,
+    'image',
+    signal,
+  )
   return admitImageBytes(options, data, 'workspace', basename(path), signal)
 }
 
@@ -150,17 +153,50 @@ export async function admitWorkspaceVideo(
   if (path.length === 0 || path.length > 4096 || /^https?:\/\//iu.test(path)) {
     throw new MediaAdmissionError('The workspace video reference is invalid', 'MEDIA_VIDEO_INVALID')
   }
-  const root = await options.fs.resolve(workspace, fsResolveOptions(workspace, signal))
-  const target = await options.fs.resolve(path, fsResolveOptions(workspace, signal))
-  if (!options.fs.contains(root, target)) throw new MediaAdmissionError('The workspace video is outside the active workspace', 'MEDIA_VIDEO_CONTAINMENT')
-  const info = await options.fs.lstat(path, { cwd: workspace }, signal)
-  if (info === undefined || info.type !== 'file') throw new MediaAdmissionError('The workspace video is not a regular file', 'MEDIA_VIDEO_NOT_REGULAR')
   const maxBytes = positive(options.maxVideoBytes, DEFAULT_VIDEO_BYTES)
-  const data = await options.fs.readBytes(target, signal, maxBytes)
+  const data = await readStableWorkspaceBytes(options.fs, workspace, path, maxBytes, 'video', signal)
   if (data.byteLength === 0 || data.byteLength > maxBytes || !isMp4(data)) {
     throw new MediaAdmissionError('The workspace file is not a bounded MP4 video', 'MEDIA_VIDEO_INVALID')
   }
   return { kind: 'video', data, mediaType: 'video/mp4' }
+}
+
+async function readStableWorkspaceBytes(
+  fs: MediaAdmissionOptions['fs'],
+  workspace: string,
+  path: string,
+  maxBytes: number,
+  kind: 'image' | 'video',
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array> {
+  const symlinkCode = kind === 'image' ? 'MEDIA_WORKSPACE_SYMLINK' : 'MEDIA_VIDEO_SYMLINK'
+  const regularCode = kind === 'image' ? 'MEDIA_WORKSPACE_NOT_REGULAR' : 'MEDIA_VIDEO_NOT_REGULAR'
+  const containmentCode = kind === 'image' ? 'MEDIA_WORKSPACE_CONTAINMENT' : 'MEDIA_VIDEO_CONTAINMENT'
+  const changedCode = kind === 'image' ? 'MEDIA_WORKSPACE_CHANGED' : 'MEDIA_VIDEO_CHANGED'
+  const initialPath = await fs.lstat(path, { cwd: workspace }, signal)
+  if (initialPath?.type === 'symlink') throw new MediaAdmissionError(`The workspace ${kind} is a symbolic link`, symlinkCode)
+  if (initialPath === undefined || initialPath.type !== 'file') throw new MediaAdmissionError(`The workspace ${kind} is not a regular file`, regularCode)
+  const root = await fs.resolve(workspace, fsResolveOptions(workspace, signal))
+  const target = await fs.resolve(path, fsResolveOptions(workspace, signal))
+  if (!fs.contains(root, target)) throw new MediaAdmissionError(`The workspace ${kind} is outside the active workspace`, containmentCode)
+  const before = await fs.stat(target, signal)
+  if (before === undefined || before.type !== 'file') throw new MediaAdmissionError(`The workspace ${kind} is not a regular file`, regularCode)
+  if (before.version !== initialPath.version) throw new MediaAdmissionError(`The workspace ${kind} changed before it could be read`, changedCode)
+  const data = await fs.readBytes(target, signal, maxBytes)
+  const finalPath = await fs.lstat(path, { cwd: workspace }, signal)
+  const finalTarget = await fs.resolve(path, fsResolveOptions(workspace, signal))
+  const after = await fs.stat(target, signal)
+  if (finalPath === undefined
+    || finalPath.type !== 'file'
+    || finalPath.version !== initialPath.version
+    || finalTarget.targetKey !== target.targetKey
+    || !fs.contains(root, finalTarget)
+    || after === undefined
+    || after.type !== 'file'
+    || after.version !== before.version) {
+    throw new MediaAdmissionError(`The workspace ${kind} changed while it was being read`, changedCode)
+  }
+  return data
 }
 
 export function detectImageMediaType(data: Uint8Array): ImageMediaType | undefined {
@@ -176,32 +212,66 @@ export function isMp4(data: Uint8Array): boolean {
   return data.length >= 12 && ascii(data, 4, 8) === 'ftyp'
 }
 
-function authorizedSessionImages(agent: Agent): Map<string, ImageAttachmentRef> {
-  const result = new Map<string, ImageAttachmentRef>()
-  const visit = (value: unknown): void => {
+export interface SessionImageCatalogEntry {
+  readonly handle: `image:${string}`
+  readonly attachment: ImageAttachmentRef
+  readonly origin: 'user' | 'reference' | 'generated'
+  readonly sequence: number
+}
+
+/** Traverse durable session history once for both authorization and image listing. */
+export function sessionImageCatalog(agent: Agent): readonly SessionImageCatalogEntry[] {
+  const result = new Map<string, SessionImageCatalogEntry>()
+  const visited = new WeakSet<object>()
+  let sequence = 0
+  let visitedNodes = 0
+  const visit = (value: unknown, origin: SessionImageCatalogEntry['origin'], depth = 0): void => {
+    if ((typeof value !== 'object' || value === null) || depth > 64 || visitedNodes >= 10_000 || visited.has(value)) return
+    visited.add(value)
+    visitedNodes += 1
+    if (Array.isArray(value)) { for (const nested of value) visit(nested, origin, depth + 1); return }
     if (!isRecord(value)) return
-    if (value.type === 'image' && isImageRef(value.attachment)) result.set(imageHandle(value.attachment), value.attachment)
-    if (value.type === 'tool-result' && Array.isArray(value.content)) for (const nested of value.content) visit(nested)
+    const attachment = value.type === 'image' ? parseImageRef(value.attachment) : undefined
+    if (attachment !== undefined) {
+      const handle = imageHandle(attachment)
+      if (!result.has(handle)) result.set(handle, { handle, attachment, origin, sequence: sequence++ })
+    }
+    if (value.type === 'tool-result' && Array.isArray(value.content)) visit(value.content, origin, depth + 1)
   }
   for (const event of agent.session.events) {
     const rawEvent: unknown = event
-    if (!isRecord(rawEvent)) continue
-    const data = rawEvent.data
-    if (!isRecord(data)) continue
-    if (rawEvent.type === 'user/message') visit(data.content)
-    else if (rawEvent.type === 'assistant/message' && isRecord(data.message)) visit(data.message.content)
-    else if (rawEvent.type === 'tool/result' && isRecord(data.message)) visit(data.message.content)
+    if (!isRecord(rawEvent) || !isRecord(rawEvent.data)) continue
+    if (rawEvent.type === 'user/message') visit(rawEvent.data.content, 'user')
+    else if (rawEvent.type === 'assistant/message' && isRecord(rawEvent.data.message)) visit(rawEvent.data.message.content, 'reference')
+    else if (rawEvent.type === 'tool/result' && isRecord(rawEvent.data.message)) visit(rawEvent.data.message.content, 'generated')
   }
-  return result
+  return [...result.values()]
 }
 
-function isImageRef(value: unknown): value is ImageAttachmentRef {
-  return isRecord(value)
-    && typeof value.attachmentId === 'string'
-    && typeof value.mediaType === 'string'
-    && typeof value.bytes === 'number'
-    && typeof value.width === 'number'
-    && typeof value.height === 'number'
+function authorizedSessionImages(agent: Agent): Map<string, ImageAttachmentRef> {
+  return new Map(sessionImageCatalog(agent).map(entry => [entry.handle, entry.attachment]))
+}
+
+function parseImageRef(value: unknown): ImageAttachmentRef | undefined {
+  if (!isRecord(value)
+    || !isBoundedSafeText(value.attachmentId, 256)
+    || (value.mediaType !== 'image/png' && value.mediaType !== 'image/jpeg' && value.mediaType !== 'image/webp' && value.mediaType !== 'image/gif')
+    || !isPositiveSafeInteger(value.bytes, 1024 * 1024 * 1024)
+    || !isPositiveSafeInteger(value.width, 1_000_000)
+    || !isPositiveSafeInteger(value.height, 1_000_000)) return undefined
+  const name = typeof value.name === 'string' && isBoundedSafeText(value.name, 256) ? safeName(value.name) : undefined
+  return {
+    attachmentId: value.attachmentId as never,
+    mediaType: value.mediaType,
+    bytes: value.bytes,
+    width: value.width,
+    height: value.height,
+    ...(name === undefined ? {} : { name }),
+  }
+}
+
+function isPositiveSafeInteger(value: unknown, max: number): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0 && (value as number) <= max
 }
 
 function isCanonicalBase64(value: string): boolean {

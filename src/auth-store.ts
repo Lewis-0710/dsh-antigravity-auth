@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { chmod, mkdir, open, readFile, rename, lstat, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
+import { isBoundedSafeText } from './safe-text.ts'
 
 export const AUTH_RECORD_VERSION = 1 as const
 
@@ -288,11 +289,9 @@ export function makeAuthRecord(draft: AuthRecordDraft, revision: number, now = D
 
 function makeRecord(draft: AuthRecordDraft, revision: number, now: number): AntigravityAuthRecord {
   if (!isRecord(draft)
-    || typeof draft.refreshToken !== 'string'
-    || !safeText(draft.refreshToken)
-    || typeof draft.projectId !== 'string'
-    || !safeText(draft.projectId)
-    || (draft.lineage !== undefined && (typeof draft.lineage !== 'string' || !safeText(draft.lineage)))
+    || !isBoundedSafeText(draft.refreshToken, 4096)
+    || !isBoundedSafeText(draft.projectId, 4096)
+    || (draft.lineage !== undefined && !isBoundedSafeText(draft.lineage, 4096))
     || !Number.isSafeInteger(revision)
     || revision < 1
     || !Number.isFinite(now)) {
@@ -329,15 +328,15 @@ function parseRecord(value: unknown): AntigravityAuthRecord {
   const revision = value.revision
   const updatedAt = value.updatedAt
   const lineage = value.lineage
-  if (typeof refreshToken !== 'string' || !safeText(refreshToken)
-    || typeof projectId !== 'string' || !safeText(projectId)
+  if (!isBoundedSafeText(refreshToken, 4096)
+    || !isBoundedSafeText(projectId, 4096)
     || typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1
     || typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt))
-    || (lineage !== undefined && (typeof lineage !== 'string' || !safeText(lineage)))) {
+    || (lineage !== undefined && !isBoundedSafeText(lineage, 4096))) {
     throw corruptError()
   }
   const email = value.email
-  if (email !== undefined && (typeof email !== 'string' || !safeText(email))) throw corruptError()
+  if (email !== undefined && !isBoundedSafeText(email, 4096)) throw corruptError()
   return {
     version: AUTH_RECORD_VERSION,
     refreshToken,
@@ -362,17 +361,8 @@ async function assertOwnerOnly(path: string): Promise<void> {
 }
 
 function validateEmail(value: string): string {
-  if (!safeText(value) || !value.includes('@')) throw corruptError()
+  if (!isBoundedSafeText(value, 4096) || !value.includes('@')) throw corruptError()
   return value
-}
-
-function safeText(value: string): boolean {
-  if (value.length === 0 || value.length > 4096) return false
-  for (let index = 0; index < value.length; index += 1) {
-    const codePoint = value.charCodeAt(index)
-    if (codePoint < 0x20 || codePoint === 0x7f) return false
-  }
-  return true
 }
 
 function cloneRecord(record: AntigravityAuthRecord): AntigravityAuthRecord {

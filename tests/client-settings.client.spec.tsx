@@ -28,7 +28,10 @@ function rpcFixture(
     cancelLogin: vi.fn().mockResolvedValue({ ok: true, value: { phase: 'cancelled', errorCode: 'cancelled' } }),
     logout: vi.fn().mockResolvedValue({ ok: true, value: { state: 'logged-out' } }),
     revoke: vi.fn().mockResolvedValue({ ok: true, value: { state: 'revoked' } }),
-    completeCallback: vi.fn().mockResolvedValue({ ok: true, value: { completed: false, phase: 'failed', errorCode: 'no-pending-flow' } }),
+    models: vi.fn().mockResolvedValue({ ok: true, value: {
+      state: 'snapshot',
+      models: [{ id: 'antigravity-gemini-3.7-flash', name: 'Gemini 3.7 Flash', state: 'snapshot' }],
+    } }),
   }
 }
 
@@ -49,8 +52,8 @@ describe('Antigravity bootstrap settings', () => {
     expect(screen.getByText(/Google does not support third-party/i)).toBeTruthy()
     expect(screen.getByText(/Single-account only/i)).toBeTruthy()
     expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', true)
-    expect(screen.getAllByText('POC pending')).toHaveLength(4)
-    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+    expect(screen.getAllByText(en.disabled)).toHaveLength(4)
+    expect(document.querySelectorAll('[data-capability]')).toHaveLength(4)
     expect(screen.queryByLabelText(/token|client secret|endpoint/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /add|switch|rotate/i })).toBeNull()
 
@@ -88,13 +91,54 @@ describe('Antigravity bootstrap settings', () => {
     confirm.mockRestore()
   })
 
+  it('shows advisory snapshot/live/unavailable model states and a gate-bound manual refresh', async () => {
+    const rpc = rpcFixture(
+      { phase: 'success', configured: true, projectAvailable: true },
+      true,
+      { state: 'logged-in', configured: true },
+      { state: 'idle' },
+    )
+    const status = createStatusView(
+      true,
+      { phase: 'success', configured: true, projectAvailable: true },
+      { state: 'logged-in', configured: true },
+      { state: 'idle' },
+      {
+        gate0: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        llmFamilies: {
+          gemini: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+          claude: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+          'gpt-oss': { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
+        },
+      },
+    )
+    vi.mocked(rpc.status).mockResolvedValue({ ok: true, value: { status } })
+    vi.mocked(rpc.models).mockResolvedValue({ ok: true, value: {
+      state: 'live-available',
+      checkedAt: '2030-01-01T00:00:00.000Z',
+      models: [
+        { id: 'model-live', name: 'Live Model', state: 'live-available' },
+        { id: 'model-unavailable', name: 'Unavailable Model', state: 'unavailable' },
+      ],
+    } })
+
+    render(<AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />)
+
+    expect(await screen.findByRole('heading', { name: en.modelsTitle })).toBeTruthy()
+    expect(await screen.findByText(en.modelsLiveAvailable)).toBeTruthy()
+    expect(screen.getByText(new RegExp(en.modelsAvailableEntry))).toBeTruthy()
+    expect(screen.getByText(new RegExp(en.modelsUnavailableEntry))).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: en.modelsRefresh }))
+    await waitFor(() => expect(rpc.models).toHaveBeenLastCalledWith(expect.any(AbortSignal), true))
+  })
+
   it('renders the same status shell with Chinese copy', async () => {
     const rpc = rpcFixture()
     render(<AntigravityAuthSettings rpc={rpc} t={key => zh[key]} subscribe={() => () => {}} />)
 
     expect(await screen.findByRole('heading', { name: '非官方 / 实验性' })).toBeTruthy()
     expect(screen.getByText(/Google 不支持第三方/i)).toBeTruthy()
-    expect(screen.getAllByText('POC 待验证')).toHaveLength(4)
+    expect(screen.getAllByText(zh.disabled)).toHaveLength(4)
   })
 
   it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
@@ -184,5 +228,24 @@ describe('Antigravity bootstrap settings', () => {
     unmount()
     expect(signal?.aborted).toBe(true)
     expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('passes an unmount-scoped signal to pending browser actions', async () => {
+    let actionSignal: AbortSignal | undefined
+    const rpc = rpcFixture()
+    rpc.acknowledgeRisk = vi.fn((_signal?: AbortSignal) => {
+      actionSignal = _signal
+      return new Promise<never>(() => {})
+    })
+    const { unmount } = render(
+      <AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />,
+    )
+
+    await screen.findByRole('heading', { name: en.title })
+    fireEvent.click(screen.getByRole('checkbox', { name: en.riskAcknowledgement }))
+    await waitFor(() => expect(actionSignal).toBeDefined())
+
+    unmount()
+    expect(actionSignal?.aborted).toBe(true)
   })
 })
