@@ -2,15 +2,21 @@
   "name": "dsh-antigravity-auth",
   "version": "0.1.0",
   "description": "Private, single-account, unofficial Antigravity OAuth capability bundle for DeepSeek Harness",
-  "private": true,
   "type": "module",
   "packageManager": "pnpm@11.7.0",
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/suntianc/dsh-antigravity-auth.git"
+  },
+  "homepage": "https://github.com/suntianc/dsh-antigravity-auth#readme",
+  "bugs": {
+    "url": "https://github.com/suntianc/dsh-antigravity-auth/issues"
   },
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

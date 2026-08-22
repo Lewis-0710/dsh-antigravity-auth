@@ -24,7 +24,6 @@ try {
 
   const packageRoot = resolve(temporary, 'package')
   const manifest = JSON.parse(await readFile(resolve(packageRoot, 'package.json'), 'utf8'))
-  if (manifest.private !== true) throw new Error('package smoke: package must remain private')
   const changelog = await readFile(resolve(packageRoot, 'CHANGELOG.md'), 'utf8')
   if (!changelog.includes(`## [${String(manifest.version)}]`)) {
     throw new Error(`package smoke: CHANGELOG.md lacks release ${String(manifest.version)}`)
