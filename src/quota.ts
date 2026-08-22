@@ -61,17 +61,27 @@ export function normalizeQuotaResponse(value: unknown, now = Date.now()): QuotaS
   const candidates = source === undefined ? [] : [
     ...(Array.isArray(source.groups) ? source.groups : []),
     ...(Array.isArray(source.buckets) ? source.buckets : []),
+    ...(Array.isArray(source.quotaBuckets) ? source.quotaBuckets : []),
+    ...(Array.isArray(source.quota_buckets) ? source.quota_buckets : []),
+    ...(Array.isArray(source.userQuotaSummary) ? source.userQuotaSummary : []),
+    ...(Array.isArray(source.quotas) ? source.quotas : []),
   ]
   for (const candidate of candidates) {
     if (!isRecord(candidate)) continue
-    const buckets = Array.isArray(candidate.buckets) ? candidate.buckets : [candidate]
+    const buckets = Array.isArray(candidate.buckets)
+      ? candidate.buckets
+      : Array.isArray(candidate.quotaBuckets)
+        ? candidate.quotaBuckets
+        : Array.isArray(candidate.windows)
+          ? candidate.windows
+          : [candidate]
     for (const rawBucket of buckets) {
       if (!isRecord(rawBucket)) continue
       const window = identifyWindow(rawBucket)
-      const resetTime = normalizeResetTime(rawBucket.resetTime ?? rawBucket.reset_time ?? rawBucket.resetAt, now)
-      const fraction = normalizeFraction(rawBucket.remainingFraction ?? rawBucket.remaining_fraction ?? rawBucket.fraction ?? rawBucket.remaining)
+      const resetTime = normalizeResetTime(rawBucket.resetTime ?? rawBucket.reset_time ?? rawBucket.resetAt ?? rawBucket.reset_at, now)
+      const fraction = normalizeFraction(rawBucket.remainingFraction ?? rawBucket.remaining_fraction ?? rawBucket.fraction ?? rawBucket.remaining ?? rawBucket.remaining_percent ?? rawBucket.percentage)
       if (window === undefined || resetTime === undefined || fraction === undefined) continue
-      const group = identifyGroup({ ...candidate, ...rawBucket })
+      const group = identifyGroup(candidate, rawBucket)
       if (group === undefined) continue
       const modelCount = boundedCount(candidate.modelCount ?? candidate.model_count ?? candidate.models ?? descriptionModelCount(candidate.description))
       const existing = groups.find(item => item.group === group)
@@ -84,14 +94,24 @@ export function normalizeQuotaResponse(value: unknown, now = Date.now()): QuotaS
         }
         groups.splice(groups.indexOf(existing), 1, updated)
       } else {
-        const duplicate = existing.windows.find(item => item.window === window)
-        if (duplicate !== undefined && (duplicate.remainingFraction !== fraction || duplicate.resetTime !== resetTime)) {
-          throw new QuotaNormalizationError('The quota response contained conflicting windows')
+        const updatedWindows = existing.windows.map(item => item.window === window
+          ? { window, remainingFraction: Math.min(item.remainingFraction, fraction), resetTime: item.resetTime }
+          : item)
+        const updated: QuotaGroupView = {
+          group,
+          modelCount: Math.max(existing.modelCount, modelCount),
+          windows: updatedWindows.sort(windowOrder),
         }
+        groups.splice(groups.indexOf(existing), 1, updated)
       }
     }
   }
-  if (groups.length === 0) throw new QuotaNormalizationError('The quota response did not contain recognized windows')
+  if (groups.length === 0) {
+    if (isRecord(source)) {
+      return { state: 'available', checkedAt: new Date(now).toISOString(), groups: [] }
+    }
+    throw new QuotaNormalizationError('The quota response did not contain recognized windows')
+  }
   return { state: 'available', checkedAt: new Date(now).toISOString(), groups: groups.sort((left, right) => left.group.localeCompare(right.group)) }
 }
 
@@ -152,12 +172,28 @@ async function refreshQuota(
 ): Promise<QuotaStatusView> {
   const credential = await auth.credential(signal)
   if (credential === undefined) return { state: 'unauthenticated' }
-  const response = await transport.request({
+  const body = credential.projectId ? { project: credential.projectId } : {}
+  let response = await transport.request({
     url: ANTIGRAVITY_QUOTA_ENDPOINT,
     accessToken: credential.accessToken,
-    body: JSON.stringify({ project: credential.projectId, request: {} }),
+    body: JSON.stringify(body),
     ...(signal === undefined ? {} : { signal }),
   })
+  if (response.status === 403 && credential.projectId) {
+    try {
+      const retryResponse = await transport.request({
+        url: ANTIGRAVITY_QUOTA_ENDPOINT,
+        accessToken: credential.accessToken,
+        body: JSON.stringify({}),
+        ...(signal === undefined ? {} : { signal }),
+      })
+      if (retryResponse.ok) {
+        response = retryResponse
+      }
+    } catch {
+      // Fall through
+    }
+  }
   const statusError = privateStatusError(response.status)
   if (statusError !== undefined) {
     await response.body?.cancel().catch(() => {})
@@ -207,11 +243,23 @@ function identifyWindow(value: Record<string, unknown>): QuotaWindowKind | undef
   return undefined
 }
 
-function identifyGroup(value: Record<string, unknown>): 'gemini' | 'non-gemini' | undefined {
-  const raw = String(value.group ?? value.quotaGroup ?? value.quota_group ?? value.modelFamily ?? value.displayName ?? value.bucketId ?? value.bucket_id ?? '').toLowerCase()
-  if (raw.includes('non') || raw.includes('claude') || raw.includes('gpt')) return 'non-gemini'
-  if (raw.includes('gemini')) return 'gemini'
-  return undefined
+function identifyGroup(candidate: Record<string, unknown>, bucket?: Record<string, unknown>): 'gemini' | 'non-gemini' | undefined {
+  const raw = [
+    candidate.displayName,
+    candidate.group,
+    candidate.quotaGroup,
+    candidate.quota_group,
+    candidate.modelFamily,
+    candidate.title,
+    candidate.name,
+    candidate.description,
+    bucket?.bucketId,
+    bucket?.bucket_id,
+    bucket?.displayName,
+  ].filter(Boolean).map(String).join(' ').toLowerCase()
+  if (raw.includes('3p') || raw.includes('non') || raw.includes('claude') || raw.includes('gpt') || raw.includes('openai') || raw.includes('anthropic') || raw.includes('third-party') || raw.includes('external')) return 'non-gemini'
+  if (raw.includes('gemini') || raw.includes('google') || raw.includes('chat') || raw.includes('code') || raw.includes('default') || raw.length === 0) return 'gemini'
+  return 'gemini'
 }
 
 function normalizeFraction(value: unknown): number | undefined {

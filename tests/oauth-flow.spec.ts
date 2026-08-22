@@ -114,6 +114,40 @@ describe('Antigravity OAuth flow', () => {
     expect(handler).toBeTypeOf('function')
   })
 
+  it('accepts real-world Google OAuth redirect parameters (scope, authuser, prompt, IPv6 host)', async () => {
+    let handler: ((request: unknown) => Promise<unknown>) | undefined
+    const listener = { close: vi.fn(async () => {}) }
+    const exchangeCode = vi.fn(async () => ({
+      accessToken: 'access-google',
+      refreshToken: 'refresh-google',
+      expiresAt: 9_000,
+    }))
+    const validateProject = vi.fn(async () => ({ projectId: 'google-project' }))
+    const commit = vi.fn(async () => {})
+    const flow = createOAuthFlow({
+      randomBytes: deterministicRandomBytes,
+      listenerFactory: {
+        listen: vi.fn(async candidate => {
+          handler = candidate as typeof handler
+          return listener
+        }),
+      },
+      exchangeCode: exchangeCode as never,
+      validateProject,
+      commit,
+    })
+
+    const started = await flow.start()
+    const state = new URL(started.authorizationUrl).searchParams.get('state')
+    const callbackUrl = `http://localhost:51121/oauth-callback?state=${state}&code=4/0Aeo...&scope=email+profile+https://www.googleapis.com/auth/cloud-platform&authuser=0&prompt=consent`
+    const result = await flow.completeCallbackUrl(callbackUrl)
+
+    expect(result).toEqual({ completed: true, phase: 'success' })
+    expect(exchangeCode).toHaveBeenCalledWith(expect.objectContaining({ code: '4/0Aeo...' }))
+    expect(commit).toHaveBeenCalled()
+    expect(handler).toBeTypeOf('function')
+  })
+
   it('rejects unsafe project identifiers before commit', async () => {
     const commit = vi.fn(async () => {})
     const flow = createOAuthFlow({

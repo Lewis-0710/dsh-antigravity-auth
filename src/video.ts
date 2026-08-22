@@ -43,7 +43,7 @@ export interface AntigravityVideoSettings {
 export interface Config extends AntigravityVideoSettings {}
 
 export const Config: z<Config> = z.object({
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(true),
   model: z.string().default(ANTIGRAVITY_VIDEO_MODEL),
   maxBytes: z.number().step(1).min(1).max(32 * 1024 * 1024).default(32 * 1024 * 1024),
 })
@@ -129,9 +129,12 @@ export function buildVideoPayload(
   credential: Pick<HostCredential, 'projectId'>,
   data: Uint8Array,
 ): Record<string, unknown> {
+  const project = credential.projectId === 'inductive-dreamer-qrkws' || !credential.projectId ? undefined : credential.projectId
+  const resolved = resolveModelWithTier(model, { cli_first: false })
+  const wireModel = resolved.actualModel.startsWith('gemini-3.7-flash') ? 'gemini-3-flash' : resolved.actualModel
   return {
-    project: credential.projectId,
-    model: resolveModelWithTier(model, { cli_first: false }).actualModel,
+    ...(project === undefined ? {} : { project }),
+    model: wireModel,
     request: {
       contents: [{ role: 'user', parts: [
         { text: prompt },
@@ -141,7 +144,7 @@ export function buildVideoPayload(
   }
 }
 
-export function apply(ctx?: Context, config: Config = { enabled: false, model: ANTIGRAVITY_VIDEO_MODEL, maxBytes: 32 * 1024 * 1024 }): void {
+export function apply(ctx?: Context, config: Config = { enabled: true, model: ANTIGRAVITY_VIDEO_MODEL, maxBytes: 32 * 1024 * 1024 }): void {
   if (ctx === undefined) return
   const candidate = ctx as unknown as {
     tools?: { register: (definition: ToolDefinition) => () => void }

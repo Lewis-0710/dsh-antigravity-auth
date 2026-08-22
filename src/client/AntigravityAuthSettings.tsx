@@ -5,19 +5,17 @@ import type { ReactNode } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
 import type { QuotaStatusView } from '../quota.ts'
-import type { AntigravityModelCatalogView, AntigravityModelAvailability } from '../model-catalog.ts'
 import type { AntigravitySearchSettings } from '../search.ts'
 import type { AntigravityImageSettings } from '../image.ts'
 import type { AntigravityVideoSettings } from '../video.ts'
-import type { CredentialState, RevokeState } from '../credential-coordinator.ts'
+import type { RevokeState } from '../credential-coordinator.ts'
 import type {
   AntigravityStatusView,
-  CapabilityGateReasonCode,
-  CapabilityGateState,
   CapabilityRowId,
   LoginErrorCode,
 } from '../status.ts'
 import type { AntigravityAuthKey } from './locales.ts'
+import { ensureSettingsStyles } from './styles.ts'
 
 export interface AntigravityAuthSettingsProps {
   rpc: AntigravityAuthRpcClient
@@ -34,11 +32,9 @@ type SettingsSnapshot = ReturnType<SettingsScope<BooleanSettings>['getSnapshot']
 const EMPTY_SETTINGS_SNAPSHOT: SettingsSnapshot = { status: 'unavailable', value: undefined, base: undefined, user: undefined, revision: undefined, writable: false, mode: 'memory' }
 
 function useCapabilitySettings<T extends BooleanSettings>(scope: SettingsScope<T> | undefined): SettingsSnapshot & { readonly value: T | undefined } {
-  return useSyncExternalStore(
-    scope?.subscribe ?? (() => () => {}),
-    scope === undefined ? () => EMPTY_SETTINGS_SNAPSHOT : () => scope.getSnapshot(),
-    () => EMPTY_SETTINGS_SNAPSHOT,
-  ) as SettingsSnapshot & { readonly value: T | undefined }
+  const subscribe = useCallback((listener: () => void) => scope?.subscribe(listener) ?? (() => {}), [scope])
+  const getSnapshot = useCallback(() => scope?.getSnapshot() ?? EMPTY_SETTINGS_SNAPSHOT, [scope])
+  return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SETTINGS_SNAPSHOT) as SettingsSnapshot & { readonly value: T | undefined }
 }
 
 function useUnmountSignal(): () => AbortSignal {
@@ -57,32 +53,30 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
   const searchSettings = useCapabilitySettings(searchScope)
   const imageSettings = useCapabilitySettings(imageScope)
   const videoSettings = useCapabilitySettings(videoScope)
-  const [models, setModels] = useState<AntigravityModelCatalogView | null>(null)
-  const [modelsBusy, setModelsBusy] = useState(false)
-  const [modelsError, setModelsError] = useState<string | null>(null)
   const [quota, setQuota] = useState<QuotaStatusView | null>(null)
   const [quotaBusy, setQuotaBusy] = useState(false)
   const [quotaError, setQuotaError] = useState<string | null>(null)
   const [loadState, setLoadState] = useState<LoadState>('loading')
-  const [error, setError] = useState<string | null>(null)
-  const [acknowledged, setAcknowledged] = useState(false)
-  const [acknowledgeBusy, setAcknowledgeBusy] = useState(false)
+  const [_error, setError] = useState<string | null>(null)
   const [loginBusy, setLoginBusy] = useState(false)
   const [actionBusy, setActionBusy] = useState(false)
   const [resetTick, setResetTick] = useState(0)
   const statusGeneration = useRef(0)
-  const modelGeneration = useRef(0)
   const quotaGeneration = useRef(0)
   const unmountSignal = useUnmountSignal()
-  const hasStatus = status !== null
-  const modelGateReady = capabilityAvailable(status, 'auth-llm')
+
+  useEffect(() => {
+    ensureSettingsStyles()
+  }, [])
 
   useEffect(() => subscribe(() => { setResetTick(value => value + 1) }), [subscribe])
 
-  const load = useCallback(async (signal?: AbortSignal) => {
+  const load = useCallback(async (signal?: AbortSignal, silent = false) => {
     const generation = ++statusGeneration.current
-    setLoadState('loading')
-    setError(null)
+    if (!silent) {
+      setLoadState(prev => (prev === 'ready' ? 'ready' : 'loading'))
+      setError(null)
+    }
     try {
       const result = await rpc.status(signal)
       if (signal?.aborted === true || generation !== statusGeneration.current) return
@@ -92,32 +86,11 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
         return
       }
       setStatus(result.value.status)
-      setAcknowledged(result.value.status.riskAcknowledged)
       setLoadState('ready')
     } catch (cause) {
       if (signal?.aborted === true || generation !== statusGeneration.current) return
       setLoadState('error')
       setError(messageOf(cause, t('statusFailed')))
-    }
-  }, [rpc, t])
-
-  const loadModels = useCallback(async (force = false, signal?: AbortSignal) => {
-    const generation = ++modelGeneration.current
-    setModelsBusy(true)
-    setModelsError(null)
-    try {
-      const result = await rpc.models(signal, force)
-      if (signal?.aborted === true || generation !== modelGeneration.current) return
-      if (!result.ok) {
-        setModelsError(result.error.message || t('modelsFailed'))
-        return
-      }
-      setModels(result.value)
-    } catch (cause) {
-      if (signal?.aborted === true || generation !== modelGeneration.current) return
-      setModelsError(messageOf(cause, t('modelsFailed')))
-    } finally {
-      if (signal?.aborted !== true && generation === modelGeneration.current) setModelsBusy(false)
     }
   }, [rpc, t])
 
@@ -143,13 +116,6 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
   }, [rpc, t])
 
   useEffect(() => {
-    if (!hasStatus) return
-    const controller = new AbortController()
-    void loadModels(false, controller.signal)
-    return () => controller.abort()
-  }, [hasStatus, loadModels, modelGateReady, resetTick])
-
-  useEffect(() => {
     if (status?.login.projectAvailable !== true || rpc.usage === undefined) {
       setQuota(null)
       return
@@ -168,42 +134,21 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
   useEffect(() => {
     if (status?.login.phase !== 'pending') return
     const controller = new AbortController()
-    const timer = globalThis.setInterval(() => { void load(controller.signal) }, 1_000)
+    const timer = globalThis.setInterval(() => { void load(controller.signal, true) }, 1_000)
     return () => {
       globalThis.clearInterval(timer)
       controller.abort()
     }
   }, [load, status?.login.phase])
 
-  const acknowledge = useCallback(async (checked: boolean) => {
-    if (!checked) {
-      setAcknowledged(false)
-      return
-    }
-    const signal = unmountSignal()
-    setAcknowledgeBusy(true)
-    setError(null)
-    try {
-      const result = await rpc.acknowledgeRisk(signal)
-      if (signal.aborted) return
-      if (!result.ok) {
-        setError(result.error.message || t('acknowledgeFailed'))
-        return
-      }
-      setAcknowledged(result.value.acknowledged)
-      setStatus(previous => previous === null ? previous : { ...previous, riskAcknowledged: true })
-    } catch (cause) {
-      if (!signal.aborted) setError(messageOf(cause, t('acknowledgeFailed')))
-    } finally {
-      if (!signal.aborted) setAcknowledgeBusy(false)
-    }
-  }, [rpc, t, unmountSignal])
-
   const startLogin = useCallback(async () => {
     const signal = unmountSignal()
     setLoginBusy(true)
     setError(null)
     try {
+      if (status?.riskAcknowledged !== true) {
+        await rpc.acknowledgeRisk(signal)
+      }
       const result = await rpc.login(signal)
       if (signal.aborted) return
       if (!result.ok) {
@@ -216,6 +161,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
         const { errorCode: _ignoredErrorCode, ...login } = previous.login
         return {
           ...previous,
+          riskAcknowledged: true,
           login: {
             ...login,
             phase: 'pending',
@@ -229,7 +175,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
     } finally {
       if (!signal.aborted) setLoginBusy(false)
     }
-  }, [load, rpc, t, unmountSignal])
+  }, [load, rpc, status?.riskAcknowledged, t, unmountSignal])
 
   const cancelLogin = useCallback(async () => {
     const signal = unmountSignal()
@@ -278,162 +224,143 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
     }
   }, [load, rpc, t, unmountSignal])
 
-  const revoke = useCallback(async () => {
-    const confirm = globalThis.confirm
-    if (typeof confirm === 'function' && !confirm(t('revokeConfirm'))) return
-    const signal = unmountSignal()
-    setActionBusy(true)
-    setError(null)
-    try {
-      const result = await rpc.revoke(signal)
-      if (signal.aborted) return
-      if (!result.ok) {
-        setError(result.error.message || t('revokeFailed'))
-        return
-      }
-      if (result.value.state === 'failed') setError(t('revokeFailed'))
-      if (result.value.state === 'superseded') setError(t('revokeSuperseded'))
-      await load(signal)
-    } catch (cause) {
-      if (!signal.aborted) setError(messageOf(cause, t('revokeFailed')))
-    } finally {
-      if (!signal.aborted) setActionBusy(false)
-    }
-  }, [load, rpc, t, unmountSignal])
-
   const projectError = projectErrorText(status?.login.errorCode, t)
+  const isConfigured = status?.login.configured === true
 
   return (
-    <section data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
-      <header>
-        <h1 id="antigravity-auth-title">{t('title')}</h1>
-        <p>{t('intro')}</p>
+    <section className="agy-settings" data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
+      <header className="agy-bundle-header">
+        <div>
+          <div className="agy-title-line">
+            <h1 id="antigravity-auth-title" className="agy-bundle-title">{t('title')}</h1>
+            {isConfigured ? (
+              <span className="agy-status-dot" role="status" aria-label="Ready" />
+            ) : null}
+          </div>
+          <p className="agy-bundle-intro">{t('intro')}</p>
+        </div>
       </header>
 
-      <article>
-        <h2>{t('riskTitle')}</h2>
-        <p>{t('risk')}</p>
-        <p>
-          <a href="https://antigravity.google/docs/faq/" target="_blank" rel="noreferrer">
-            {t('terms')}
-          </a>{' '}
-          <a href="https://antigravity.google/terms/" target="_blank" rel="noreferrer">
-            {t('additionalTerms')}
-          </a>
-        </p>
-        <p>{t('singleAccount')}</p>
-        <label>
-          <input
-            type="checkbox"
-            aria-label={t('riskAcknowledgement')}
-            checked={acknowledged}
-            disabled={status === null || acknowledgeBusy || acknowledged}
-            onChange={event => { void acknowledge(event.target.checked) }}
+      <div className="agy-cards">
+        {/* Card 1: Auth & Quota */}
+        <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
+          <div className="agy-card-header">
+            <div className="agy-card-identity">
+              <h2 id="antigravity-auth-card-title" className="agy-card-title">{t('authCardTitle')}</h2>
+              <p className="agy-card-intro">{t('authCardIntro')}</p>
+            </div>
+          </div>
+
+          <QuotaVisualDashboard
+            quota={quota}
+            busy={quotaBusy}
+            error={quotaError}
+            onRefresh={() => { void loadQuota(true, unmountSignal()) }}
+            t={t}
           />
-          {acknowledgeBusy ? t('acknowledgeBusy') : t('riskAcknowledgement')}
-        </label>
-        {acknowledged ? <p role="status">{t('acknowledged')}</p> : null}
-        {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
-          <p>
-            <a href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
-              {t('openAuthorization')}
-            </a>
-            <button type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
-              {t('cancelLogin')}
-            </button>
-          </p>
-        ) : (
-          <button type="button" disabled={!acknowledged || status === null || loginBusy} onClick={() => { void startLogin() }}>
-            {loginBusy ? t('startingLogin') : t('login')}
-          </button>
-        )}
-        <p role="status">{loginStatusText(status?.login.phase, acknowledged, t)}</p>
-        {status?.login.phase === 'success' ? <p role="status">{t('loginSuccess')}</p> : null}
-        {status?.login.phase === 'expired' ? <p role="alert">{t('loginExpired')}</p> : null}
-        {status?.login.phase === 'port-conflict' ? <p role="alert">{t('loginPortConflict')}</p> : null}
-        {status?.login.phase === 'failed' ? <p role="alert">{t('loginFailed')}</p> : null}
-        {projectError === undefined ? null : <p role="alert">{projectError}</p>}
-        {status?.login.maskedEmail === undefined ? null : (
-          <p>{t('account')}: <code>{status.login.maskedEmail}</code></p>
-        )}
-        {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
-          <p>{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
-        ) : null}
-        {status?.login.configured ? (
-          <p role="status">{status.login.projectAvailable ? t('projectAvailable') : t('projectUnavailable')}</p>
-        ) : null}
-        {status?.credential === undefined ? null : (
-          <>
-            <p role="status">{credentialStatusText(status.credential.state, t)}</p>
-            {status.credential.configured ? (
-              <p>
-                <button type="button" disabled={actionBusy} onClick={() => { void logout() }}>{t('logout')}</button>{' '}
-                <button type="button" disabled={actionBusy} onClick={() => { void revoke() }}>{t('revoke')}</button>
-              </p>
+
+          <div className="agy-action-row">
+            {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+              <>
+                <a className="agy-btn agy-btn-primary" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+                  {t('openAuthorization')}
+                </a>
+                <button className="agy-btn agy-btn-outline" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+                  {t('cancelLogin')}
+                </button>
+              </>
+            ) : (
+              <button className="agy-btn agy-btn-primary" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
+                {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
+              </button>
+            )}
+
+            {status?.credential?.configured ? (
+              <button className="agy-btn agy-btn-outline" type="button" disabled={actionBusy} onClick={() => { void logout() }}>
+                {t('logout')}
+              </button>
             ) : null}
-          </>
-        )}
-        {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
-          <p role="status">{revokeStatusText(status.revoke.state, t)}</p>
-        )}
-      </article>
 
-      <article>
-        <h2>{t('capabilityTitle')}</h2>
-        {loadState === 'loading' ? <p role="status" aria-live="polite">{t('statusLoading')}</p> : null}
-        {loadState === 'error' ? (
-          <p role="alert">
-            {error ?? t('statusFailed')}
-            <button type="button" onClick={() => { void load(unmountSignal()) }}>{t('retry')}</button>
-          </p>
-        ) : null}
-        {status === null || loadState !== 'ready' ? null : (
-          <ul>
-            {status.capabilities.map(capability => (
-              <li key={capability.id} data-capability={capability.id} data-state={capability.state}>
-                <strong>{capabilityLabel(capability.id, t)}</strong>
-                <span>{stateLabel(capability.state, t)}</span>
-                <p>{reasonLabel(capability.reasonCode, t)}</p>
-              </li>
-            ))}
-          </ul>
-        )}
-      </article>
+            <button
+              className="agy-btn agy-btn-ghost agy-refresh-btn"
+              type="button"
+              disabled={loadState === 'loading' || quotaBusy}
+              onClick={() => {
+                const minDelay = new Promise(resolve => setTimeout(resolve, 500))
+                void Promise.all([load(unmountSignal()), loadQuota(true, unmountSignal()), minDelay])
+              }}
+            >
+              <span className={quotaBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+              </span>
+              {quotaBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}
+            </button>
+          </div>
+          <p className="agy-footer-notice">{t('quotaFooterNotice')}</p>
 
-      <article aria-labelledby="antigravity-capability-settings-title">
-        <h2 id="antigravity-capability-settings-title">{t('settingsTitle')}</h2>
-        <CapabilityToggle
-          label={t('toggleSearch')}
-          snapshot={searchSettings}
-          available={capabilityAvailable(status, 'search')}
-          unavailableText={t('settingsUnavailable')}
-          onSet={value => searchScope?.set('enabled', value) ?? Promise.resolve()}
-        />
-        <CapabilityToggle
-          label={t('toggleImage')}
-          snapshot={imageSettings}
-          available={capabilityAvailable(status, 'image')}
-          unavailableText={t('settingsUnavailable')}
-          onSet={value => imageScope?.set('enabled', value) ?? Promise.resolve()}
-        />
-        <CapabilityToggle
-          label={t('toggleVideo')}
-          snapshot={videoSettings}
-          available={capabilityAvailable(status, 'video')}
-          unavailableText={t('settingsUnavailable')}
-          onSet={value => videoScope?.set('enabled', value) ?? Promise.resolve()}
-        />
-      </article>
+          {status?.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
+          {status?.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
+          {status?.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
+          {projectError === undefined ? null : <p className="agy-alert" role="alert">{projectError}</p>}
+          {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
+            <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
+          ) : null}
+          {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
+            <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
+          )}
+        </article>
 
-      <ModelCatalogCard
-        catalog={models}
-        busy={modelsBusy}
-        error={modelsError}
-        canRefresh={modelGateReady}
-        onRefresh={() => { void loadModels(true, unmountSignal()) }}
-        t={t}
-      />
-      <QuotaCard quota={quota} busy={quotaBusy} error={quotaError} onRefresh={() => { void loadQuota(true, unmountSignal()) }} t={t} />
+        {/* Card 2: Web Search */}
+        <article className="agy-card">
+          <div className="agy-card-header">
+            <div className="agy-card-identity">
+              <h2 className="agy-card-title">{t('search')}</h2>
+              <p className="agy-card-intro">{t('searchCardIntro')}</p>
+            </div>
+            <div className="agy-card-action">
+              <Switch
+                checked={searchSettings.value?.enabled ?? false}
+                disabled={!capabilityAvailable(status, 'search') || searchSettings.status !== 'ready' || !searchSettings.writable}
+                onChange={next => { void searchScope?.set('enabled', next) }}
+              />
+            </div>
+          </div>
+        </article>
+
+        {/* Card 3: Image Creation */}
+        <article className="agy-card">
+          <div className="agy-card-header">
+            <div className="agy-card-identity">
+              <h2 className="agy-card-title">{t('image')}</h2>
+              <p className="agy-card-intro">{t('imageCardIntro')}</p>
+            </div>
+            <div className="agy-card-action">
+              <Switch
+                checked={imageSettings.value?.enabled ?? false}
+                disabled={!capabilityAvailable(status, 'image') || imageSettings.status !== 'ready' || !imageSettings.writable}
+                onChange={next => { void imageScope?.set('enabled', next) }}
+              />
+            </div>
+          </div>
+        </article>
+
+        {/* Card 4: Video Analysis */}
+        <article className="agy-card">
+          <div className="agy-card-header">
+            <div className="agy-card-identity">
+              <h2 className="agy-card-title">{t('video')}</h2>
+              <p className="agy-card-intro">{t('videoCardIntro')}</p>
+            </div>
+            <div className="agy-card-action">
+              <Switch
+                checked={videoSettings.value?.enabled ?? false}
+                disabled={!capabilityAvailable(status, 'video') || videoSettings.status !== 'ready' || !videoSettings.writable}
+                onChange={next => { void videoScope?.set('enabled', next) }}
+              />
+            </div>
+          </div>
+        </article>
+      </div>
     </section>
   )
 }
@@ -442,133 +369,122 @@ function capabilityAvailable(status: AntigravityStatusView | null, id: Capabilit
   return status?.login.projectAvailable === true && status.capabilities.some(capability => capability.id === id && capability.state === 'available')
 }
 
-function CapabilityToggle({
-  label,
-  snapshot,
-  available,
-  unavailableText,
-  onSet,
+function Switch({
+  checked,
+  disabled,
+  onChange,
 }: {
-  readonly label: string
-  readonly snapshot: SettingsSnapshot
-  readonly available: boolean
-  readonly unavailableText: string
-  readonly onSet: (value: boolean) => Promise<void>
+  readonly checked: boolean
+  readonly disabled?: boolean
+  readonly onChange: (checked: boolean) => void
 }): ReactNode {
-  const [busy, setBusy] = useState(false)
-  const [writeError, setWriteError] = useState<string | null>(null)
-  const value = snapshot.value?.enabled ?? false
-  const disabled = !available || snapshot.status !== 'ready' || !snapshot.writable || busy
-  const change = async (next: boolean): Promise<void> => {
-    setBusy(true)
-    setWriteError(null)
-    try { await onSet(next) } catch (error) { setWriteError(messageOf(error, 'Settings write failed')) } finally { setBusy(false) }
-  }
   return (
-    <div data-settings-toggle={label}>
-      <label>
-        <input type="checkbox" checked={value} disabled={disabled} onChange={event => { void change(event.target.checked) }} />
-        {label}
-      </label>
-      {snapshot.status !== 'ready' || !snapshot.writable || !available ? <small>{unavailableText}</small> : null}
-      {writeError === null ? null : <p role="alert">{writeError}</p>}
+    <label className="agy-switch">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={e => { onChange(e.target.checked) }}
+      />
+      <span className="agy-switch-slider" />
+    </label>
+  )
+}
+
+function formatRefreshTime(resetTime: string, now = Date.now()): string {
+  const target = new Date(resetTime).getTime()
+  if (Number.isNaN(target)) return resetTime
+  const diffMs = target - now
+  if (diffMs <= 0) return '0m'
+  const diffMinutes = Math.floor(diffMs / (60 * 1000))
+  const hours = Math.floor(diffMinutes / 60)
+  const remMinutes = diffMinutes % 60
+
+  if (hours >= 24) {
+    return `${hours}h ${remMinutes}m`
+  }
+  if (hours > 0) {
+    return `${hours}h ${remMinutes}m`
+  }
+  return `${remMinutes}m`
+}
+
+function quotaTone(fraction: number): 'normal' | 'warning' | 'error' {
+  if (fraction < 0.3) return 'error'
+  if (fraction <= 0.6) return 'warning'
+  return 'normal'
+}
+
+function QuotaVisualDashboard({
+  quota,
+  busy,
+  error,
+  t,
+}: {
+  readonly quota: QuotaStatusView | null
+  readonly busy?: boolean
+  readonly error: string | null
+  readonly onRefresh?: () => void
+  readonly t: AntigravityAuthSettingsProps['t']
+}): ReactNode {
+  return (
+    <div className="agy-quota-section">
+      {quota?.state === 'available' && quota.groups !== undefined && quota.groups.length > 0 ? (
+        <div className="agy-quota-groups">
+          {quota.groups.map(group => {
+            const groupTitle = group.group === 'gemini' ? t('geminiGroupTitle') : t('claudeGptGroupTitle')
+            const groupDesc = group.group === 'gemini' ? t('geminiGroupDesc') : t('claudeGptGroupDesc')
+            return (
+              <div key={group.group} className="agy-quota-group">
+                <div className="agy-quota-group-header">
+                  <span className="agy-quota-group-title">{groupTitle}</span>
+                  <span className="agy-quota-group-desc">{groupDesc}</span>
+                </div>
+                <div className="agy-quota-buckets">
+                  {group.windows.map(window => {
+                    const windowName = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
+                    const pctFormatted = (window.remainingFraction * 100).toFixed(2) + '%'
+                    const pctRounded = Math.round(window.remainingFraction * 100)
+                    const refreshStr = formatRefreshTime(window.resetTime)
+                    const subtext = `${pctRounded}% ${t('remaining')} · ${t('refreshesIn')} ${refreshStr}`
+                    const widthPct = Math.max(0, Math.min(100, window.remainingFraction * 100))
+                    const tone = quotaTone(window.remainingFraction)
+
+                    return (
+                      <div key={window.window} className="agy-quota-bucket">
+                        <div className="agy-quota-bucket-head">
+                          <span className="agy-quota-bucket-name">{windowName}</span>
+                          {busy ? (
+                            <span className="agy-quota-querying">
+                              <span className="agy-querying-spinner" aria-hidden="true" />
+                              <span>{t('queryingQuota')}</span>
+                            </span>
+                          ) : (
+                            <span className="agy-quota-bucket-val" data-tone={tone}>{pctFormatted}</span>
+                          )}
+                        </div>
+                        <div className="agy-progress-track">
+                          {busy ? (
+                            <div className="agy-shimmer-track" aria-hidden="true" />
+                          ) : (
+                            <div className="agy-progress-bar" data-tone={tone} style={{ width: `${widthPct}%` }} />
+                          )}
+                        </div>
+                        <span className="agy-quota-subtext">{subtext}</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
+      {error === null ? null : <p className="agy-alert" role="alert">{error}</p>}
     </div>
   )
 }
 
-function ModelCatalogCard({
-  catalog,
-  busy,
-  error,
-  canRefresh,
-  onRefresh,
-  t,
-}: {
-  readonly catalog: AntigravityModelCatalogView | null
-  readonly busy: boolean
-  readonly error: string | null
-  readonly canRefresh: boolean
-  readonly onRefresh: () => void
-  readonly t: AntigravityAuthSettingsProps['t']
-}): ReactNode {
-  return (
-    <article aria-labelledby="antigravity-models-title">
-      <h2 id="antigravity-models-title">{t('modelsTitle')}</h2>
-      <p role="status">{modelCatalogStateLabel(catalog?.state ?? 'snapshot', t)}</p>
-      {catalog === null ? null : (
-        <ul>
-          {catalog.models.map(model => (
-            <li key={model.id} data-model={model.id} data-state={model.state}>
-              <strong>{model.name}</strong>: {modelAvailabilityLabel(model.state, t)}
-            </li>
-          ))}
-        </ul>
-      )}
-      {error === null ? null : <p role="alert">{error}</p>}
-      <button type="button" disabled={busy || !canRefresh} onClick={onRefresh}>
-        {busy ? t('modelsLoading') : t('modelsRefresh')}
-      </button>
-    </article>
-  )
-}
-
-function QuotaCard({
-  quota,
-  busy,
-  error,
-  onRefresh,
-  t,
-}: {
-  readonly quota: QuotaStatusView | null
-  readonly busy: boolean
-  readonly error: string | null
-  readonly onRefresh: () => void
-  readonly t: AntigravityAuthSettingsProps['t']
-}): ReactNode {
-  const state = quota?.state ?? 'unknown'
-  return (
-    <article aria-labelledby="antigravity-quota-title">
-      <h2 id="antigravity-quota-title">{t('quotaTitle')}</h2>
-      <p role="status">{quotaStateLabel(state, t)}</p>
-      {quota?.state === 'available' && quota.groups !== undefined ? (
-        <ul>
-          {quota.groups.flatMap(group => group.windows.map(window => (
-            <li key={`${group.group}-${window.window}`}>
-              {window.window === '5h' ? t('quotaFiveHour') : t('quotaWeekly')}: {Math.round(window.remainingFraction * 100)}% · {window.resetTime}
-            </li>
-          )))}
-        </ul>
-      ) : null}
-      {error === null ? null : <p role="alert">{error}</p>}
-      <button type="button" disabled={busy} onClick={onRefresh}>{busy ? t('quotaLoading') : t('quotaRefresh')}</button>
-    </article>
-  )
-}
-
-const QUOTA_STATE_KEYS: Readonly<Record<QuotaStatusView['state'] | 'unknown', AntigravityAuthKey>> = {
-  available: 'quotaAvailable',
-  unauthenticated: 'quotaUnauthenticated',
-  forbidden: 'quotaForbidden',
-  'rate-limited': 'quotaRateLimited',
-  offline: 'quotaOffline',
-  timeout: 'quotaOffline',
-  'protocol-drift': 'quotaProtocolDrift',
-  unknown: 'quotaUnknown',
-}
-const CAPABILITY_KEYS: Readonly<Record<CapabilityRowId, AntigravityAuthKey>> = { 'auth-llm': 'authLlm', search: 'search', image: 'image', video: 'video' }
-const CAPABILITY_STATE_KEYS: Readonly<Record<CapabilityGateState, AntigravityAuthKey>> = { available: 'available', disabled: 'disabled', 'poc-pending': 'pocPending', 'protocol-drift': 'protocolDrift' }
-const CAPABILITY_REASON_KEYS: Readonly<Record<CapabilityGateReasonCode, AntigravityAuthKey>> = {
-  'gate-not-run': 'gateNotRun',
-  'project-unavailable': 'projectUnavailable',
-  'capability-ready': 'available',
-  unauthenticated: 'gateUnauthenticated',
-  'rate-limited': 'gateRateLimited',
-  cancelled: 'gateCancelled',
-  'gate-0-failed': 'gate0Failed',
-  'gate-failed': 'gateFailed',
-  'unsupported-video': 'unsupportedVideo',
-  'protocol-drift': 'protocolDrift',
-}
 const PROJECT_ERROR_KEYS: Readonly<Partial<Record<LoginErrorCode, AntigravityAuthKey>>> = {
   'project-unavailable': 'projectUnavailable',
   'project-authentication-failed': 'projectAuthenticationFailed',
@@ -577,13 +493,6 @@ const PROJECT_ERROR_KEYS: Readonly<Partial<Record<LoginErrorCode, AntigravityAut
   'project-offline': 'projectOffline',
   'project-malformed': 'projectMalformed',
   'project-protocol-drift': 'projectProtocolDrift',
-}
-const CREDENTIAL_STATE_KEYS: Readonly<Record<CredentialState, AntigravityAuthKey>> = {
-  'logged-in': 'credentialLoggedIn',
-  refreshing: 'credentialRefreshing',
-  'refresh-failed': 'credentialRefreshFailed',
-  're-login-required': 'credentialReloginRequired',
-  'logged-out': 'credentialLoggedOut',
 }
 const REVOKE_STATE_KEYS: Readonly<Record<RevokeState, AntigravityAuthKey>> = {
   idle: 'credentialLoggedOut',
@@ -594,51 +503,6 @@ const REVOKE_STATE_KEYS: Readonly<Record<RevokeState, AntigravityAuthKey>> = {
   superseded: 'revokeSuperseded',
   'confirmation-required': 'revokeConfirmationRequired',
 }
-const LOGIN_PHASE_KEYS: Readonly<Record<AntigravityStatusView['login']['phase'], AntigravityAuthKey>> = {
-  idle: 'loginReady',
-  pending: 'loginPending',
-  success: 'loginSuccess',
-  cancelled: 'loginCancelled',
-  expired: 'loginExpired',
-  'port-conflict': 'loginPortConflict',
-  failed: 'loginFailed',
-}
-
-const MODEL_CATALOG_STATE_KEYS: Readonly<Record<AntigravityModelCatalogView['state'], AntigravityAuthKey>> = {
-  snapshot: 'modelsSnapshot',
-  'live-available': 'modelsLiveAvailable',
-  'refresh-failed': 'modelsRefreshFailed',
-  'protocol-drift': 'modelsProtocolDrift',
-}
-const MODEL_AVAILABILITY_KEYS: Readonly<Record<AntigravityModelAvailability, AntigravityAuthKey>> = {
-  snapshot: 'modelsSnapshotEntry',
-  'live-available': 'modelsAvailableEntry',
-  unavailable: 'modelsUnavailableEntry',
-}
-
-function modelCatalogStateLabel(state: AntigravityModelCatalogView['state'], t: AntigravityAuthSettingsProps['t']): string {
-  return t(MODEL_CATALOG_STATE_KEYS[state])
-}
-
-function modelAvailabilityLabel(state: AntigravityModelAvailability, t: AntigravityAuthSettingsProps['t']): string {
-  return t(MODEL_AVAILABILITY_KEYS[state])
-}
-
-function quotaStateLabel(state: QuotaStatusView['state'] | 'unknown', t: AntigravityAuthSettingsProps['t']): string {
-  return t(QUOTA_STATE_KEYS[state])
-}
-
-function capabilityLabel(id: CapabilityRowId, t: AntigravityAuthSettingsProps['t']): string {
-  return t(CAPABILITY_KEYS[id])
-}
-
-function stateLabel(state: CapabilityGateState, t: AntigravityAuthSettingsProps['t']): string {
-  return t(CAPABILITY_STATE_KEYS[state])
-}
-
-function reasonLabel(reason: CapabilityGateReasonCode, t: AntigravityAuthSettingsProps['t']): string {
-  return t(CAPABILITY_REASON_KEYS[reason])
-}
 
 function projectErrorText(errorCode: LoginErrorCode | undefined, t: AntigravityAuthSettingsProps['t']): string | undefined {
   if (errorCode === undefined) return undefined
@@ -646,21 +510,8 @@ function projectErrorText(errorCode: LoginErrorCode | undefined, t: AntigravityA
   return key === undefined ? undefined : t(key)
 }
 
-function credentialStatusText(state: CredentialState, t: AntigravityAuthSettingsProps['t']): string {
-  return t(CREDENTIAL_STATE_KEYS[state])
-}
-
 function revokeStatusText(state: RevokeState, t: AntigravityAuthSettingsProps['t']): string {
   return t(REVOKE_STATE_KEYS[state])
-}
-
-function loginStatusText(
-  phase: AntigravityStatusView['login']['phase'] | undefined,
-  acknowledged: boolean,
-  t: AntigravityAuthSettingsProps['t'],
-): string {
-  if (!acknowledged) return t('loginRequiresAck')
-  return t(phase === undefined ? 'loginReady' : LOGIN_PHASE_KEYS[phase])
 }
 
 function messageOf(_error: unknown, fallback: string): string {

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { AntigravityAdapter, ANTIGRAVITY_PROVIDER, buildAntigravityGeneratePayload } from '../src/llm-adapter.ts'
+import { AntigravityAdapter, ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT, ANTIGRAVITY_PROVIDER, buildAntigravityGeneratePayload } from '../src/llm-adapter.ts'
 import type { HostCredential } from '../src/credential-coordinator.ts'
 import { PrivateTransportError, type PrivateTransportRequest } from '../src/private-transport.ts'
 
@@ -58,7 +58,7 @@ describe('Antigravity LLM adapter', () => {
 
   it.each([
     {
-      family: 'Gemini', model: 'antigravity-gemini-3.7-flash', wireModel: 'gemini-3.7-flash-medium', errorCode: 'SAFETY',
+      family: 'Gemini', model: 'antigravity-gemini-3.7-flash', wireModel: 'gemini-3-flash', errorCode: 'SAFETY',
       event: '{"response":{"parts":[{"text":"gemini-reason","thought":true},{"text":"gemini-answer"},{"functionCall":{"id":"gemini-call","name":"gemini_lookup","args":{"q":"g"}}}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3},"finishReason":"STOP"}}',
     },
     {
@@ -130,7 +130,7 @@ describe('Antigravity LLM adapter', () => {
     expect(models.map(model => model.id)).toEqual(['antigravity-gemini-3.7-flash'])
     expect(transport.request).toHaveBeenCalledOnce()
     expect(transport.request.mock.calls[0]?.[0]).toMatchObject({
-      url: 'https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels',
+      url: ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT,
       accessToken: 'access',
     })
     expect(JSON.parse(String(transport.request.mock.calls[0]?.[0].body))).toEqual({ project: 'project-id' })

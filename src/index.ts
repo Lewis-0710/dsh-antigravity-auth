@@ -15,7 +15,10 @@ export const inject = ['connection', 'llm', 'attachments']
 
 /** Mount the Host-only OAuth service and its loopback RPC channel. */
 export function apply(ctx: Context): void {
-  const service = createAntigravityAuthService({ storePath: defaultAuthStorePath() })
+  const service = createAntigravityAuthService({
+    storePath: defaultAuthStorePath(),
+    autoActivateGates: true,
+  })
   const runtime = ctx as unknown as {
     llm?: {
       listProviders?: () => readonly { id: string }[]

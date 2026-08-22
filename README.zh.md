@@ -1,153 +1,140 @@
 # dsh-antigravity-auth
 
-面向 DeepSeek Harness 的私有、单账号、非官方 Antigravity 实验插件。
+[![npm version](https://img.shields.io/npm/v/dsh-antigravity-auth.svg)](https://www.npmjs.com/package/dsh-antigravity-auth)
+[![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
-## 当前阶段
+[English](README.md) | 中文
 
-本仓库提供一个 Host-only、可离线验证的**单账号 OAuth 登录路径**、**凭据生命周期
-协调器**、只读 **project discovery**，以及插件自有的 **Wire Identity（线路身份）
-seam**。token exchange 后，固定的 `v1internal:loadCodeAssist` probe 必须为当前账号
-返回规范化 project，凭据才会提交。仅有 project 验证成功**不会**启用私有能力；
-`google-antigravity` LLM adapter、有 grounding 的网页搜索、受限图片工具和视频 POC
-只有在各自的显式 live gate evidence 通过后才注册。Host 与浏览器入口通过仅返回安全值的
-loopback RPC 挂载，并展示独立的 Auth/LLM、搜索、图片和视频能力门禁。project 或 Gate 0
-失败时所有私有能力都会安全禁用。不会执行 onboarding、project 创建，也没有 hard-coded
-或用户提供的 fallback project。
+当前版本：**v0.1.0**
 
-登录路径明确分级：
+这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+**Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
 
-1. 设置页先展示**非官方 / 实验性**警告和 Google 账号暂停风险。
-2. 完成确认后，Host 内存生成 PKCE S256 材料，以及 256-bit、五分钟、一次性的 state
-   句柄。浏览器只收到授权 URL，verifier 不跨越 Host 边界。
-3. callback listener 只绑定 `127.0.0.1:51121`，只接受注册的 GET path/Host 和唯一的
-   code/state pair；错误 method、path、Host、重复参数、拒绝、过期、取消和端口冲突都会
-   返回安全且可区分的错误。
-4. callback completion 只存在于 Host。浏览器 RPC 没有 callback-URL 方法，也不会接收或
-   提交 code、state、verifier、token、cookie 或 callback URL。
-5. Host 通过统一的 Wire Identity 与 endpoint policy 执行固定的只读
-   `loadCodeAssist` project probe。只接受 authenticated token 返回的规范化 project；空结果
-   是 `project-unavailable`，authentication、forbidden、rate-limit、offline、malformed 与
-   protocol-drift discovery failure 保持可区分的安全状态。
-6. Project validation 必须成功，新凭据才会替换已有账号。版本化存储采用原子提交和
-   owner-only 权限（`0700`/`0600`），只保存单账号允许的长期 refresh credential 与规范化元数据；
-   access token 始终留在 Host 内存。
+- `google-antigravity` LLM 路由（Gemini Flash、Gemini Pro、Claude Opus、Claude Sonnet、GPT-OSS）；
+- 接入 DSH 内置 `web_search` 工具的全局 Antigravity 搜索提供方；
+- 通过 `generate_image` 实现持久图片生成与编辑，并提供供模型使用的 `list_images` 目录；
+- 支持本地工作区 MP4 文件的多模态 `analyze_video` 视频理解；
+- 具备优雅动效的 5 小时与每周用量/配额可视化仪表盘；
+- 一个原生 **Antigravity Auth** 设置分区，内含「登录」「网页搜索」「图片创作」「视频理解」四张卡片。
 
-## 凭据生命周期
+> **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
+> 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
 
-- Host 内存中的新鲜 access token 会在有界 refresh lead time 内复用；并发调用共享一次
-  refresh 操作。
-- refresh token 轮换只有在 revision 和每次登录的 lineage 都未变化时才提交；晚到的
-  refresh 结果不能覆盖更新的登录或登出。
-- `invalid_grant` 会显示为**需要重新登录**，同时保留诊断记录。网络、超时、限流和服务端
-  失败都有界处理，不会选择备用账号、endpoint、quota pool 或 identity。
-- **本地登出**只清除 Host 内存和本地持久化，不联系 Google。**撤销 Google grant** 是单独的
-  确认操作；token 放在 form body 中发送，只有成功完成后才清除本地状态。
-- RPC 与设置页会在不携带 token 的前提下展示已登录、刷新中、刷新失败、需要重新登录、已登出
-  以及撤销结果状态。
-- status refresh 与 retry 只读取已保存的规范化 project 状态，永远不会调用 onboarding 或创建
-  project；只有新登录会执行只读 discovery probe。
+## 功能特性
 
-默认 package 检查使用 whole-transport deterministic test double、确定性的随机数/时钟适配器
-和内存 store。这些 transport seam 只是离线 fixture 的 Host-only constructor input，生产 Cordis
-wiring 不会通过 config、RPC 或 settings 暴露它们。`pnpm test`、`pnpm run check` 与 package
-smoke test 都不会发起 OAuth 或私有 endpoint 请求。
-只有用户确认风险并打开授权 URL 后，真实登录才会开始。
+### 共享 Antigravity 登录态
 
-## 能力包
+- LLM、搜索、图片、视频与配额操作共用一个仅运行于 Host 的认证协调器。
+- 直连 OAuth 2.0 PKCE S256 流程：Host 内存生成 verifier 与 state 句柄，浏览器仅接收授权链接，密钥绝不跨越 Host 边界。
+- 回调监听器仅绑定 `127.0.0.1:51121`，只接受一次性的已注册 code/state 凭据对。
+- 通过属主权限文件存储（`0600`）、短时内存缓存解析凭证，并在到期前主动刷新。
+- 进程内合并并发刷新请求；仅在账号与 lineage 未变化时原子提交新 token。
+- 仪表盘实时显示连接状态以及 Gemini 与 Claude/GPT 模型家族的 5 小时和每周额度进度条。
+- 插件自有、仅允许 loopback 的 `/antigravity-auth` Connection RPC 绝不向前端泄露任何 token 敏感值。
 
-- **LLM** 通过 DSH 公开的 `LlmAdapter` seam，分别呈现固定社区模型快照与当前认证账号的
-  有界 live 交集。设置页展示 snapshot、live-available、unavailable、refresh-failed 与
-  protocol-drift；成功发现缓存 30 秒，且只有 Gate 0/L 通过后才能手动刷新。catalog 缺失只
-  是 advisory，不会拒绝精确的固定模型请求。streaming 只有一次首个 delta 前的认证重放且
-  无普通重试；tool result 通过 call id 保留原函数名，
-  包括 provider 分片返回的函数名。
-- **搜索** 使用 DSH `WebSearchProvider`，要求 provider 返回 grounding source。只有校验过的
-  HTTP(S) URL、有界标题/摘要和回答文本会跨越结果边界。
-- **图片** 提供 `generate_image` 与 `list_images`。`n > 1` 会发出彼此独立的请求，不重试
-  失败的计费请求；部分成功只返回固定 warning code。provider 声明的 MIME 必须与 magic
-  bytes admission 一致。引用只能是当前 session 授权的 `image:<id>` handle，或通过 DSH
-  filesystem containment、拒绝最终目标 symlink、regular-file 和读取前后 identity/version
-  检查的 workspace 文件。字节由 `AttachmentStore` 保存，原始 base64 不进入 session、RPC、日志或浏览器。
-- **配额** 通过 value-safe `usage` RPC 展示五小时及每周窗口的剩余比例和 reset 时间；
-  结果 30 秒内缓存/合并请求，原始 provider 字段、project ID 不会跨边界。
-- **视频** 是默认关闭的 gated POC，只接受 active workspace 内受限的 MP4 文件并返回文本
-  理解结果，不声称支持原生持久化视频 attachment。
+### LLM 路由与模型发现
 
-搜索、图片和视频分别拥有命名空间化的 Host 设置；浏览器通过公开 `SettingsScope`
-显示开关。只有登录、project、对应 live gate 和可写设置 scope 都准备好时，开关才可用。
+- 通过 DSH 公开的 `LlmAdapter` 接口注册 `google-antigravity` 提供方。
+- 将已审计的固定社区模型快照与真实登录账号的可用模型取交集。
+- 流式传输支持首个数据块前的一次认证重放，并支持跨分片提供方函数名的 call-id 稳定关联。
 
-设置页仍明确标记为**非官方 / 实验性**。产品只支持单账号：没有账号数组、切换、轮换、
-quota pool、identity fallback、fingerprint regeneration 或自动 onboarding。
+### 网页搜索
 
-## Wire Identity
+`antigravity-search` Host 行通过 `@deepseek-ai/dsh-web` 注册 ID 为 `antigravity` 的全局搜索提供方。基于审计过的 Wire Identity 线路分发请求，返回真实 grounding 来源与去重检验过的 HTTP(S) 链接。
 
-Wire Identity 模块保留经过审计的 Antigravity provider headers，并调用 DSH 公开的
-`attributionHeaders()` formatter，把真实 DSH 身份放入固定的二级 carrier：
+### 图片创作与编辑
+
+`generate_image` 为模型提供统一操作接口，分发至 Antigravity 图片端点：
+
+- 支持提示词、最多 5 个显式参考图（会话句柄 `image:<id>` 或工作区路径）及尺寸/比例选项。
+- 返回的图片字节经过格式校验、解码、Magic bytes 签名验证并通过 `AttachmentStore` 持久保存。
+- `list_images` 提供会话持久图片分页目录，供多模态模型查看。
+
+### 视频理解
+
+多模态 `analyze_video` 工具支持本地工作区 MP4 视频的帧采样与内容文本理解。
+
+### 用量与配额可视化仪表盘
+
+- 直观展示 5 小时窗口与每周窗口的剩余配额比例与刷新倒计时。
+- 状态三档配色：充足（>60%，翡翠绿）、预警（30%–60%，警示橙）、紧急（<30%，警示红）。
+- 配备 Shimmer 微光流动轨道、微型 Spinner 与平滑展开动画。
+
+## 环境要求
+
+- DeepSeek Harness `0.1.1-rc.1` 或兼容的后续 `0.1.x` 版本。
+- Node.js `^22.19.0` 或 `>=24.0.0`。
+- 具有 Antigravity 权限的 Google 账号。
+
+## 从 npm 安装（推荐）
+
+npm 包包含预构建的 Host 与浏览器 bundle，无需安装期构建权限：
+
+```sh
+dsh plugin --profile web add dsh-antigravity-auth
+```
+
+重启 `dsh web`，打开设置并选择 **Antigravity Auth**。
+
+## 从 GitHub 源码安装
+
+```sh
+dsh plugin --profile web add github:suntianc/dsh-antigravity-auth
+```
+
+Git 依赖会通过包内 `prepare` 脚本从源码构建。如遇 pnpm 提示，将输出的 `allowBuilds` 键添加到 `~/.dsh/profiles/web/pnpm-workspace.yaml`，再重新执行安装。
+
+## 从 tarball 安装
+
+```sh
+git clone https://github.com/suntianc/dsh-antigravity-auth.git
+cd dsh-antigravity-auth
+pnpm install
+pnpm pack
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.0.tgz
+```
+
+## 升级
+
+先停止正在运行的 `dsh web`，再将 Web Profile 更新到当前版本：
+
+```sh
+dsh plugin --profile web add dsh-antigravity-auth@0.1.0
+dsh plugin --profile web list
+```
+
+重启 `dsh web` 并刷新浏览器。
+
+## Host 配置
+
+能力包 patch 按依赖顺序启用独立的 Host 行：
+
+| 行 | Export | 作用 |
+|---|---|---|
+| `llm-antigravity-auth` | `dsh-antigravity-auth` | 共享认证协调器与 LLM 路由 |
+| `antigravity-search` | `dsh-antigravity-auth/search` | 全局搜索提供方 |
+| `antigravity-image` | `dsh-antigravity-auth/image` | 图片生成与编辑工具 |
+| `antigravity-video` | `dsh-antigravity-auth/video` | 视频理解工具 |
+
+## Wire Identity（线路身份）
+
+Wire Identity 模块保留 Antigravity 专有 header，并调用 DSH 公开的 `attributionHeaders()` formatter，把真实 DSH 身份放入二级 carrier：
 
 ```text
 X-DeepSeek-Harness-Attribution: deepseek-harness/<version> (+repository-url)
 ```
 
-调用方不能提供任意 headers，也不能省略、改名或替换二级 attribution。请求 endpoint
-由代码固定：只接受固定的 HTTPS Antigravity origin 与列出的 `v1internal:` 操作路径；
-自定义 origin、路径、query 和 fallback endpoint 都会被拒绝。插件自有 TLS/raw HTTP/1.1
-dispatcher 会序列化经过审计的有序 header pairs 与 chunk framing，不依赖 `fetch` 保留线路
-顺序；二级 attribution 不会被静默移除，也不修改 DSH core。
+请求端点由代码固定：仅接受受信任的 HTTPS Antigravity origin 与枚举的 `v1internal:` 操作路径。
 
-## 显式 live gates
+## 安全与限制
 
-Live gates 不属于 `pnpm test` 或 `pnpm run check`。CLI 每次只接受 `A`、`0L`、`S`、`I`、
-`V` 中的一个，并且只有同时给出参数和环境变量确认后，才构造会读取凭据或访问网络的 runner：
+- token 值绝不进入前端、设置、日志、会话事件或工具 metadata，仅在 Host 侧发起私有请求时附带认证 header。
+- 严格单账号模式：不提供账号池、轮换、身份回退或账号切换。
+- 本地登出立即清除 Host 内存与本地存储。
+- RPC 状态与登录通道仅限本机 loopback 访问。
+- 原始多媒体 base64 绝不注入会话正文或前端 RPC。
 
-```sh
-DSH_ANTIGRAVITY_LIVE_ACK=I_ACKNOWLEDGE_UNOFFICIAL_ANTIGRAVITY_PRIVATE_ENDPOINT_RISK \
-  pnpm run live:gates -- --acknowledge-private-risk --gate 0L
-# Gate 0 通过后，每次独立运行一个 family，例如：
-DSH_ANTIGRAVITY_LIVE_ACK=I_ACKNOWLEDGE_UNOFFICIAL_ANTIGRAVITY_PRIVATE_ENDPOINT_RISK \
-  pnpm run live:gates -- --acknowledge-private-risk --gate 0L --family claude
-```
-
-Gate `A` 执行交互式 OAuth/project validation；不带 family 的 `0L` 用一条最小文本请求验证
-固定 attribution，之后分别用 `--family gemini`、`--family claude` 与 `--family gpt-oss`
-运行三次独立单请求。每个 family outcome 以单次原子写独立保存，Auth/LLM 直接从三者派生而不
-另存可能分叉的 aggregate pass；只有三者全部通过后才可用。`S`
-验证真实 grounding sources；`I` 通过 auth store 旁 owner-only、content-addressed 的持久
-AttachmentStore seam 完成一次最小生成和编辑；PNG admission 会在持久化前验证 chunk CRC、
-必需 data/end chunk、有界 zlib decode、row filter 与 pixel dimension。`V` 还要求 `--video-file <workspace-fixture.mp4>`。
-受控短 fixture 必须在画面中央
-清晰显示与产品无关的大写单词 `KUMQUAT`，且 filename 与 container metadata 都不得包含该词；
-Gate V 使用固定的 pixel-only 问题，并且只有精确返回该预期单词才通过。Gate 证据受 credential
-lineage fence 约束；即使进程中止或物理清理失败，旧证据也不能授权替换账号。Evidence record
-只保存闭合、value-free 的 gate/family outcome；Gate I 的独立 content store 只以 opaque digest ID
-保存 admission 后的图片字节。project probe 不能替代未运行的 gate；Video gate 未通过时
-视频工具保持未注册。
-
-## 安全与范围
-
-- 这是私有、实验性、逆向得到的自用软件。
-- Google 不支持第三方 Antigravity 登录工具，账号可能被暂停或终止。请阅读相关的
-  [FAQ](https://antigravity.google/docs/faq/) 与 [Additional Terms](https://antigravity.google/terms/)。
-- 标准 HTTPS proxy 环境变量通过 CONNECT 生效。可选 proxy credential 有长度边界且只进入 proxy
-  handshake；private bearer credential 仍只在 tunnel 内的 TLS request 中发送，不安全 framing 会被拒绝。
-- DSH rc.1 `FileSystem` 没有 guarded file-descriptor read seam；workspace media 因此在
-  有界读取前后重检 containment 与 identity/version，可检测已观察到的替换，但不声称具备
-  原子级 TOCTOU 证明。
-- 默认构建和测试不会执行 profile 安装、npm 发布或真实请求。
-- 不修改 DeepSeek Harness core、已安装的 package、用户 profile 或生成的 bundle。
-
-## DSH 兼容性
-
-最低且已经测试的开发基线是 **DSH `0.1.1-rc.1`**。DSH peer range 从
-`^0.1.1-rc.1` 开始，开发依赖和 lockfile 固定使用 rc.1 package。干净安装不能混入
-rc.7/rc.8 DSH peers；必须先通过 `pnpm peers check`，再运行 `pnpm run check`。
-
-rc.1 新增的 credentials/authorization 和 session-projection interface 不改变本插件当前
-设计：凭据继续由插件自有 Host modules 管理，provider 使用自定义 `LlmAdapter` 而不是
-PiAiAdapter，公开 `attributionHeaders()` 仍是 Wire Identity formatter。升级证据见官方
-[DSH `v0.1.1-rc.1` release](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.1.1-rc.1)
-以及 workspace 中的 `dsh-v0.1.1-rc.1-plugin-impact.md` 影响报告。
-
-## 开发
+## 本地开发
 
 ```sh
 pnpm install
@@ -156,6 +143,17 @@ pnpm test
 pnpm run check
 ```
 
-默认测试是确定性的离线测试。完整的能力设计与研究边界见
-[`docs/specs/antigravity-auth-capability-bundle.md`](docs/specs/antigravity-auth-capability-bundle.md)
-和 [`docs/research/antigravity-auth-plugin.md`](docs/research/antigravity-auth-plugin.md)。
+`pnpm run build` 生成：
+
+- `lib/index.js`：认证 / LLM Host 插件；
+- `lib/search.js`：搜索 Host 插件；
+- `lib/image.js`：图片 Host 插件；
+- `lib/video.js`：视频 Host 插件；
+- `lib/quota.js`：配额 Host 插件；
+- `lib/wire-identity.js`：Wire Identity 线路身份模块；
+- `lib/client.cjs`：浏览器设置端插件；
+- `lib/types/**`：TypeScript 类型声明。
+
+## 友情链接
+
+- [LINUX DO (L 站)](https://linux.do/)

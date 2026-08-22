@@ -10,6 +10,7 @@
 import { Buffer } from 'node:buffer'
 import {
   ANTIGRAVITY_ENDPOINT,
+  ANTIGRAVITY_ENDPOINT_PROD,
   ANTIGRAVITY_HEADERS,
   buildAgyCliHeaderPairs,
 } from '@cortexkit/antigravity-auth-core'
@@ -18,6 +19,10 @@ import { attributionHeaders as dshAttributionHeaders } from '@deepseek-ai/dsh-ll
 export const DSH_ATTRIBUTION_HEADER = 'X-DeepSeek-Harness-Attribution' as const
 export const AGY_PROVIDER_USER_AGENT = ANTIGRAVITY_HEADERS['User-Agent']
 export const ANTIGRAVITY_WIRE_ORIGIN = new URL(ANTIGRAVITY_ENDPOINT).origin
+export const ANTIGRAVITY_WIRE_ORIGINS = Object.freeze([
+  new URL(ANTIGRAVITY_ENDPOINT).origin,
+  new URL(ANTIGRAVITY_ENDPOINT_PROD).origin,
+])
 export const ANTIGRAVITY_WIRE_PATHS = Object.freeze([
   '/v1internal:loadCodeAssist',
   '/v1internal:streamGenerateContent',
@@ -122,7 +127,7 @@ export function createWireIdentity(): WireIdentity {
     const pairs = headerPairs(url, request)
     const body = typeof request.body === 'string' ? Buffer.from(request.body) : Buffer.from(request.body)
     const lines = pairs.map(([name, value]) => `${name}: ${value}`).join('\r\n')
-    const head = Buffer.from(`POST ${parsed.pathname} HTTP/1.1\r\n${lines}\r\n\r\n`)
+    const head = Buffer.from(`POST ${parsed.pathname}${parsed.search} HTTP/1.1\r\n${lines}\r\n\r\n`)
     if (!pairs.some(([name]) => name === 'Transfer-Encoding')) return body.byteLength === 0 ? head : Buffer.concat([head, body])
     if (body.byteLength === 0) return Buffer.concat([head, Buffer.from('0\r\n\r\n')])
     return Buffer.concat([
@@ -232,9 +237,9 @@ function assertHttpsEndpoint(url: string): void {
   }
   if (
     parsed.protocol !== 'https:'
-    || parsed.origin !== ANTIGRAVITY_WIRE_ORIGIN
+    || !ANTIGRAVITY_WIRE_ORIGINS.some(origin => origin === parsed.origin)
     || !ANTIGRAVITY_WIRE_PATHS.some(path => path === parsed.pathname)
-    || parsed.search.length > 0
+    || (parsed.search.length > 0 && parsed.search !== '?alt=sse')
     || parsed.hash.length > 0
   ) {
     throw new WireIdentityError('WIRE_REQUEST_ENDPOINT_INVALID', 'The private request endpoint is not allowlisted')

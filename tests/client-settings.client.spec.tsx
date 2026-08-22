@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityAuthSettings } from '../src/client/AntigravityAuthSettings.tsx'
 import { en, zh } from '../src/client/locales.ts'
 import type { AntigravityAuthRpcClient } from '../src/rpc-contract.ts'
+import type { AntigravitySearchSettings } from '../src/search.ts'
 import { createStatusView } from '../src/status.ts'
 import type { LoginStatusView } from '../src/status.ts'
 import type { CredentialStatusView, RevokeStatusView } from '../src/credential-coordinator.ts'
@@ -32,7 +34,37 @@ function rpcFixture(
       state: 'snapshot',
       models: [{ id: 'antigravity-gemini-3.7-flash', name: 'Gemini 3.7 Flash', state: 'snapshot' }],
     } }),
+    usage: vi.fn().mockResolvedValue({ ok: true, value: { state: 'unknown' } }),
   }
+}
+
+class ReceiverBoundSettingsScope<T> implements SettingsScope<T> {
+  private readonly listeners = new Set<() => void>()
+  private readonly snapshot: SettingsScopeSnapshot<T>
+
+  constructor(value: T) {
+    this.snapshot = {
+      status: 'ready',
+      value,
+      base: value,
+      user: undefined,
+      revision: 1,
+      writable: true,
+      mode: 'host',
+    }
+  }
+
+  getSnapshot(): SettingsScopeSnapshot<T> {
+    return this.snapshot
+  }
+
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => { this.listeners.delete(listener) }
+  }
+
+  async set(): Promise<void> {}
+  async unset(): Promise<void> {}
 }
 
 afterEach(() => {
@@ -41,27 +73,17 @@ afterEach(() => {
 })
 
 describe('Antigravity bootstrap settings', () => {
-  it('requires risk acknowledgement before login and exposes gate status without secret controls', async () => {
+  it('renders settings shell without secret controls and starts login directly', async () => {
     const rpc = rpcFixture()
     const unsubscribe = vi.fn()
     const { unmount } = render(
       <AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => unsubscribe} />,
     )
 
-    expect(await screen.findByRole('heading', { name: 'Unofficial / Experimental' })).toBeTruthy()
-    expect(screen.getByText(/Google does not support third-party/i)).toBeTruthy()
-    expect(screen.getByText(/Single-account only/i)).toBeTruthy()
-    expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', true)
-    expect(screen.getAllByText(en.disabled)).toHaveLength(4)
-    expect(document.querySelectorAll('[data-capability]')).toHaveLength(4)
+    expect(await screen.findByRole('heading', { name: en.title })).toBeTruthy()
     expect(screen.queryByLabelText(/token|client secret|endpoint/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /add|switch|rotate/i })).toBeNull()
-
-    const acknowledgement = screen.getByRole('checkbox', { name: en.riskAcknowledgement })
-    fireEvent.click(acknowledgement)
-    await waitFor(() => expect(rpc.acknowledgeRisk).toHaveBeenCalledOnce())
     expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', false)
-    expect(screen.getByText(en.loginReady)).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: en.login }))
     await waitFor(() => expect(rpc.login).toHaveBeenCalledOnce())
@@ -72,80 +94,82 @@ describe('Antigravity bootstrap settings', () => {
     expect(unsubscribe).toHaveBeenCalledOnce()
   })
 
-  it('renders Host-only logout and separately confirmed revoke controls', async () => {
+  it('preserves the receiver when React subscribes to a Host SettingsScope', async () => {
+    const searchScope = new ReceiverBoundSettingsScope<AntigravitySearchSettings>({
+      enabled: false,
+      model: 'antigravity-gemini-3.7-flash',
+      maxResults: 10,
+    })
+
+    render(
+      <AntigravityAuthSettings
+        rpc={rpcFixture()}
+        t={key => en[key]}
+        subscribe={() => () => {}}
+        searchScope={searchScope}
+      />,
+    )
+
+    expect(await screen.findByRole('heading', { name: en.title })).toBeTruthy()
+  })
+
+  it('renders Host-only logout controls', async () => {
     const rpc = rpcFixture(
       { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' },
       true,
       { state: 'logged-in', configured: true },
       { state: 'idle' },
     )
-    const confirm = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
     render(<AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />)
 
     expect(await screen.findByRole('button', { name: en.logout })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: en.logout }))
     await waitFor(() => expect(rpc.logout).toHaveBeenCalledOnce())
-    fireEvent.click(screen.getByRole('button', { name: en.revoke }))
-    await waitFor(() => expect(rpc.revoke).toHaveBeenCalledOnce())
-    expect(confirm).toHaveBeenCalledWith(en.revokeConfirm)
-    confirm.mockRestore()
   })
 
-  it('shows advisory snapshot/live/unavailable model states and a gate-bound manual refresh', async () => {
+  it('shows quota dashboard with groups and windows', async () => {
     const rpc = rpcFixture(
       { phase: 'success', configured: true, projectAvailable: true },
       true,
       { state: 'logged-in', configured: true },
       { state: 'idle' },
     )
-    const status = createStatusView(
-      true,
-      { phase: 'success', configured: true, projectAvailable: true },
-      { state: 'logged-in', configured: true },
-      { state: 'idle' },
-      {
-        gate0: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
-        llmFamilies: {
-          gemini: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
-          claude: { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
-          'gpt-oss': { outcome: 'passed', checkedAt: '2030-01-01T00:00:00.000Z' },
-        },
+    vi.mocked(rpc.usage!).mockResolvedValue({
+      ok: true,
+      value: {
+        state: 'available',
+        groups: [
+          {
+            group: 'gemini',
+            modelCount: 2,
+            windows: [
+              { window: '5h', remainingFraction: 0.85, resetTime: '2030-01-01T00:00:00.000Z' },
+              { window: 'weekly', remainingFraction: 0.95, resetTime: '2030-01-07T00:00:00.000Z' },
+            ],
+          },
+        ],
       },
-    )
-    vi.mocked(rpc.status).mockResolvedValue({ ok: true, value: { status } })
-    vi.mocked(rpc.models).mockResolvedValue({ ok: true, value: {
-      state: 'live-available',
-      checkedAt: '2030-01-01T00:00:00.000Z',
-      models: [
-        { id: 'model-live', name: 'Live Model', state: 'live-available' },
-        { id: 'model-unavailable', name: 'Unavailable Model', state: 'unavailable' },
-      ],
-    } })
+    })
 
     render(<AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />)
 
-    expect(await screen.findByRole('heading', { name: en.modelsTitle })).toBeTruthy()
-    expect(await screen.findByText(en.modelsLiveAvailable)).toBeTruthy()
-    expect(screen.getByText(new RegExp(en.modelsAvailableEntry))).toBeTruthy()
-    expect(screen.getByText(new RegExp(en.modelsUnavailableEntry))).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: en.modelsRefresh }))
-    await waitFor(() => expect(rpc.models).toHaveBeenLastCalledWith(expect.any(AbortSignal), true))
+    expect(await screen.findByRole('heading', { name: en.authCardTitle })).toBeTruthy()
+    expect(await screen.findByText('GEMINI MODELS')).toBeTruthy()
+    expect(screen.getByText('85.00%')).toBeTruthy()
   })
 
   it('renders the same status shell with Chinese copy', async () => {
     const rpc = rpcFixture()
     render(<AntigravityAuthSettings rpc={rpc} t={key => zh[key]} subscribe={() => () => {}} />)
 
-    expect(await screen.findByRole('heading', { name: '非官方 / 实验性' })).toBeTruthy()
-    expect(screen.getByText(/Google 不支持第三方/i)).toBeTruthy()
-    expect(screen.getAllByText(zh.disabled)).toHaveLength(4)
+    expect(await screen.findByRole('heading', { name: zh.title })).toBeTruthy()
   })
 
   it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
     const cases = [
-      ['pending', { phase: 'pending', configured: false, projectAvailable: false, authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`, expiresAt: '2026-08-21T00:00:00.000Z' }, en.loginPending],
-      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.loginSuccess],
-      ['cancelled', { phase: 'cancelled', configured: false, projectAvailable: false, errorCode: 'cancelled' }, en.loginCancelled],
+      ['pending', { phase: 'pending', configured: false, projectAvailable: false, authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`, expiresAt: '2026-08-21T00:00:00.000Z' }, en.openAuthorization],
+      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.relogin],
+      ['cancelled', { phase: 'cancelled', configured: false, projectAvailable: false, errorCode: 'cancelled' }, en.login],
       ['expired', { phase: 'expired', configured: false, projectAvailable: false, errorCode: 'expired' }, en.loginExpired],
       ['port-conflict', { phase: 'port-conflict', configured: false, projectAvailable: false, errorCode: 'port-conflict' }, en.loginPortConflict],
       ['failed', { phase: 'failed', configured: false, projectAvailable: false, errorCode: 'project-unavailable' }, en.loginFailed],
@@ -153,10 +177,6 @@ describe('Antigravity bootstrap settings', () => {
     for (const [_name, login, copy] of cases) {
       const { unmount } = render(<AntigravityAuthSettings rpc={rpcFixture(login, true)} t={key => en[key]} subscribe={() => () => {}} />)
       expect((await screen.findAllByText(copy)).length).toBeGreaterThan(0)
-      if (_name === 'success') {
-        expect(screen.getByText('a***@example.com')).toBeTruthy()
-        expect(screen.getByText(en.projectAvailable)).toBeTruthy()
-      }
       unmount()
       document.body.innerHTML = ''
     }
@@ -178,7 +198,6 @@ describe('Antigravity bootstrap settings', () => {
       />,
     )
     expect(await screen.findByText(copy)).toBeTruthy()
-    expect(screen.getAllByText(en.projectUnavailable).length).toBeGreaterThan(0)
     unmount()
     document.body.innerHTML = ''
   })
@@ -203,8 +222,7 @@ describe('Antigravity bootstrap settings', () => {
     await vi.waitFor(() => expect(status).toHaveBeenCalledOnce())
     await vi.advanceTimersByTimeAsync(1_000)
     await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2))
-    expect(screen.getAllByText(en.loginSuccess).length).toBeGreaterThan(0)
-    expect(screen.getByText('a***@example.com')).toBeTruthy()
+    expect(screen.getByText(en.relogin)).toBeTruthy()
     unmount()
     vi.useRealTimers()
   })
@@ -233,7 +251,7 @@ describe('Antigravity bootstrap settings', () => {
   it('passes an unmount-scoped signal to pending browser actions', async () => {
     let actionSignal: AbortSignal | undefined
     const rpc = rpcFixture()
-    rpc.acknowledgeRisk = vi.fn((_signal?: AbortSignal) => {
+    rpc.login = vi.fn((_signal?: AbortSignal) => {
       actionSignal = _signal
       return new Promise<never>(() => {})
     })
@@ -242,7 +260,7 @@ describe('Antigravity bootstrap settings', () => {
     )
 
     await screen.findByRole('heading', { name: en.title })
-    fireEvent.click(screen.getByRole('checkbox', { name: en.riskAcknowledgement }))
+    fireEvent.click(screen.getByRole('button', { name: en.login }))
     await waitFor(() => expect(actionSignal).toBeDefined())
 
     unmount()

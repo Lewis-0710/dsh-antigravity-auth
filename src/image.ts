@@ -279,8 +279,9 @@ function buildImagePayload(
 ): Record<string, unknown> {
   const resolved = resolveModelWithTier(model, { cli_first: false })
   if (resolved.isImageModel !== true) throw new AntigravityImageError('The selected Antigravity model is not an image model', 'INVALID_ARGS')
+  const project = credential.projectId === 'inductive-dreamer-qrkws' || !credential.projectId ? undefined : credential.projectId
   return {
-    project: credential.projectId,
+    ...(project === undefined ? {} : { project }),
     model: resolved.actualModel,
     request: {
       contents: [{ role: 'user', parts: [{ text: prompt }, ...referenceParts] }],

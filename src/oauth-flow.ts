@@ -19,6 +19,10 @@ export const ANTIGRAVITY_CALLBACK_PATH = '/oauth-callback' as const
 export const ANTIGRAVITY_CALLBACK_HOSTS = Object.freeze([
   `localhost:${String(ANTIGRAVITY_CALLBACK_PORT)}`,
   `127.0.0.1:${String(ANTIGRAVITY_CALLBACK_PORT)}`,
+  `[::1]:${String(ANTIGRAVITY_CALLBACK_PORT)}`,
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
 ])
 export const OAUTH_FLOW_TTL_MS = 5 * 60 * 1000
 
@@ -495,7 +499,7 @@ function assertCallbackRequest(request: LoopbackCallbackRequest): void {
     throw new OAuthFlowError('invalid-path', 'The OAuth callback URL is not accepted')
   }
   if (parsed.protocol !== 'http:'
-    || parsed.host !== request.host
+    || !isAllowedCallbackHost(parsed.host)
     || parsed.username.length > 0
     || parsed.password.length > 0
     || parsed.pathname !== ANTIGRAVITY_CALLBACK_PATH
@@ -511,11 +515,12 @@ function parseCallback(value: string): { state: string; code?: string; error?: s
   } catch {
     throw new OAuthFlowError('invalid-path', 'The OAuth callback URL is not accepted')
   }
-  const allowed = new Set(['state', 'code', 'error', 'error_description', 'error_uri'])
   const seen = new Set<string>()
-  for (const [key] of parsed.searchParams) {
-    if (!allowed.has(key)) throw new OAuthFlowError('invalid-parameters', 'The OAuth callback parameters are not accepted')
+  for (const [key, paramValue] of parsed.searchParams) {
     if (seen.has(key)) throw new OAuthFlowError('duplicate-parameter', 'The OAuth callback contains duplicate parameters')
+    if (!safeCallbackValue(key) || !safeCallbackValue(paramValue)) {
+      throw new OAuthFlowError('invalid-parameters', 'The OAuth callback parameters are not accepted')
+    }
     seen.add(key)
   }
   const state = parsed.searchParams.get('state')

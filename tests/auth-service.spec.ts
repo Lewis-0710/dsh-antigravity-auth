@@ -80,6 +80,48 @@ describe('Antigravity auth service', () => {
     await service.dispose()
   })
 
+  it('auto-activates capability gates upon successful login when autoActivateGates is enabled', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 2_000 })
+    const gates = createMemoryCapabilityGates()
+    const fixture = listenerFixture()
+    const service = createAntigravityAuthService({
+      store,
+      gates,
+      autoActivateGates: true,
+      projectOptions: {
+        transport: projectTransport({ cloudaicompanionProject: { id: 'project-secret' } }),
+      },
+      flowOptions: {
+        randomBytes: size => Uint8Array.from({ length: size }, (_, index) => index + 1),
+        listenerFactory: fixture.listenerFactory,
+        exchangeCode: vi.fn(async () => ({
+          accessToken: 'access-secret',
+          refreshToken: 'refresh-secret',
+          expiresAt: 9_000,
+          email: 'alice@example.com',
+        })),
+      },
+    })
+
+    await service.acknowledgeRisk()
+    const started = await service.startLogin()
+    const state = new URL(started.authorizationUrl).searchParams.get('state')
+    await expect(service.completeCallback(`http://localhost:51121/oauth-callback?state=${state}&code=code`)).resolves.toMatchObject({
+      completed: true,
+      phase: 'success',
+    })
+
+    expect(await service.status()).toMatchObject({
+      capabilities: [
+        { id: 'auth-llm', state: 'available', reasonCode: 'capability-ready' },
+        { id: 'search', state: 'available', reasonCode: 'capability-ready' },
+        { id: 'image', state: 'available', reasonCode: 'capability-ready' },
+        { id: 'video', state: 'available', reasonCode: 'capability-ready' },
+      ],
+    })
+    await service.dispose()
+  })
+
   it('uses the default read-only project probe before replacing a credential', async () => {
     const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
     const fixture = listenerFixture()

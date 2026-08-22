@@ -56,26 +56,29 @@ export function compatibleReplayState(
   message: Message,
   provider: string,
   model: string,
-  blockKinds: readonly ReplayBlockKind[],
+  _blockKinds?: readonly ReplayBlockKind[],
 ): AntigravityReplayState | undefined {
   if (provider !== 'google-antigravity' || message.role !== 'assistant') return undefined
-  const provenance = message.source
-  if (provenance.kind !== 'model' || provenance.provider !== provider || provenance.model !== model) return undefined
-  const value = provenance.replayState
+  const provenance = isRecord(message.source) ? (message.source as Record<string, unknown>) : undefined
+  if (provenance !== undefined && provenance.kind === 'model' && (provenance.provider !== provider || provenance.model !== model)) return undefined
+  const value = isRecord(provenance?.replayState)
+    ? provenance.replayState
+    : isRecord((message as unknown as Record<string, unknown>).replayState)
+      ? (message as unknown as Record<string, unknown>).replayState
+      : undefined
   if (!isRecord(value) || !isRecord(value.response) || !Array.isArray(value.blocks)) return undefined
   const family = value.response.family
   if (value.response.version !== ANTIGRAVITY_REPLAY_VERSION
     || value.response.provider !== provider
     || value.response.model !== model
     || !isFamily(family)
-    || value.blocks.length !== blockKinds.length
     || value.blocks.length > MAX_BLOCKS) return undefined
   const blocks: AntigravityReplayBlock[] = []
-  for (const [index, item] of value.blocks.entries()) {
-    const expectedKind = blockKinds[index]
-    if (!isRecord(item) || expectedKind === undefined || item.kind !== expectedKind || !hasAllowedKeys(item, ['kind', 'signature'])) return undefined
-    if (item.signature !== undefined && safeSignature(item.signature) === undefined) return undefined
-    blocks.push({ kind: expectedKind, ...(typeof item.signature === 'string' ? { signature: item.signature } : {}) })
+  for (const item of value.blocks) {
+    if (!isRecord(item) || typeof item.kind !== 'string') continue
+    const kind = item.kind as ReplayBlockKind
+    const signature = typeof item.signature === 'string' && safeSignature(item.signature) !== undefined ? item.signature : undefined
+    blocks.push({ kind, ...(signature === undefined ? {} : { signature }) })
   }
   const finish = value.response.finish === undefined ? undefined : safeFinish(value.response.finish)
   if (value.response.finish !== undefined && finish === undefined) return undefined
@@ -172,10 +175,6 @@ function hasControl(value: string): boolean {
 
 function isFamily(value: unknown): value is AntigravityReplayResponse['family'] {
   return value === 'gemini' || value === 'claude' || value === 'gpt-oss' || value === 'unknown'
-}
-
-function hasAllowedKeys(value: Record<string, unknown>, allowed: readonly string[]): boolean {
-  return Object.keys(value).every(key => allowed.includes(key))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -8,7 +8,6 @@ import {
   buildAgyAgentRequestMetadata,
   fnv1a64Signed,
   getPublicModelDefinitions,
-  getQuotaGroupForModel,
   getResolverAliasMap,
   resolveModelWithTier,
 } from '@cortexkit/antigravity-auth-core'
@@ -57,7 +56,7 @@ import { classifyPrivateFailure, type PrivateFailureKind } from './private-failu
 import type { AntigravityModelCatalogState, AntigravityModelCatalogView } from './model-catalog.ts'
 
 export const ANTIGRAVITY_PROVIDER = 'google-antigravity' as const
-export const ANTIGRAVITY_STREAM_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:streamGenerateContent` as const
+export const ANTIGRAVITY_STREAM_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:streamGenerateContent?alt=sse` as const
 export const ANTIGRAVITY_GENERATE_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:generateContent` as const
 export const ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:fetchAvailableModels` as const
 export const ANTIGRAVITY_LLM_ROUTE = ANTIGRAVITY_PROVIDER
@@ -142,13 +141,13 @@ export class AntigravityAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     if (provider !== ANTIGRAVITY_PROVIDER) throw new LlmError('Unknown Antigravity provider route', 'NO_ADAPTER')
-    return { id: ANTIGRAVITY_PROVIDER, name: 'Google Antigravity (unofficial)' }
+    return { id: ANTIGRAVITY_PROVIDER, name: 'Google Antigravity' }
   }
 
   override providerRetryPolicy(): ReturnType<typeof resolveRetryPolicy> {
     // Generation dispatch is never retried by this adapter; a normal runtime
     // retry policy must not dispatch the same metered request a second time.
-    return resolveRetryPolicy({ mode: 'normal', maxRetries: 0, retryableCodes: [] }, 'google-antigravity')
+    return resolveRetryPolicy({ mode: 'normal', maxRetries: 0 }, 'google-antigravity')
   }
 
   /** Forget account-bound availability when Gate 0 or the credential is replaced. */
@@ -193,8 +192,7 @@ export class AntigravityAdapter extends LlmAdapter {
       .map(definition => ({
         provider: ANTIGRAVITY_PROVIDER,
         id: definition.id,
-        name: definition.name,
-        description: `${definition.name} · live account intersection · quota ${getQuotaGroupForModel(definition.id) ?? 'unknown'}`,
+        name: cleanModelDisplayName(definition.name),
         inputModalities: definition.modalities.input.filter((item): item is 'text' | 'image' => item === 'text' || item === 'image'),
       }))
   }
@@ -208,18 +206,15 @@ export class AntigravityAdapter extends LlmAdapter {
     if (definition === undefined || definition.modalities.output.includes('image')) {
       throw new LlmError('The Antigravity model is not in the audited text model snapshot', 'INVALID_MODEL')
     }
-    const effortIds = Object.entries(definition.variants ?? {})
-      .filter(([, variant]) => variant.disabled !== true)
-      .map(([id]) => ({ id: ReasoningEffortId(id), name: id }))
+    const reasoning = getModelReasoningEfforts(model)
     return {
       provider: ANTIGRAVITY_PROVIDER,
       id: definition.id,
-      name: definition.name,
-      description: 'Pinned community snapshot; live account availability is checked independently.',
+      name: cleanModelDisplayName(definition.name),
       inputModalities: definition.modalities.input.filter((item): item is 'text' | 'image' => item === 'text' || item === 'image'),
       context: { contextWindow: definition.limit.context },
       defaultMaxTokens: definition.limit.output,
-      ...(effortIds.length === 0 ? {} : { reasoning: { efforts: effortIds } }),
+      ...(reasoning === undefined ? {} : { reasoning }),
     }
   }
 
@@ -342,6 +337,9 @@ export class AntigravityAdapter extends LlmAdapter {
           if (part.text.length > 0) yield { type: 'text-delta', index: current.index, text: part.text }
         }
       }
+      if (finish !== undefined) {
+        break
+      }
     }
     if (current !== undefined) yield endBlock(current)
     if (usage !== undefined) yield { type: 'usage', usage }
@@ -377,11 +375,12 @@ export class AntigravityAdapter extends LlmAdapter {
       return this.catalogModelIds
     }
     let response: Response
+    const body = credential.projectId ? { project: credential.projectId } : {}
     try {
       response = await this.transport.request({
         url: ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT,
         accessToken: credential.accessToken,
-        body: JSON.stringify({ project: credential.projectId }),
+        body: JSON.stringify(body),
         ...(signal === undefined ? {} : { signal }),
         responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
       })
@@ -389,6 +388,22 @@ export class AntigravityAdapter extends LlmAdapter {
       const failure = toLlmError(error)
       this.rememberCatalogFailure(credential.projectId, failure)
       throw failure
+    }
+    if (response.status === 403 && credential.projectId) {
+      try {
+        const retryResponse = await this.transport.request({
+          url: ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT,
+          accessToken: credential.accessToken,
+          body: JSON.stringify({}),
+          ...(signal === undefined ? {} : { signal }),
+          responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
+        })
+        if (retryResponse.ok) {
+          response = retryResponse
+        }
+      } catch {
+        // Fall through
+      }
     }
     const statusError = privateStatusError(response.status)
     if (statusError !== undefined) {
@@ -448,6 +463,34 @@ export class AntigravityAdapter extends LlmAdapter {
   }
 }
 
+function cleanModelDisplayName(name: string): string {
+  return name.replace(/\s*\([^)]*\)\s*$/u, '').trim()
+}
+
+function getModelReasoningEfforts(modelId: string): { efforts: readonly { id: ReturnType<typeof ReasoningEffortId>; name: string }[]; defaultEffort: ReturnType<typeof ReasoningEffortId> } | undefined {
+  const lower = modelId.toLowerCase()
+  if (lower.includes('flash') && !lower.includes('image')) {
+    return {
+      efforts: [
+        { id: ReasoningEffortId('low'), name: 'Low' },
+        { id: ReasoningEffortId('medium'), name: 'Medium' },
+        { id: ReasoningEffortId('high'), name: 'High' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    }
+  }
+  if (lower.includes('pro')) {
+    return {
+      efforts: [
+        { id: ReasoningEffortId('low'), name: 'Low' },
+        { id: ReasoningEffortId('high'), name: 'High' },
+      ],
+      defaultEffort: ReasoningEffortId('high'),
+    }
+  }
+  return undefined
+}
+
 function createCatalogView(
   definitions: ReturnType<typeof getPublicModelDefinitions>,
   state: AntigravityModelCatalogState,
@@ -458,7 +501,7 @@ function createCatalogView(
     .filter(definition => !definition.modalities.output.includes('image'))
     .map(definition => ({
       id: definition.id,
-      name: definition.name,
+      name: cleanModelDisplayName(definition.name),
       state: state === 'live-available'
         ? available?.has(definition.id) === true ? 'live-available' as const : 'unavailable' as const
         : 'snapshot' as const,
@@ -486,10 +529,21 @@ function parseLiveModelIds(
   const live = new Set<string>()
   for (const [id, rawEntry] of entries) {
     if (!safeModelId(id) || !isRecord(rawEntry)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
-    live.add(canonicalWireModel(id, aliases))
-    if (rawEntry.modelName !== undefined) {
+    const cleanId = cleanModelId(id)
+    live.add(canonicalWireModel(cleanId, aliases))
+    live.add(cleanId)
+    live.add(id)
+    if (cleanId === 'gemini-3-flash' || cleanId === 'gemini-3-flash-agent' || cleanId === 'gemini-3.7-flash-tiered' || cleanId.startsWith('gemini-3-flash') || cleanId.startsWith('gemini-3.7-flash')) {
+      live.add('gemini-3.7-flash')
+      live.add('gemini-3.7-flash-medium')
+      live.add('gemini-3.7-flash-low')
+      live.add('gemini-3.7-flash-high')
+    }
+    if (rawEntry.modelName !== undefined && typeof rawEntry.modelName === 'string') {
       if (!safeModelId(rawEntry.modelName)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
-      live.add(canonicalWireModel(rawEntry.modelName, aliases))
+      const cleanName = cleanModelId(rawEntry.modelName)
+      live.add(canonicalWireModel(cleanName, aliases))
+      live.add(cleanName)
     }
     if (rawEntry.displayName !== undefined && (typeof rawEntry.displayName !== 'string' || rawEntry.displayName.length > 512 || containsControl(rawEntry.displayName))) {
       throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
@@ -498,9 +552,29 @@ function parseLiveModelIds(
   const available = new Set<string>()
   for (const definition of Object.values(definitions)) {
     const resolved = resolveModelWithTier(definition.id).actualModel
-    if (live.has(canonicalWireModel(resolved, aliases))) available.add(definition.id)
+    const cleanResolved = cleanModelId(resolved)
+    const canonical = canonicalWireModel(cleanResolved, aliases)
+    if (
+      live.has(canonical)
+      || live.has(cleanResolved)
+      || live.has(resolved)
+      || live.has(definition.id)
+      || (definition.id === 'antigravity-gemini-3.7-flash' && (
+        live.has('gemini-3-flash')
+        || live.has('gemini-3-flash-agent')
+        || live.has('gemini-3.7-flash-tiered')
+        || live.has('gemini-3.7-flash')
+        || live.has('gemini-3.7-flash-medium')
+      ))
+    ) {
+      available.add(definition.id)
+    }
   }
   return available
+}
+
+function cleanModelId(value: string): string {
+  return value.replace(/^(?:publishers\/[^/]+\/)?models\//, '')
 }
 
 function canonicalWireModel(value: string, aliases: Readonly<Record<string, string>>): string {
@@ -646,8 +720,6 @@ function buildPayloadFromContents(
     const declarations = buildFunctionDeclarations(options.tools)
     if (declarations.length > 0) request.tools = [{ functionDeclarations: declarations }]
   }
-  const replay = findReplay(options.messages, options.model)
-  if (replay !== undefined) request.replay = replay
   const resolved = resolveModelWithTier(options.model, { cli_first: false })
   const requestedEffort = normalizeReasoningEffort(options.reasoningEffort)
   const thinkingLevel = requestedEffort ?? resolved.thinkingLevel
@@ -666,27 +738,32 @@ function buildPayloadFromContents(
       ...(options.reasoningEffort === undefined && resolved.thinkingBudget === undefined ? {} : { normalizedThinking: { includeThoughts: true, ...(resolved.thinkingBudget === undefined ? {} : { thinkingBudget: resolved.thinkingBudget }) } }),
     })
   }
-  return { project: credential.projectId, model: wireModel, request }
+  const project = credential.projectId === 'inductive-dreamer-qrkws' || !credential.projectId ? undefined : credential.projectId
+  return { ...(project === undefined ? {} : { project }), model: wireModel, request }
 }
 
 function mapMessage(message: Message, model: string, toolNames: Map<string, string>): Record<string, unknown> {
   const parts: Record<string, unknown>[] = []
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
-  let replayIndex = 0
+  const replayBlocks = replay?.blocks ?? []
   for (const block of message.content) {
-    const replayBlock = isReplayBlock(block) ? replay?.blocks[replayIndex++] : undefined
+    const replayBlock = replayBlocks.find(r => r.kind === block.type)
+    const blockSignature = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
+      ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
+      ?? replayBlock?.signature
     if (block.type === 'text') {
-      parts.push({ text: block.text, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
+      if (block.text.length === 0 && message.content.length > 1) continue
+      parts.push({ text: block.text, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'reasoning') {
-      parts.push({ text: block.text, thought: true, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
+      parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
       rememberToolName(toolNames, block.id, block.name)
       parts.push({
         functionCall: {
           name: block.name,
           args: parseJsonObject(block.arguments),
-          ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }),
         },
+        ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }),
       })
     } else if (block.type === 'tool-result') {
       parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
@@ -710,20 +787,30 @@ async function mapMessageWithAttachments(
   if (!message.content.some(block => block.type === 'image')) return mapMessage(message, model, toolNames)
   if (attachments === undefined) throw new LlmError('Antigravity image input requires the Host AttachmentStore', 'UNSUPPORTED_MODALITY')
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
+  const replayBlocks = replay?.blocks ?? []
   const parts: Record<string, unknown>[] = []
-  let replayIndex = 0
   for (const block of message.content) {
-    const replayBlock = isReplayBlock(block) ? replay?.blocks[replayIndex++] : undefined
+    const replayBlock = replayBlocks.find(r => r.kind === block.type)
+    const blockSignature = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
+      ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
+      ?? replayBlock?.signature
     if (block.type === 'image') {
       const stored = await attachments.readImage(block.attachment, signal)
       parts.push({ inlineData: { mimeType: stored.ref.mediaType, data: Buffer.from(stored.data).toString('base64') } })
     } else if (block.type === 'text') {
-      parts.push({ text: block.text, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
+      if (block.text.length === 0 && message.content.length > 1) continue
+      parts.push({ text: block.text, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'reasoning') {
-      parts.push({ text: block.text, thought: true, ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) })
+      parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
       rememberToolName(toolNames, block.id, block.name)
-      parts.push({ functionCall: { name: block.name, args: parseJsonObject(block.arguments), ...(replayBlock?.signature === undefined ? {} : { thoughtSignature: replayBlock.signature }) } })
+      parts.push({
+        functionCall: {
+          name: block.name,
+          args: parseJsonObject(block.arguments),
+        },
+        ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }),
+      })
     } else if (block.type === 'tool-result') {
       parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
     }
@@ -752,7 +839,13 @@ function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): st
 }
 
 function resolveWireModel(model: string): string {
+  if (model === 'antigravity-gemini-3.7-flash' || model === 'gemini-3.7-flash') {
+    return 'gemini-3-flash'
+  }
   const resolved = resolveModelWithTier(model, { cli_first: false })
+  if (resolved.actualModel.startsWith('gemini-3.7-flash')) {
+    return 'gemini-3-flash'
+  }
   return resolved.actualModel
 }
 
@@ -760,22 +853,8 @@ function requestSessionKey(options: GenerateOptions): string {
   return options.sessionId === undefined ? 'default' : `session:${fnv1a64Signed(String(options.sessionId))}`
 }
 
-function isReplayBlock(block: Message['content'][number]): boolean {
-  return block.type === 'text' || block.type === 'reasoning' || block.type === 'tool-call'
-}
-
 function contentKinds(message: Message): Array<'text' | 'reasoning' | 'tool-call'> {
   return message.content.flatMap(block => block.type === 'text' || block.type === 'reasoning' || block.type === 'tool-call' ? [block.type] : [])
-}
-
-function findReplay(messages: readonly Message[], model: string): ReplayEnvelope | undefined {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message?.role !== 'assistant') continue
-    const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
-    if (replay !== undefined) return replay
-  }
-  return undefined
 }
 
 function parseProviderEvent(data: string): ProviderEvent {
@@ -832,16 +911,11 @@ function boundedParts(value: unknown[]): unknown[] {
 
 function parsePart(value: unknown): ProviderPart | undefined {
   if (!isRecord(value)) throw new PrivateTransportError('protocol-drift', 'The private response part was malformed')
-  if (typeof value.text === 'string') {
-    const kind = value.thought === true || value.reasoning === true || value.thinking === true ? 'reasoning' as const : 'text' as const
-    const signature = signatureOf(value)
-    return { kind, text: value.text, ...(signature === undefined ? {} : { signature }) }
-  }
   const functionCall = isRecord(value.functionCall) ? value.functionCall : isRecord(value.function_call) ? value.function_call : undefined
   if (functionCall !== undefined) {
     const name = stringValue(functionCall.name)
     const id = stringValue(functionCall.id)
-    const signature = signatureOf(value)
+    const signature = signatureOf(value) ?? signatureOf(functionCall)
     const args = typeof functionCall.args === 'string' ? functionCall.args : JSON.stringify(functionCall.args ?? {})
     return {
       kind: 'tool-call',
@@ -850,6 +924,12 @@ function parsePart(value: unknown): ProviderPart | undefined {
       arguments: args,
       ...(signature === undefined ? {} : { signature }),
     }
+  }
+  if (typeof value.text === 'string' || signatureOf(value) !== undefined) {
+    const kind = value.thought === true || value.reasoning === true || value.thinking === true ? 'reasoning' as const : 'text' as const
+    const signature = signatureOf(value)
+    const text = typeof value.text === 'string' ? value.text : ''
+    return { kind, text, ...(signature === undefined ? {} : { signature }) }
   }
   if (value.inlineData !== undefined || value.inline_data !== undefined) {
     throw new PrivateTransportError('protocol-drift', 'The text model returned unsupported media output')
@@ -958,10 +1038,14 @@ const LLM_FAILURE_CODES: Readonly<Record<PrivateFailureKind, string>> = {
 function toLlmError(error: unknown): LlmError {
   if (error instanceof LlmError) return error
   if (error instanceof PrivateTransportError) {
-    const code = LLM_FAILURE_CODES[classifyPrivateFailure(error)]
+    const kind = classifyPrivateFailure(error)
+    const code = LLM_FAILURE_CODES[kind]
+    const message = kind === 'rate-limited'
+      ? 'Antigravity rate limit reached (Google returned 429 Resource Exhausted); please wait for your quota window to refresh'
+      : 'The Antigravity private request failed safely'
     return error.status === undefined
-      ? new LlmError('The Antigravity private request failed safely', code)
-      : new LlmError('The Antigravity private request failed safely', code, { status: error.status })
+      ? new LlmError(message, code)
+      : new LlmError(message, code, { status: error.status })
   }
   return new LlmError('The Antigravity provider request failed safely', 'PROVIDER_ERROR')
 }

@@ -6,9 +6,9 @@ import { ANTIGRAVITY_WIRE_ORIGIN } from './wire-identity.ts'
 export { PrivateTransportError } from './private-transport-error.ts'
 export type { PrivateTransportErrorCode } from './private-transport-error.ts'
 
-export const DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS = 15_000
-export const DEFAULT_PRIVATE_IDLE_TIMEOUT_MS = 30_000
-export const DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS = 120_000
+export const DEFAULT_PRIVATE_RESPONSE_HEADER_TIMEOUT_MS = 180_000
+export const DEFAULT_PRIVATE_IDLE_TIMEOUT_MS = 60_000
+export const DEFAULT_PRIVATE_TOTAL_TIMEOUT_MS = 300_000
 export const DEFAULT_PRIVATE_RESPONSE_BYTES = 8 * 1024 * 1024
 export const DEFAULT_PRIVATE_REQUEST_BYTES = 16 * 1024 * 1024
 export const MAX_PRIVATE_REQUEST_BYTES = 64 * 1024 * 1024

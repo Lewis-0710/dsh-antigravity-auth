@@ -102,7 +102,7 @@ describe('fixed private raw transport', () => {
     })
 
     await expect(readPrivateText(response)).resolves.toBe('hello')
-    expect(socketState.request).toMatch(/^POST \/v1internal:generateContent HTTP\/1\.1\r\nHost: daily-cloudcode-pa\.googleapis\.com\r\nUser-Agent:/u)
+    expect(socketState.request).toMatch(/^POST \/v1internal:generateContent HTTP\/1\.1\r\nHost: (?:daily-)?cloudcode-pa\.googleapis\.com\r\nUser-Agent:/u)
     expect(socketState.request).toContain('X-DeepSeek-Harness-Attribution: deepseek-harness/')
     expect(socketState.request).toContain('Authorization: Bearer access-secret\r\n')
     expect(socketState.request).toContain('Content-Length: 21\r\n')

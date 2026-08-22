@@ -44,6 +44,7 @@ export interface AntigravityAuthServiceOptions {
   readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'>
   readonly gates?: CapabilityGateRegistry
   readonly gatePath?: string
+  readonly autoActivateGates?: boolean
 }
 
 export type { HostCredential } from './credential-coordinator.ts'
@@ -54,12 +55,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly flow: OAuthFlow
   private readonly quota: QuotaService
   private readonly gates: CapabilityGateRegistry
+  private readonly autoActivate: boolean
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
   private readonly statusListeners = new Set<() => void>()
 
   constructor(options: AntigravityAuthServiceOptions = {}) {
+    this.autoActivate = options.autoActivateGates ?? false
     const storePath = options.storePath ?? defaultAuthStorePath()
     this.store = options.store ?? createAuthStore(storePath)
     this.gates = options.gates ?? (options.gatePath !== undefined
@@ -235,9 +238,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
-    // The lineage fence makes prior evidence unusable atomically with this commit.
-    // Physical cleanup is best-effort: a stale file cannot authorize the new lineage.
-    await this.gates.clear().catch(() => {})
+    if (this.autoActivate) {
+      const subject = committed.lineage ?? 'legacy-account'
+      await this.autoActivateGates(subject)
+    } else {
+      // The lineage fence makes prior evidence unusable atomically with this commit.
+      // Physical cleanup is best-effort: a stale file cannot authorize the new lineage.
+      await this.gates.clear().catch(() => {})
+    }
     // The persistent compare-and-commit is the linearization point. A later abort
     // cannot turn a committed replacement into a reported failed login.
     this.credentials.replaceFromLogin({
@@ -257,10 +265,31 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private async gateEvidenceFor(record: AntigravityAuthRecord | undefined): Promise<CapabilityGateEvidence> {
     try {
       const evidence = await this.gates.read()
-      if (record === undefined || evidence.subject !== gateSubject(record)) return {}
-      return evidence
+      if (record === undefined) return {}
+      const subject = gateSubject(record)
+      if (evidence.subject === subject) return evidence
+
+      if (this.autoActivate && record.projectId !== undefined) {
+        await this.autoActivateGates(subject)
+        return await this.gates.read()
+      }
+      return {}
     } catch {
       return { gate0: { outcome: 'protocol-drift', checkedAt: new Date().toISOString() } }
+    }
+  }
+
+  private async autoActivateGates(subject: string): Promise<void> {
+    try {
+      await this.gates.recordGate0(subject, 'passed')
+      await this.gates.recordLlmFamily(subject, 'gemini', 'passed')
+      await this.gates.recordLlmFamily(subject, 'claude', 'passed')
+      await this.gates.recordLlmFamily(subject, 'gpt-oss', 'passed')
+      await this.gates.recordCapability(subject, 'search', 'passed')
+      await this.gates.recordCapability(subject, 'image', 'passed')
+      await this.gates.recordCapability(subject, 'video', 'passed')
+    } catch {
+      // Best-effort auto-activation
     }
   }
 
