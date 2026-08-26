@@ -27,7 +27,7 @@
 
 所有 secret-bearing private requests 由一个 Host-only Wire Identity module 统一构造 headers/framing。OAuth code/verifier/token、private response bodies 和媒体 base64 永不进入客户端、RPC、settings、日志或 fixture。默认 CI 只运行 mock/fixture；live gates 独立 opt-in，并按 OAuth、attribution/text、LLM、Search、Image、Video 顺序最小化执行。
 
-开发与验证基线升级为 DSH `0.1.1-rc.1`。peer range 从 `^0.1.1-rc.1` 开始，开发依赖与 lockfile 使用 coherent exact rc.1 graph；干净安装必须通过 `pnpm peers check`。影响评估未发现本插件使用的 `LlmAdapter`、`ctx.llm`、client injection、Cordis patch 或 `attributionHeaders()` seam 发生破坏性变化，因此不引入 `dsh-authorization`、PiAiAdapter auth 或 session projection 迁移。
+开发与验证基线升级为 DSH `0.1.1-rc.2`。peer range 从 `^0.1.1-rc.2` 开始，开发依赖与 lockfile 使用 coherent exact rc.2 graph；干净安装必须通过 `pnpm peers check`。影响评估确认 rc.2 新增的默认 `LlmAdapter.prepareCall()`、模型输入模态投影及 AttachmentStore request-image 类型均为兼容扩展，本插件继续使用自有 private transport 与 `AttachmentStore.readImage()`，不引入 DeepSeek Files、PiAiAdapter auth、`dsh-authorization` 或 session projection 迁移。
 
 ## User Stories
 
@@ -62,7 +62,7 @@
 29. As a 安全审阅者, I want provider User-Agent 与 secondary identity value 都经过 header-safe validation, so that CRLF、控制字符和 per-request identity 注入被拒绝。
 30. As a 安全审阅者, I want private callers 无法省略或覆盖 DSH secondary attribution, so that plugin-owned policy 不会成为通用隐身开关。
 31. As a 插件维护者, I want 所有 private operations 使用同一个 Wire Identity module, so that Search、Image、Video、Quota 与 LLM 不会产生身份漂移。
-32. As a 插件维护者, I want 插件以 DSH `0.1.1-rc.1` 为最低和测试基线并保持 coherent peer graph, so that 不兼容或混合 prerelease family 会在安装检查时 fail-loud。
+32. As a 插件维护者, I want 插件以 DSH `0.1.1-rc.2` 为最低和测试基线并保持 coherent peer graph, so that 不兼容或混合 prerelease family 会在安装检查时 fail-loud。
 33. As a 插件维护者, I want 所有 private requests 通过一个 Wire Identity module, so that exact `agy` identity 与 DSH attribution 不会散落在多个 callers 中。
 34. As a 插件维护者, I want 固定 community core 版本和 lockfile integrity, so that OAuth metadata 与 wire identity 不会被无审计升级改变。
 35. As a 安全审阅者, I want private endpoint 是不可配置 allowlist, so that用户不能把 Bearer token 发送到任意 host。
@@ -129,9 +129,9 @@
 - 所有实现都位于 `dsh-antigravity-auth` capability bundle；DSH core repository、runtime packages 与用户 profile 保持不变。
 - 不创建替代整个 `ctx.llm` 的 Cordis plugin，不使用 package-manager override，不 patch installed packages，也不复制 DSH core implementation。
 - 插件通过现有 `LlmAdapter` seam 注册自有 provider，并把 exact provider identity 与 DSH secondary attribution 的 carrier adaptation 限制在插件内部。
-- DSH compatibility baseline 是 `0.1.1-rc.1`：所有直接 DSH peers 使用 `^0.1.1-rc.1`，开发依赖固定 exact rc.1，lockfile 不允许混入 rc.7/rc.8 peers；每个后续 issue 都在该基线上开发。
+- DSH compatibility baseline 是 `0.1.1-rc.2`：所有直接 DSH peers 使用 `^0.1.1-rc.2`，开发依赖固定 exact rc.2，lockfile 不允许混入更早的 DSH prerelease family；每个后续 issue 都在该基线上开发。
 - 该升级是独立 compatibility prefactor：在已完成的 credential lifecycle 后、project discovery 前执行；它不追改或重新打开已实现的 capability shell/bootstrap scope。
-- rc.1 的 credentials/authorization 与 session-projection additions 不是当前 module interfaces 的依赖，不为未使用的 seam 增加 speculative adapters。
+- rc.2 的默认 `prepareCall()`、模型输入模态与 request-image additions 不要求当前 custom adapter 改写 transport 或采用 DeepSeek Files，不为未使用的 seam 增加 speculative adapters。
 - `dsh-antigravity-auth` 保持 private。发布 npm、安装到 live profile、真实 OAuth 与 private endpoint probe 都不是完成本 spec 的默认动作。
 
 ### Plugin-owned wire identity interface
@@ -169,7 +169,7 @@
 - listener 只在 pending login 期间绑定 loopback；固定 callback 端口冲突直接失败，不改绑 `0.0.0.0` 或随机端口。
 - callback 在 state 被原子消费后才执行 token exchange；只有 exchange、project validation 和 auth-store commit 全部成功，浏览器才显示 success。
 - auth store 是单个 versioned record，保存 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。Gate evidence 绑定该 record 的 login lineage；替换 commit 是线性化点，旧 lineage 的证据即使因 crash/清理失败仍留在文件中也不能授权新账号。
-- parent directory 在 POSIX 上为 `0700`，auth file 为 `0600`；不创建明文 backup copy。
+- parent directory 在 POSIX 上为 `0700`，auth file 为 `0600`；Windows 使用用户数据目录 ACL，不把合成的 POSIX group/other mode bits 作为访问判据。所有平台仍执行 symlink、文件类型、大小与 schema 校验，且不创建明文 backup copy。
 - refresh 使用锁内读取、锁外 network、锁内 lineage compare-and-commit；旧结果不得覆盖较新的 Login、Logout 或 refresh。
 - userinfo 是可选、非关键 operation；插件不解码未验证 access token 来推断账号、plan 或权限。
 - Logout 与 Revoke 是两个不同 actions。Revoke 使用 Google revoke endpoint 的 form body，不把 token 放入 URL。
@@ -262,7 +262,7 @@
 - loopback only binding；SSH/WSL 环境也不得切换为 `0.0.0.0`。
 - callback completion 只经 Host loopback listener；browser typed RPC 不提供 callback URL/code/state submission endpoint。
 - token exchange 与 refresh request/response schema、redaction 和 AbortSignal。
-- auth-store absent、round-trip、owner-only permissions、atomic failure、corruption 与 unsupported version。
+- auth-store absent、round-trip、POSIX owner-only permissions、Windows ACL-mode compatibility、atomic failure、corruption 与 unsupported version；capability evidence 与 controlled live-image store 使用同一平台判定，并在所有平台保留结构与大小校验。
 - Login replacement、Logout、Revoke、refresh single-flight、cross-process revision race 和 rotated refresh token。
 - `invalid_grant`、401、429、5xx 与 timeout 的状态转换。
 - read-only project discovery；任何 fixture 中出现 onboarding 或 hard-coded fallback 都使测试失败。
@@ -325,7 +325,7 @@
 - risk acknowledgement、pending login、logged-in、project-unavailable、Gate pending、disabled、protocol-drift和 logout/revoke UI states。
 - 客户端没有 token/client metadata/custom endpoint/account switch controls。
 - Cordis rows独立 mount/unmount，未通过 gate 的 capability 不注册。
-- 干净安装解析 exact DSH `0.1.1-rc.1` development graph，`pnpm peers check` 无 warning，lockfile 不包含 rc.7/rc.8 DSH package entries。
+- 干净安装解析 exact DSH `0.1.1-rc.2` development graph，`pnpm peers check` 无 warning，lockfile 不包含其他 DSH prerelease package entries。
 - 完整 `check` gate涵盖 lint、typecheck、unit/integration tests、Host/client build、package smoke与publint。
 - packed file list只包含声明的 runtime、types、client、显式 `scripts/live-gates.mjs` CLI、patch、README、CHANGELOG和license artifacts；package smoke 必须验证 script 与其 bundled runner 同时存在。
 
@@ -365,6 +365,6 @@
 - community source只证明逆向 contract 在固定 snapshot 中存在，不证明 Google 官方支持、稳定性或目标账号当前可用性。
 - OAuth client id/client metadata 的具体值不进入本 spec 或 issue body；实现通过固定依赖获得，并限制在 Host flow中使用。
 - 插件 private transport 的 identity policy 完全由 plugin-owned Wire Identity module 提供；任何需要修改 DSH core 才能继续的情况都使 Gate 0 失败，而不是扩展本项目 scope。
-- 项目已经完成 plugin-owned Wire Identity、capability shell、单账号 PKCE login 与 credential lifecycle；后续 issue 必须从 DSH `0.1.1-rc.1` coherent dependency baseline 继续，不回退到原始 rc.7/rc.8 research baseline。
+- 项目已经完成 plugin-owned Wire Identity、capability shell、单账号 PKCE login 与 credential lifecycle；后续 issue 必须从 DSH `0.1.1-rc.2` coherent dependency baseline 继续，不回退到更早的 prerelease research baseline。
 - 参考实现与测试 prior art 是 `dsh-codex-auth@0.2.2` 的 Auth、typed RPC、WebRuntime Search、ToolRuntime Image、AttachmentStore、Usage、client settings与package smoke modules；复制其interface模式，不复制其 provider-specific wire assumptions。
 - 完成定义是：clean install、`pnpm peers check`、所有非 live tests 和 package gates通过，DSH core 保持无 diff，插件所有 capability gate状态可被诚实呈现。真实账号可用性不是离线实现完成的证明；live gates需要单独授权与单独结果记录。

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,6 +20,19 @@ describe('single-account Antigravity auth store', () => {
   it('uses the Windows local application-data path when running on Windows', () => {
     expect(defaultAuthStorePath({ LOCALAPPDATA: '/user/local-app-data' }, undefined, 'win32'))
       .toBe(join('/user/local-app-data', 'dsh-antigravity-auth', 'auth.json'))
+  })
+
+  it('ignores POSIX mode bits on Windows while preserving strict POSIX enforcement', async () => {
+    const { directory, path } = await storeFixture()
+    const windowsStore = createAuthStore(path, { platform: 'win32' })
+    await windowsStore.commit({ refreshToken: 'refresh-1', projectId: 'project-1' })
+    await chmod(join(directory, 'nested'), 0o777)
+    await chmod(path, 0o666)
+
+    await expect(windowsStore.read()).resolves.toMatchObject({ refreshToken: 'refresh-1' })
+    await expect(createAuthStore(path, { platform: 'linux' }).read()).rejects.toMatchObject({
+      code: 'AUTH_STORE_UNSAFE_PERMISSIONS',
+    })
   })
 
   it('commits a versioned record atomically with owner-only permissions and no access token', async () => {

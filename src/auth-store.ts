@@ -33,6 +33,8 @@ export interface AntigravityAuthRecord {
 
 export interface AuthStoreOptions {
   readonly now?: () => number
+  /** Override process.platform only for deterministic cross-platform tests. */
+  readonly platform?: NodeJS.Platform
 }
 
 export interface AntigravityAuthStore {
@@ -88,18 +90,20 @@ export function defaultAuthStorePath(
 /** Create one store whose public API never exposes an access token field. */
 export function createAuthStore(path: string, options: AuthStoreOptions = {}): AntigravityAuthStore {
   const now = options.now ?? (() => Date.now())
+  const platform = options.platform ?? process.platform
   const enqueue = createMutationQueue()
+  const read = () => readAuthRecordForPlatform(path, platform)
 
   return {
-    read: () => readAuthRecord(path),
+    read,
     commit: draft => enqueue(() => withStoreLock(path, async () => {
-      const current = await readAuthRecord(path)
+      const current = await read()
       const record = makeRecord(draft, (current?.revision ?? 0) + 1, now())
       await writeAuthRecord(path, record)
       return record
     })),
     compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
-      const current = await readAuthRecord(path)
+      const current = await read()
       if ((current?.revision ?? 0) !== expectedRevision) return undefined
       const lineage = expectedLineage ?? draft.lineage
       if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
@@ -108,7 +112,7 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
       return record
     })),
     clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
-      const current = await readAuthRecord(path)
+      const current = await read()
       if ((current?.revision ?? 0) !== expectedRevision) return false
       if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
       try {
@@ -230,6 +234,13 @@ async function removeStaleLock(path: string): Promise<void> {
 }
 
 export async function readAuthRecord(path: string): Promise<AntigravityAuthRecord | undefined> {
+  return readAuthRecordForPlatform(path, process.platform)
+}
+
+async function readAuthRecordForPlatform(
+  path: string,
+  platform: NodeJS.Platform,
+): Promise<AntigravityAuthRecord | undefined> {
   let fileInfo
   try {
     fileInfo = await lstat(path)
@@ -238,7 +249,7 @@ export async function readAuthRecord(path: string): Promise<AntigravityAuthRecor
     throw storeIoError()
   }
   if (fileInfo.isSymbolicLink() || !fileInfo.isFile()) throw unsafePermissionsError()
-  await assertOwnerOnly(path)
+  await assertOwnerOnly(path, platform)
 
   let text: string
   try {
@@ -348,12 +359,15 @@ function parseRecord(value: unknown): AntigravityAuthRecord {
   }
 }
 
-async function assertOwnerOnly(path: string): Promise<void> {
+async function assertOwnerOnly(path: string, platform: NodeJS.Platform): Promise<void> {
   try {
     const file = await lstat(path)
     const parent = await lstat(dirname(path))
-    if (file.isSymbolicLink() || parent.isSymbolicLink() || !parent.isDirectory()
-      || (file.mode & 0o077) !== 0 || (parent.mode & 0o077) !== 0) throw unsafePermissionsError()
+    const unsafePosixMode = platform !== 'win32'
+      && ((file.mode & 0o077) !== 0 || (parent.mode & 0o077) !== 0)
+    if (file.isSymbolicLink() || parent.isSymbolicLink() || !parent.isDirectory() || unsafePosixMode) {
+      throw unsafePermissionsError()
+    }
   } catch (error) {
     if (error instanceof AuthStoreError) throw error
     throw storeIoError()

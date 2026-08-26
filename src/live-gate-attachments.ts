@@ -25,8 +25,17 @@ export type DurableLiveAttachmentStore = Pick<
   'imageLimits' | 'validateImage' | 'saveImage' | 'saveImages' | 'readImage'
 >
 
+export interface DurableLiveAttachmentStoreOptions {
+  /** Override process.platform only for deterministic cross-platform tests. */
+  readonly platform?: NodeJS.Platform
+}
+
 /** Create a persistent, owner-only PNG store for controlled live image fixtures. */
-export function createDurableLiveAttachmentStore(root: string): DurableLiveAttachmentStore {
+export function createDurableLiveAttachmentStore(
+  root: string,
+  options: DurableLiveAttachmentStoreOptions = {},
+): DurableLiveAttachmentStore {
+  const platform = options.platform ?? process.platform
   const imageLimits = Object.freeze({
     maxImageBytes: MAX_LIVE_IMAGE_BYTES,
     maxImagesPerMessage: 2,
@@ -51,7 +60,7 @@ export function createDurableLiveAttachmentStore(root: string): DurableLiveAttac
       await writeFile(temporary, data, { flag: 'wx', mode: 0o600 })
       try { await link(temporary, target) } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-        const existing = await readBounded(target)
+        const existing = await readBounded(target, platform)
         if (createHash('sha256').update(existing).digest('hex') !== digest) throw new Error('collision')
       }
       await chmod(target, 0o600)
@@ -76,7 +85,7 @@ export function createDurableLiveAttachmentStore(root: string): DurableLiveAttac
     const digest = id.startsWith(ID_PREFIX) ? id.slice(ID_PREFIX.length) : ''
     if (!/^[a-f0-9]{64}$/u.test(digest) || ref.mediaType !== 'image/png') throw admissionError()
     let data: Uint8Array
-    try { data = await readBounded(join(root, `${digest}.png`)) } catch { throw admissionError() }
+    try { data = await readBounded(join(root, `${digest}.png`), platform) } catch { throw admissionError() }
     signal?.throwIfAborted()
     if (createHash('sha256').update(data).digest('hex') !== digest) throw admissionError()
     const dimensions = inspectPng({ data, mediaType: 'image/png' })
@@ -186,9 +195,10 @@ async function ensureRoot(root: string): Promise<void> {
   }
 }
 
-async function readBounded(path: string): Promise<Uint8Array> {
+async function readBounded(path: string, platform: NodeJS.Platform): Promise<Uint8Array> {
   const info = await lstat(path)
-  if (info.isSymbolicLink() || !info.isFile() || info.size < 1 || info.size > MAX_LIVE_IMAGE_BYTES || (info.mode & 0o077) !== 0) {
+  const unsafePosixMode = platform !== 'win32' && (info.mode & 0o077) !== 0
+  if (info.isSymbolicLink() || !info.isFile() || info.size < 1 || info.size > MAX_LIVE_IMAGE_BYTES || unsafePosixMode) {
     throw admissionError()
   }
   const data = await readFile(path)

@@ -11,7 +11,7 @@ vi.mock('@deepseek-ai/dsh-llm', () => ({
   attributionHeaders: () => attributionHeadersMock(),
 }))
 
-const DSH_USER_AGENT = 'deepseek-harness/0.1.1-rc.1 (+https://github.com/deepseek-ai/deepseek-harness)'
+const DSH_USER_AGENT = 'deepseek-harness/0.1.1-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)'
 
 beforeEach(() => {
   attributionHeadersMock.mockReset()

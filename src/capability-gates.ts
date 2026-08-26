@@ -29,6 +29,8 @@ export interface CapabilityGateRegistry {
 
 export interface FileCapabilityGateOptions {
   readonly now?: () => number
+  /** Override process.platform only for deterministic cross-platform tests. */
+  readonly platform?: NodeJS.Platform
 }
 
 /** Resolve a gate record next to the plugin-owned auth record without reading either. */
@@ -66,15 +68,16 @@ export function createFileCapabilityGates(
   options: FileCapabilityGateOptions = {},
 ): CapabilityGateRegistry {
   const now = options.now ?? (() => Date.now())
+  const platform = options.platform ?? process.platform
   let mutation = Promise.resolve()
   const read = async (): Promise<CapabilityGateEvidence> => {
     let text: string
     try {
       const [file, directory] = await Promise.all([lstat(path), lstat(dirname(path))])
+      const unsafePosixMode = platform !== 'win32'
+        && ((file.mode & 0o077) !== 0 || (directory.mode & 0o077) !== 0)
       if (file.isSymbolicLink() || !file.isFile() || directory.isSymbolicLink() || !directory.isDirectory()
-        || file.size > MAX_GATE_FILE_BYTES || (file.mode & 0o077) !== 0 || (directory.mode & 0o077) !== 0) {
-        throw new Error('unsafe gate record')
-      }
+        || file.size > MAX_GATE_FILE_BYTES || unsafePosixMode) throw new Error('unsafe gate record')
       text = await readFile(path, 'utf8')
       if (text.length > MAX_GATE_FILE_BYTES) throw new Error('oversized gate record')
     } catch (error) {

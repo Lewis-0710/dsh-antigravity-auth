@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { deflateSync } from 'node:zlib'
@@ -58,7 +58,22 @@ describe('durable live-gate AttachmentStore seam', () => {
     await expect(second.readImage(ref)).resolves.toMatchObject({ ref })
     const stored = await second.readImage(ref)
     expect([...stored.data]).toEqual([...data])
-    expect((await stat(join(root, `${String(ref.attachmentId).slice('live-sha256-'.length)}.png`))).mode & 0o077).toBe(0)
+    if (process.platform !== 'win32') {
+      expect((await stat(join(root, `${String(ref.attachmentId).slice('live-sha256-'.length)}.png`))).mode & 0o077).toBe(0)
+    }
+  })
+
+  it('ignores POSIX mode bits on Windows while preserving strict POSIX enforcement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-live-attachments-'))
+    roots.push(root)
+    const windowsStore = createDurableLiveAttachmentStore(root, { platform: 'win32' })
+    const ref = await windowsStore.saveImage({ data: syntheticPng(), mediaType: 'image/png' })
+    const path = join(root, `${String(ref.attachmentId).slice('live-sha256-'.length)}.png`)
+    await chmod(path, 0o666)
+
+    await expect(windowsStore.readImage(ref)).resolves.toMatchObject({ ref })
+    await expect(createDurableLiveAttachmentStore(root, { platform: 'linux' }).readImage(ref))
+      .rejects.toThrow(/could not be admitted/u)
   })
 
   it('rejects malformed, CRC-corrupt, truncated, or non-PNG live outputs before persistence', async () => {

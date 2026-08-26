@@ -1,13 +1,13 @@
 # DSH Antigravity OAuth 模拟登录插件：实现前研究（单账号、非官方）
 
-> 修订日期：**2026-08-20**
+> 修订日期：**2026-08-25**
 > 目标包名：**`dsh-antigravity-auth`**
 > 用户确认的主路径：在 DSH Host 内模拟 Antigravity OAuth，并调用社区逆向得到的 Antigravity 私有 Cloud Code contract；**不是**官方 `agy` 子进程桥，也不是 AI Studio API key / Vertex ADC。
 > 账号范围：只支持用户自己的**单个账号**；不提供多账号、轮换、quota pool、header-style fallback 或跨账号重试。
 > `dsh-codex-auth` 基线：`0.2.2`，commit [`e9b6cb6ba3da927da0d2f10458008aec1be58bfc`](https://github.com/suntianc/dsh-codex-auth/tree/e9b6cb6ba3da927da0d2f10458008aec1be58bfc)。
 > 社区逆向基线：`@cortexkit/antigravity-auth-core@2.1.0` / `@cortexkit/pi-antigravity-auth@2.1.0`，commit [`8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73`](https://github.com/cortexkit/antigravity-auth/tree/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73)。
-> 当前 DSH 开发基线：[`dsh-v0.1.1-rc.1`](https://github.com/deepseek-ai/deepseek-harness/tree/528c682e061696f5a160f363f236ecbf53cbd006)，commit `528c682e061696f5a160f363f236ecbf53cbd006`；原始 research 使用 rc.7/rc.8 的历史证据保留用于对照。
-> 升级影响依据 workspace 报告 `dsh-update-notes/dsh-v0.1.1-rc.1-plugin-impact.md`：本插件需要 coherent dependency/peer 升级与完整安全回归，但未发现已用 public seams 的行为迁移。
+> 当前 DSH 开发基线：[`dsh-v0.1.1-rc.2`](https://github.com/deepseek-ai/deepseek-harness/tree/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e)，commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`；原始 research 使用 rc.7/rc.8 的历史证据保留用于对照。
+> 升级影响依据本项目报告 [`dsh-v0.1.1-rc.2-plugin-impact.md`](dsh-v0.1.1-rc.2-plugin-impact.md)：本插件需要 coherent dependency/peer 升级与完整离线回归，但现有 public seams 不要求行为迁移。
 > 本次仍是**研究与设计**：未读取用户 token/keychain/cookie，未启动真实 OAuth，未调用任何私有 endpoint，也未消耗 Antigravity 额度。
 
 ## A. 用户已确认的不可变约束
@@ -24,13 +24,13 @@
 
 ## 0. 结论先行
 
-### 0.0 DSH `0.1.1-rc.1` 升级策略
+### 0.0 DSH `0.1.1-rc.2` 升级策略
 
-- 直接 DSH peer range 升到 `^0.1.1-rc.1`；dev dependencies 与 lockfile 使用 exact rc.1 coherent graph，禁止混合 rc.7/rc.8 peers。
-- 将升级作为 credential lifecycle 后、project discovery 前的独立 compatibility prefactor；不追改已经实现的 capability shell/bootstrap ticket。
+- 直接 DSH peer range 升到 `^0.1.1-rc.2`；dev dependencies 与 lockfile 使用 exact rc.2 coherent graph，禁止混合更早的 DSH prerelease family。
+- 将升级作为独立 compatibility prefactor；不追改已经实现的 capability shell/bootstrap ticket。
 - 升级 gate 是 clean install → `pnpm peers check` → OAuth/RPC/UI/Wire Identity regression → 完整 `pnpm run check`。
-- rc.1 新增 credentials/authorization 与 session projection interfaces，但当前插件凭据属于 plugin-owned deep modules，LLM 使用 custom `LlmAdapter`；不为未使用的 seams 增加 shallow adapters。
-- rc.1 保留 `attributionHeaders()`、`ctx.llm`、client injection 与 Cordis patch contracts，因此升级不改变 plugin-owned Wire Identity interface，也不授权修改 DSH core。
+- rc.2 新增默认 `LlmAdapter.prepareCall()`、模型输入模态投影、`ImageAttachmentRef.originalDimensions` 与 `AttachmentStore.readImageRequest()`；现有 custom adapter 的 `stream()`、`saveImage()`、`readImage()` 路径保持兼容。
+- 本插件继续使用 plugin-owned private transport 与 Wire Identity，不自动采用 DeepSeek Files API，也不为未使用的 request-image seam 增加 shallow adapter。
 - 后续 DSH prerelease family 升级必须先产出新的 impact assessment，再整体升级 dependency graph。
 
 ### 0.1 产品定位
@@ -72,7 +72,7 @@ Google FAQ 明确写明，第三方软件、工具或服务使用 Antigravity �
 | `list_images` | DSH provider-independent 能力 | **Gate I 后可实现** |
 | 单账号 quota | 私有 quota endpoint 社区可见 | **可实现，未获官方保证** |
 | Workspace 视频理解 | 社区 modality 未声明 video | **仅 Gate V POC，不能预先承诺** |
-| Web composer 原生视频附件 | DSH `0.1.1-rc.1` impact assessment 仍无 video lifecycle | **当前不可做，需独立 DSH 上游任务** |
+| Web composer 原生视频附件 | DSH `0.1.1-rc.2` impact assessment 仍无 video lifecycle | **当前不可做，需独立 DSH 上游任务** |
 
 ## 1. 政策与证据分层
 
@@ -264,7 +264,7 @@ OAuth 成功不等于私有模型可用。社区通过私有 `v1internal:loadCod
 
 约束：
 
-- parent directory `0700`，file `0600`；
+- POSIX parent directory `0700`、file `0600`；Windows 使用用户数据目录 ACL，不把合成的 POSIX group/other mode bits 作为访问判据，但所有平台仍校验 symlink、文件类型、大小与 schema；
 - 使用 plugin-owned path，例如 `${XDG_DATA_HOME:-~/.local/share}/dsh-antigravity-auth/auth.json`，Windows 使用等价 user data path；路径可配置但不能进入 workspace；
 - 用 DSH 公共 atomic-write/file-lock seam 或同等级的 plugin-local fenced lock；
 - 不写 `.bak` 明文副本；corrupt file fail-loud，不静默从不受控备份恢复；
@@ -457,7 +457,7 @@ Gate I 未通过时，不注册 Image tools/gallery。
 
 Google Gemini 的公开 API 支持视频，只能作为对照，不能证明 Antigravity private endpoint 接受相同 payload。[Gemini video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)
 
-DSH `0.1.1-rc.1` attachment seam 仍只接受 PNG/JPEG/WebP/GIF，没有 durable video ref、browser prompt part 或 ACP video projection。[DSH attachment README](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.1/packages/attachment/attachment/README.md)
+DSH `0.1.1-rc.2` attachment seam 仍只接受 PNG/JPEG/WebP/GIF，没有 durable video ref、browser prompt part 或 ACP video projection。[DSH attachment README](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/attachment/attachment/README.md)
 
 ### 8.2 Workspace Tool POC
 
@@ -579,7 +579,7 @@ Host rows 独立挂载：Auth/LLM、Search、Image、Video。未通过 Gate 的 
 1. 单账号 store，不允许 array/index/selection strategy。
 2. endpoints 固定 allowlist；settings 不允许自定义 token-bearing base URL，避免 credential exfiltration/SSRF。
 3. token/code/verifier/callback URL/cookie/raw error body 永不日志；连 token prefix 也不记录。
-4. refresh token 只在 0600 auth file；access token 只在 Host memory。
+4. refresh token 只在 POSIX `0600` / Windows ACL-managed auth file；access token 只在 Host memory。
 5. OAuth pending verifier 只在 memory，短 TTL、单次消费。
 6. callback 只绑定 loopback；不因 SSH/WSL 自动改成 `0.0.0.0`。
 7. 不自动 `onboardUser`、不使用 hard-coded fallback project。
@@ -755,7 +755,7 @@ Host rows 独立挂载：Auth/LLM、Search、Image、Video。未通过 Gate 的 
 | 能力 | `dsh-codex-auth` | `dsh-antigravity-auth` 目标 |
 |---|---|---|
 | 账号 | 官方 Codex CLI login | 单账号模拟 Antigravity OAuth；非官方、高风险 |
-| secret owner | Codex auth file | plugin-owned 0600 refresh-token file |
+| secret owner | Codex auth file | plugin-owned POSIX `0600` / Windows ACL-managed refresh-token file |
 | 多账号 | 无 | 无，结构上禁止 |
 | token refresh | 官方 OAuth | copied Antigravity OAuth metadata；single-flight/lineage |
 | LLM route | `openai-codex` + PiAiAdapter | `google-antigravity` + custom LlmAdapter，Gate 0/L |

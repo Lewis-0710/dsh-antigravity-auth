@@ -5,7 +5,7 @@
 
 [English](README.md) | 中文
 
-当前版本：**v0.1.0**
+当前版本：**v0.1.1**
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -27,7 +27,7 @@
 - LLM、搜索、图片、视频与配额操作共用一个仅运行于 Host 的认证协调器。
 - 直连 OAuth 2.0 PKCE S256 流程：Host 内存生成 verifier 与 state 句柄，浏览器仅接收授权链接，密钥绝不跨越 Host 边界。
 - 回调监听器仅绑定 `127.0.0.1:51121`，只接受一次性的已注册 code/state 凭据对。
-- 通过属主权限文件存储（`0600`）、短时内存缓存解析凭证，并在到期前主动刷新。
+- 通过属主权限文件存储（POSIX `0600`；Windows 用户数据目录 ACL）、短时内存缓存解析凭证，并在到期前主动刷新。
 - 进程内合并并发刷新请求；仅在账号与 lineage 未变化时原子提交新 token。
 - 仪表盘实时显示连接状态以及 Gemini 与 Claude/GPT 模型家族的 5 小时和每周额度进度条。
 - 插件自有、仅允许 loopback 的 `/antigravity-auth` Connection RPC 绝不向前端泄露任何 token 敏感值。
@@ -62,7 +62,7 @@
 
 ## 环境要求
 
-- DeepSeek Harness `0.1.1-rc.1` 或兼容的后续 `0.1.x` 版本。
+- DeepSeek Harness `0.1.1-rc.2` 或兼容的后续 `0.1.x` 版本。
 - Node.js `^22.19.0` 或 `>=24.0.0`。
 - 具有 Antigravity 权限的 Google 账号。
 
@@ -91,7 +91,7 @@ git clone https://github.com/suntianc/dsh-antigravity-auth.git
 cd dsh-antigravity-auth
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.0.tgz
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
 ```
 
 ## 升级
@@ -99,7 +99,7 @@ dsh plugin --profile web add ./dsh-antigravity-auth-0.1.0.tgz
 先停止正在运行的 `dsh web`，再将 Web Profile 更新到当前版本：
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.0
+dsh plugin --profile web add dsh-antigravity-auth@0.1.1
 dsh plugin --profile web list
 ```
 
@@ -129,6 +129,7 @@ X-DeepSeek-Harness-Attribution: deepseek-harness/<version> (+repository-url)
 ## 安全与限制
 
 - token 值绝不进入前端、设置、日志、会话事件或工具 metadata，仅在 Host 侧发起私有请求时附带认证 header。
+- auth、gate evidence 与受控 live image 文件在 POSIX 上严格校验属主 mode；Windows 由 ACL 管理访问权限，因此不把合成的 POSIX group/other bits 作为访问判据，但仍执行 symlink、文件类型、大小、schema 与内容校验。
 - 严格单账号模式：不提供账号池、轮换、身份回退或账号切换。
 - 本地登出立即清除 Host 内存与本地存储。
 - RPC 状态与登录通道仅限本机 loopback 访问。

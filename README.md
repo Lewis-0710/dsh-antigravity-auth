@@ -5,7 +5,7 @@
 
 English | [中文](README.zh.md)
 
-Current release: **v0.1.0**
+Current release: **v0.1.1**
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -30,7 +30,7 @@ and Wire Identity for:
 - Uses one Host-only auth coordinator for LLM, Search, Image, Video, and Quota operations.
 - Direct OAuth 2.0 with PKCE S256: Host memory generates verifier and state handle; the browser receives only the authorization URL.
 - The callback listener binds only `127.0.0.1:51121`, accepting only the registered one-shot code/state pair.
-- Resolves credentials through versioned owner-only storage (`0600`), short-lived in-memory cache, and proactive refresh before expiry.
+- Resolves credentials through versioned owner-only storage (POSIX `0600`; Windows user-data ACLs), short-lived in-memory cache, and proactive refresh before expiry.
 - Coalesces concurrent refreshes in-process and enforces account/lineage consistency before persisting refreshed tokens.
 - Shows connection state plus real-time visual progress bars for 5-hour and weekly quotas across Gemini and Claude/GPT model families.
 - Sends no token value over the loopback-only `/antigravity-auth` Connection RPC channel.
@@ -68,7 +68,7 @@ Multimodal `analyze_video` tool accepts workspace MP4 videos, performing bounded
 
 ## Requirements
 
-- DeepSeek Harness `0.1.1-rc.1` or a compatible later `0.1.x` release.
+- DeepSeek Harness `0.1.1-rc.2` or a compatible later `0.1.x` release.
 - Node.js `^22.19.0` or `>=24.0.0`.
 - A Google account with Antigravity access.
 
@@ -99,7 +99,7 @@ git clone https://github.com/suntianc/dsh-antigravity-auth.git
 cd dsh-antigravity-auth
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.0.tgz
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
 ```
 
 ## Upgrade
@@ -107,7 +107,7 @@ dsh plugin --profile web add ./dsh-antigravity-auth-0.1.0.tgz
 Stop the running `dsh web` process and update the Web profile:
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.0
+dsh plugin --profile web add dsh-antigravity-auth@0.1.1
 dsh plugin --profile web list
 ```
 
@@ -138,6 +138,7 @@ Requests are code-owned: only fixed HTTPS Antigravity origins and enumerated `v1
 ## Security and limitations
 
 - Token values never enter the browser, settings, logs, session events, or tool metadata. Only Host-side requests receive authorization headers.
+- POSIX owner-only modes are enforced for auth, gate-evidence, and controlled live-image files. Windows access is governed by ACLs, so synthetic POSIX group/other bits are not treated as an access decision; symlink, file-type, size, schema, and content checks remain enforced.
 - Single-account only: no account arrays, switching, rotation, quota pools, or identity fallback.
 - Local logout clears local storage and in-memory caches immediately.
 - The status/login RPC channel is restricted to loopback authorities.

@@ -17,10 +17,10 @@ The repository and issue tracker are private. Do not publish, change visibility,
 
 ## DSH compatibility baseline
 
-- The minimum and tested DSH package baseline is `dsh-v0.1.1-rc.1` (`0.1.1-rc.1` on npm). The upgrade impact source is `../dsh-update-notes/dsh-v0.1.1-rc.1-plugin-impact.md`.
-- DSH peer dependencies use `^0.1.1-rc.1`; development dependencies and the lockfile resolve the exact `0.1.1-rc.1` line. Do not reintroduce `0.1.0-rc.7` or mixed rc.8 transitive peers.
+- The minimum and tested DSH package baseline is `dsh-v0.1.1-rc.2` (`0.1.1-rc.2` on npm). The upgrade impact source is `docs/research/dsh-v0.1.1-rc.2-plugin-impact.md`.
+- DSH peer dependencies use `^0.1.1-rc.2`; development dependencies and the lockfile resolve the exact `0.1.1-rc.2` line. Do not reintroduce older or mixed DSH prerelease families.
 - A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
-- rc.1 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here. Do not add `dsh-authorization`, PiAiAdapter auth, or session projection work unless a later issue actually consumes those interfaces.
+- rc.2 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here. Its default `prepareCall()` and request-image projection additions remain optional for this custom adapter; do not add DeepSeek Files, PiAiAdapter auth, or unused authorization/session projection work speculatively.
 - Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
 - Credential lifecycle Issue `#5` is implemented at `dbc8783`, and the one-time rc.1 migration Issue `#17` (`[05A]`) is implemented at `efa4aaa`. The capability series through Issue `#16` is implemented on `main`; later repairs must preserve the scope of the already completed bootstrap Issue `#3`.
 

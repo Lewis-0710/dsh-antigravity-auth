@@ -41,11 +41,26 @@ describe('capability gate registry', () => {
     })
   })
 
+  it('ignores POSIX mode bits on Windows while preserving strict POSIX enforcement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-gates-'))
+    roots.push(root)
+    const path = join(root, 'gates.json')
+    const windowsGates = createFileCapabilityGates(path, { platform: 'win32' })
+    await windowsGates.recordGate0('lineage-a', 'passed')
+    await chmod(root, 0o777)
+    await chmod(path, 0o666)
+
+    await expect(windowsGates.read()).resolves.toMatchObject({ gate0: { outcome: 'passed' } })
+    await expect(createFileCapabilityGates(path, { platform: 'linux' }).read()).rejects.toThrow(/could not be read/u)
+    await writeFile(path, 'x'.repeat(65 * 1024))
+    await expect(windowsGates.read()).rejects.toThrow(/could not be read/u)
+  })
+
   it('rejects unsafe permissions and oversized persisted evidence before parsing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-gates-'))
     roots.push(root)
     const path = join(root, 'gates.json')
-    const gates = createFileCapabilityGates(path)
+    const gates = createFileCapabilityGates(path, { platform: 'linux' })
     await gates.recordGate0('lineage-a', 'passed')
 
     await chmod(path, 0o644)
