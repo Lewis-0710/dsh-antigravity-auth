@@ -178,6 +178,7 @@ export class AntigravityAdapter extends LlmAdapter {
 
   override async listModels(provider: string, signal?: AbortSignal): Promise<readonly LlmModelInfo[]> {
     this.providerInfo(provider)
+    const snapshot = this.pinnedTextModelInfos()
     let available: ReadonlySet<string>
     try {
       available = await this.readLiveModelIds(signal)
@@ -185,10 +186,17 @@ export class AntigravityAdapter extends LlmAdapter {
     } catch (error) {
       const state = error instanceof LlmError && error.code === 'PROTOCOL_DRIFT' ? 'protocol-drift' : 'refresh-failed'
       this.catalogView = createCatalogView(this.definitions, state, undefined, new Date().toISOString())
-      throw error
+      if (!canFallBackToPinnedTextSnapshot(error)) throw error
+      // DSH drops the whole provider group when a transient discovery failure escapes.
+      // The local snapshot remains advisory; Settings still reports the live failure state.
+      return snapshot
     }
+    return snapshot.filter(model => available.has(model.id))
+  }
+
+  private pinnedTextModelInfos(): readonly LlmModelInfo[] {
     return Object.values(this.definitions)
-      .filter(definition => !definition.modalities.output.includes('image') && available.has(definition.id))
+      .filter(definition => !definition.modalities.output.includes('image'))
       .map(definition => ({
         provider: ANTIGRAVITY_PROVIDER,
         id: definition.id,
@@ -385,7 +393,7 @@ export class AntigravityAdapter extends LlmAdapter {
         responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
       })
     } catch (error) {
-      const failure = toLlmError(error)
+      const failure = toModelCatalogError(error, signal, 'provider')
       this.rememberCatalogFailure(credential.projectId, failure)
       throw failure
     }
@@ -399,10 +407,19 @@ export class AntigravityAdapter extends LlmAdapter {
           responseHeaderTimeoutMs: this.options.responseHeaderTimeoutMs,
         })
         if (retryResponse.ok) {
+          await cancelResponse(response)
           response = retryResponse
+        } else {
+          await cancelResponse(retryResponse)
         }
-      } catch {
-        // Fall through
+      } catch (error) {
+        const failure = toModelCatalogError(error, signal, 'provider')
+        if (failure.code === 'CANCELLED' || failure.code === 'GATE_0_ATTRIBUTION') {
+          await cancelResponse(response)
+          this.rememberCatalogFailure(credential.projectId, failure)
+          throw failure
+        }
+        // Keep the original project-scoped 403 as the authoritative failure.
       }
     }
     const statusError = privateStatusError(response.status)
@@ -425,9 +442,7 @@ export class AntigravityAdapter extends LlmAdapter {
         maxBytes: Math.min(this.options.maxResponseBytes, MAX_MODEL_CATALOG_BYTES),
       })) as unknown
     } catch (error) {
-      const failure = error instanceof LlmError
-        ? error
-        : new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
+      const failure = toModelCatalogError(error, signal, 'protocol')
       this.rememberCatalogFailure(credential.projectId, failure)
       throw failure
     }
@@ -1033,6 +1048,27 @@ const LLM_FAILURE_CODES: Readonly<Record<PrivateFailureKind, string>> = {
   upstream: 'UPSTREAM',
   network: 'NETWORK',
   failed: 'PROVIDER_ERROR',
+}
+
+function canFallBackToPinnedTextSnapshot(error: unknown): boolean {
+  if (!(error instanceof LlmError)) return false
+  return error.code === 'RATE_LIMIT'
+    || error.code === 'TIMEOUT'
+    || error.code === 'PROTOCOL_DRIFT'
+    || error.code === 'RESPONSE_LIMIT'
+    || error.code === 'UPSTREAM'
+    || error.code === 'NETWORK'
+}
+
+function toModelCatalogError(
+  error: unknown,
+  signal: AbortSignal | undefined,
+  fallback: 'provider' | 'protocol',
+): LlmError {
+  if (isAborted(signal)) return new LlmError('The Antigravity live model catalog request was cancelled', 'CANCELLED')
+  if (error instanceof LlmError) return error
+  if (error instanceof PrivateTransportError || fallback === 'provider') return toLlmError(error)
+  return new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
 }
 
 function toLlmError(error: unknown): LlmError {

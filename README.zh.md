@@ -5,7 +5,7 @@
 
 [English](README.md) | 中文
 
-当前版本：**v0.1.1**
+当前版本：**v0.1.2**
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -36,6 +36,7 @@
 
 - 通过 DSH 公开的 `LlmAdapter` 接口注册 `google-antigravity` 提供方。
 - 将已审计的固定社区模型快照与真实登录账号的可用模型取交集。
+- 当真实模型发现暂时不可用或发生协议漂移时，DSH 内置模型选择器会回退到固定文本模型快照，设置页仍诚实显示 live catalog 状态；成功但零交集的结果仍保持为空，未登录、授权拒绝、取消与明确的 attribution 拒绝仍保持 fail-closed。
 - 流式传输支持首个数据块前的一次认证重放，并支持跨分片提供方函数名的 call-id 稳定关联。
 
 ### 网页搜索
@@ -91,7 +92,7 @@ git clone https://github.com/suntianc/dsh-antigravity-auth.git
 cd dsh-antigravity-auth
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.2.tgz
 ```
 
 ## 升级
@@ -99,7 +100,7 @@ dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
 先停止正在运行的 `dsh web`，再将 Web Profile 更新到当前版本：
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.1
+dsh plugin --profile web add dsh-antigravity-auth@0.1.2
 dsh plugin --profile web list
 ```
 

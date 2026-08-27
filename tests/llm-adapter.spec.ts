@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { createApiProxy, RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { AntigravityAdapter, ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT, ANTIGRAVITY_PROVIDER, buildAntigravityGeneratePayload } from '../src/llm-adapter.ts'
 import type { HostCredential } from '../src/credential-coordinator.ts'
 import { PrivateTransportError, type PrivateTransportRequest } from '../src/private-transport.ts'
@@ -189,21 +192,153 @@ describe('Antigravity LLM adapter', () => {
     expect(transport.request).toHaveBeenCalledTimes(2)
   })
 
-  it('fails catalog refresh closed on rate limiting or schema drift instead of returning the snapshot', async () => {
+  it('keeps the pinned text snapshot visible when live discovery is rate-limited or drifts', async () => {
     const rateRequest = vi.fn(async () => new Response('', { status: 429 }))
     const rateLimited = new AntigravityAdapter({
       auth: { credential: vi.fn(async () => credential('access')) },
       transport: { request: rateRequest },
     })
-    await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'RATE_LIMIT' })
-    await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'RATE_LIMIT' })
+    const rateSnapshot = rateLimited.catalogSnapshot().models.map(model => model.id)
+    await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER).then(models => models.map(model => model.id)))
+      .resolves.toEqual(rateSnapshot)
+    await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER)).resolves.toHaveLength(rateSnapshot.length)
+    await expect(rateLimited.modelCatalog()).resolves.toMatchObject({ state: 'refresh-failed' })
     expect(rateRequest).toHaveBeenCalledOnce()
 
     const drifted = new AntigravityAdapter({
       auth: { credential: vi.fn(async () => credential('access')) },
       transport: { request: vi.fn(async () => new Response(JSON.stringify({ models: [] }))) },
     })
-    await expect(drifted.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'PROTOCOL_DRIFT' })
+    const driftSnapshot = drifted.catalogSnapshot().models.map(model => model.id)
+    await expect(drifted.listModels(ANTIGRAVITY_PROVIDER).then(models => models.map(model => model.id)))
+      .resolves.toEqual(driftSnapshot)
+    await expect(drifted.modelCatalog()).resolves.toMatchObject({ state: 'protocol-drift' })
+  })
+
+  it('does not advertise pinned models when the successful live intersection is empty', async () => {
+    const request = vi.fn(async () => new Response(JSON.stringify({
+      models: { 'provider-new-model-id': { displayName: 'New live model' } },
+    })))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request },
+    })
+
+    await expect(adapter.listModels(ANTIGRAVITY_PROVIDER)).resolves.toEqual([])
+    const view = await adapter.modelCatalog()
+    expect(view.state).toBe('live-available')
+    expect(view.models.every(model => model.state === 'unavailable')).toBe(true)
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('does not fall back to the pinned text snapshot for missing auth, cancellation, or unclassified failures', async () => {
+    const unauthenticated = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => undefined) },
+      transport: { request: vi.fn() },
+    })
+    await expect(unauthenticated.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'AUTH' })
+
+    const cancelled = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: {
+        request: vi.fn(async () => {
+          throw new PrivateTransportError('cancelled', 'cancelled')
+        }),
+      },
+    })
+    await expect(cancelled.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'CANCELLED' })
+
+    const unclassified = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: {
+        request: vi.fn(async () => {
+          throw new Error('unexpected transport failure')
+        }),
+      },
+    })
+    await expect(unclassified.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'PROVIDER_ERROR' })
+  })
+
+  it('keeps authorization denial fail-closed instead of advertising the snapshot', async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 403 }))
+      .mockResolvedValueOnce(new Response('', { status: 403 }))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request },
+    })
+
+    await expect(adapter.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    expect(request).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves attribution rejection and cancellation from the projectless 403 retry', async () => {
+    const attributionRequest = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 403 }))
+      .mockRejectedValueOnce(new PrivateTransportError('attribution-rejected', 'redacted', { accepted: false, status: 403 }))
+    const attributionRejected = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request: attributionRequest },
+    })
+    await expect(attributionRejected.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'GATE_0_ATTRIBUTION' })
+
+    const cancelledRequest = vi.fn()
+      .mockResolvedValueOnce(new Response('', { status: 403 }))
+      .mockRejectedValueOnce(new PrivateTransportError('cancelled', 'cancelled'))
+    const cancelled = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request: cancelledRequest },
+    })
+    await expect(cancelled.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'CANCELLED' })
+  })
+
+  it('preserves cancellation while reading a successful live catalog body', async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new PrivateTransportError('cancelled', 'cancelled'))
+      },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request: vi.fn(async () => new Response(body)) },
+    })
+
+    await expect(adapter.listModels(ANTIGRAVITY_PROVIDER)).rejects.toMatchObject({ code: 'CANCELLED' })
+  })
+
+  it('keeps the provider group visible through the public Host model catalog', async () => {
+    const ctx = new Context()
+    try {
+      const runtime = new LlmRuntime(ctx)
+      const adapter = new AntigravityAdapter({
+        auth: { credential: vi.fn(async () => credential('access')) },
+        transport: { request: vi.fn(async () => new Response('', { status: 429 })) },
+      })
+      runtime.registerAdapter([ANTIGRAVITY_PROVIDER], adapter)
+      const api = createApiProxy({
+        llm: runtime,
+        userQuestions: { registerProvider: vi.fn(() => vi.fn()) },
+        inject: vi.fn(),
+        on: vi.fn(),
+        effect: vi.fn(),
+        get: vi.fn(() => undefined),
+      } as never, {
+        defaultModelSelection: () => ({ provider: ANTIGRAVITY_PROVIDER, model: 'antigravity-gemini-3.7-flash' }),
+        cwd: process.cwd(),
+      })
+
+      const response = await api.llm.models({ rpcId: RpcId('issue-19'), payload: {} })
+      expect(response.result.ok).toBe(true)
+      if (!response.result.ok) throw new Error(response.result.error.message)
+      expect(response.result.value.failures).toEqual([])
+      expect(response.result.value.groups).toHaveLength(1)
+      expect(response.result.value.groups[0]).toMatchObject({
+        id: ANTIGRAVITY_PROVIDER,
+        models: adapter.catalogSnapshot().models.map(model => ({ id: model.id })),
+      })
+    } finally {
+      await ctx.fiber.dispose()
+    }
   })
 
   it('replays tool results with the original function name correlated by call id', () => {

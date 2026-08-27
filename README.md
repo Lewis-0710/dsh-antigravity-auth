@@ -5,7 +5,7 @@
 
 English | [中文](README.zh.md)
 
-Current release: **v0.1.1**
+Current release: **v0.1.2**
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -39,6 +39,7 @@ and Wire Identity for:
 
 - Registers the `google-antigravity` provider through DSH's public `LlmAdapter` seam.
 - Intersects the pinned community model catalog with live account discovery.
+- Keeps DSH's stock model selector usable when live discovery is temporarily unavailable or drifts by falling back to the pinned text snapshot; Settings still reports the live-catalog state. A successful empty intersection stays empty, while missing authentication, authorization denial, cancellation, and explicit attribution rejection remain fail-closed.
 - Supports streaming with pre-delta authentication replay and preserve-by-id function call correlation across fragmented provider names.
 
 ### Web Search
@@ -99,7 +100,7 @@ git clone https://github.com/suntianc/dsh-antigravity-auth.git
 cd dsh-antigravity-auth
 pnpm install
 pnpm pack
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.2.tgz
 ```
 
 ## Upgrade
@@ -107,7 +108,7 @@ dsh plugin --profile web add ./dsh-antigravity-auth-0.1.1.tgz
 Stop the running `dsh web` process and update the Web profile:
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.1
+dsh plugin --profile web add dsh-antigravity-auth@0.1.2
 dsh plugin --profile web list
 ```
 

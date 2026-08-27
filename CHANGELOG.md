@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-27
+
+- Kept the Antigravity provider visible in DSH's stock model catalog during explicitly allowlisted transient live-discovery failures by falling back to the audited pinned text snapshot.
+- Preserved fail-closed handling for missing authentication, authorization denial, cancellation, attribution rejection, unknown failures, and successful live catalogs with no supported-model intersection.
+
 ## [0.1.1] - 2026-08-25
 
 - Fixed Windows reads of auth, capability-gate, and controlled live-image records by applying `0700`/`0600` mode rejection only on POSIX while retaining symlink, file-type, size, schema, and content validation on every platform.
