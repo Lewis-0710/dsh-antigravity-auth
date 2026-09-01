@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { createApiProxy, RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { AntigravityAdapter, ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT, ANTIGRAVITY_PROVIDER, buildAntigravityGeneratePayload } from '../src/llm-adapter.ts'
@@ -36,6 +36,17 @@ async function collect(chunks: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   const output: StreamChunk[] = []
   for await (const chunk of chunks) output.push(chunk)
   return output
+}
+
+async function collectThroughRuntime(adapter: AntigravityAdapter, input: GenerateOptions): Promise<StreamChunk[]> {
+  const ctx = new Context()
+  try {
+    const runtime = new LlmRuntime(ctx)
+    runtime.registerAdapter([ANTIGRAVITY_PROVIDER], adapter)
+    return await collect(runtime.stream(input))
+  } finally {
+    await ctx.fiber.dispose()
+  }
 }
 
 describe('Antigravity LLM adapter', () => {
@@ -96,6 +107,367 @@ describe('Antigravity LLM adapter', () => {
       type: 'finish',
       reason: { kind: 'error', failure: { code: fixture.errorCode } },
     })
+  })
+
+  it('preserves the complete DSH system prompt and tool declaration for Claude Opus', async () => {
+    const tail = '[ISSUE-20-TOOL-INSTRUCTIONS-END]'
+    const system = `[INITIAL]\n${'x'.repeat(66_000)}\n[CONTEXT]\n${tail}`
+    const request = vi.fn(async (input: PrivateTransportRequest) => {
+      const payload = JSON.parse(String(input.body)) as {
+        model: string
+        request: {
+          systemInstruction?: { parts?: Array<{ text?: string }> }
+          tools?: Array<{ functionDeclarations?: Array<{ name?: string; description?: string }> }>
+          toolConfig?: { functionCallingConfig?: { mode?: string } }
+        }
+      }
+      expect(payload.model).toBe('claude-opus-4-6-thinking')
+      expect(payload.request.systemInstruction?.parts?.[0]?.text).toBe(system)
+      expect(payload.request.systemInstruction?.parts?.some(part => part.text?.includes(tail) === true)).toBe(true)
+      expect(payload.request.systemInstruction?.parts?.some(part => part.text?.includes('CRITICAL TOOL USAGE INSTRUCTIONS') === true)).toBe(true)
+      expect(payload.request.systemInstruction?.parts?.at(-1)?.text).toContain('Interleaved thinking is enabled')
+      const declaration = payload.request.tools?.[0]?.functionDeclarations?.find(item => item.name === 'lookup')
+      expect(declaration?.description).toContain('STRICT PARAMETERS: query (string, REQUIRED)')
+      expect(payload.request.toolConfig?.functionCallingConfig?.mode).toBe('VALIDATED')
+      return new Response('data: {"response":{"parts":[{"function_call":{"id":"call-1","name":"lookup","args":{"query":"x"}}}],"finishReason":"FUNCTION_CALL"}}\n\n')
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request },
+    })
+
+    await expect(collectThroughRuntime(adapter, options({
+      model: 'antigravity-claude-opus-4-6-thinking',
+      system,
+      tools: [{ name: 'lookup', description: 'Lookup', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }],
+    }))).resolves.toContainEqual(expect.objectContaining({
+      type: 'tool-call-delta',
+      name: 'lookup',
+      argumentsDelta: '{"query":"x"}',
+    }))
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('replays Claude tool calls and results with matching ids while dropping unsigned reasoning', async () => {
+    const model = 'antigravity-claude-opus-4-6-thinking'
+    const bashCallId = 'toolu_vrtx_bash'
+    const globCallId = 'toolu_vrtx_glob'
+    const assistant = {
+      id: 'assistant-tools',
+      role: 'assistant',
+      source: {
+        kind: 'model',
+        provider: ANTIGRAVITY_PROVIDER,
+        model,
+        replayState: {
+          response: { version: 1, provider: ANTIGRAVITY_PROVIDER, model, family: 'claude', finish: 'STOP' },
+          blocks: [{ kind: 'reasoning' }, { kind: 'tool-call' }, { kind: 'tool-call' }],
+        },
+      },
+      content: [
+        { type: 'reasoning', text: 'unsigned provider reasoning' },
+        { type: 'tool-call', id: bashCallId, name: 'bash', arguments: '{"command":"pwd"}' },
+        { type: 'tool-call', id: globCallId, name: 'glob', arguments: '{"pattern":"*/package.json"}' },
+      ],
+    } as Message
+    const result = (id: string, name: string, text: string): Message => ({
+      id: `result-${name}` as never,
+      role: 'user',
+      source: { kind: 'tool', callId: id as never },
+      content: [{ type: 'tool-result', toolCallId: id as never, content: [{ type: 'text', text }] }],
+    })
+    const request = vi.fn(async (input: PrivateTransportRequest) => {
+      const payload = JSON.parse(String(input.body)) as {
+        request: { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }
+      }
+      const contents = payload.request.contents
+      expect(contents[1]?.parts).toEqual([
+        {
+          functionCall: { id: bashCallId, name: 'bash', args: { command: 'pwd' } },
+          thoughtSignature: 'skip_thought_signature_validator',
+        },
+        { functionCall: { id: globCallId, name: 'glob', args: { pattern: '*/package.json' } } },
+      ])
+      expect(contents).toHaveLength(3)
+      expect(contents[2]?.parts).toEqual([
+        { functionResponse: { id: bashCallId, name: 'bash', response: { content: '/workspace' } } },
+        { functionResponse: { id: globCallId, name: 'glob', response: { content: 'plugin/package.json' } } },
+      ])
+      return new Response('data: {"response":{"parts":[{"text":"continued"}],"finishReason":"STOP"}}\n\n')
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({
+      model,
+      messages: [message('test tools'), assistant, result(bashCallId, 'bash', '/workspace'), result(globCallId, 'glob', 'plugin/package.json')],
+      tools: [
+        { name: 'bash', description: 'Run shell', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } },
+        { name: 'glob', description: 'Find files', parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] } },
+      ],
+    }))
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'text-delta', text: 'continued' }))
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('maps a bounded multiline HTTP 400 SSE error to DSH context-overflow recovery', async () => {
+    const providerDetail = 'prompt is too long: 200001 tokens > 200000 maximum'
+    const payload = JSON.stringify({
+      error: {
+        code: 400,
+        message: JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: providerDetail },
+          request_id: 'provider-request-id-must-not-leak',
+        }),
+        status: 'INVALID_ARGUMENT',
+      },
+    })
+    const split = payload.indexOf('"message"')
+    const body = [
+      'event: heartbeat',
+      'data: {"ignored":true}',
+      '',
+      'event: error',
+      `data: ${payload.slice(0, split)}`,
+      `data: ${payload.slice(split)}`,
+      '',
+      '',
+    ].join('\n')
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400, headers: { 'content-type': 'text/event-stream' } })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          code: CONTEXT_WINDOW_EXCEEDED_CODE,
+          message: 'The Antigravity request exceeded the model context window',
+          status: 400,
+        },
+      },
+    })
+    expect(JSON.stringify(chunks)).not.toMatch(/200001|200000|provider-request-id-must-not-leak/u)
+  })
+
+  it('maps a plain HTTP 400 JSON error with whitespace around its nested JSON wrapper', async () => {
+    const nested = JSON.stringify({
+      error: { message: 'prompt is too long: 200001 tokens > 200000 maximum' },
+      request_id: 'plain-request-id-must-not-leak',
+    })
+    const body = JSON.stringify({
+      error: {
+        code: 400,
+        message: ` \n${nested}\t`,
+        status: 'INVALID_ARGUMENT',
+      },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, status: 400 } },
+    })
+    expect(JSON.stringify(chunks)).not.toMatch(/200001|200000|plain-request-id-must-not-leak/u)
+  })
+
+  it('cancels the HTTP error body after early bounded overflow detection', async () => {
+    const payload = JSON.stringify({
+      error: { message: 'prompt is too long: 200001 tokens > 200000 maximum' },
+    })
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      start: streamController => {
+        streamController.enqueue(new TextEncoder().encode(`event: error\ndata: ${payload}\n\n`))
+      },
+      pull: () => new Promise<void>(() => {}),
+      cancel: () => { cancelled = true },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, status: 400 } },
+    })
+    expect(cancelled).toBe(true)
+  })
+
+  it('maps a streamed prompt-too-long event without exposing provider details', async () => {
+    const providerDetail = 'prompt is too long: 200001 tokens > 200000 maximum'
+    const event = JSON.stringify({
+      error: {
+        code: 'INVALID_ARGUMENT',
+        status: 400,
+        message: JSON.stringify({ error: { message: providerDetail }, request_id: 'stream-request-id-must-not-leak' }),
+      },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(`data: ${event}\n\n`)) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: CONTEXT_WINDOW_EXCEEDED_CODE, status: 400 } },
+    })
+    expect(JSON.stringify(chunks)).not.toMatch(/200001|200000|stream-request-id-must-not-leak/u)
+  })
+
+  it.each([
+    'PROMPT IS TOO LONG: 200001 tokens > 200000 maximum',
+    'prompt is too long:  200001 tokens > 200000 maximum',
+    'prompt is too long: 200001 tokens > 200000 maximum.',
+    ' prompt is too long: 200001 tokens > 200000 maximum',
+    'prompt is too long: 200000 tokens > 200000 maximum',
+    'prompt is too long: 199999 tokens > 200000 maximum',
+  ])('does not classify a near-match provider message as context overflow: %s', async providerDetail => {
+    const body = JSON.stringify({ error: { message: JSON.stringify({ error: { message: providerDetail } }) } })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+    })
+  })
+
+  it('does not classify an auxiliary SSE frame with a top-level exact-looking message', async () => {
+    const body = 'event: heartbeat\ndata: {"message":"prompt is too long: 200001 tokens > 200000 maximum"}\n\n'
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+    })
+  })
+
+  it('rejects deeply nested and oversized HTTP error bodies without classifying their contents', async () => {
+    let nested: unknown = { message: 'prompt is too long: 200001 tokens > 200000 maximum' }
+    for (let depth = 0; depth < 12; depth += 1) nested = { error: nested }
+    const bodies = [
+      JSON.stringify(nested),
+      JSON.stringify({ padding: 'x'.repeat(70 * 1024), error: { message: 'prompt is too long: 200001 tokens > 200000 maximum' } }),
+    ]
+
+    for (const body of bodies) {
+      const adapter = new AntigravityAdapter({
+        auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+        transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+      })
+      const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+      expect(chunks.at(-1)).toMatchObject({
+        type: 'finish',
+        reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+      })
+    }
+  })
+
+  it('honors dedicated and tighter configured HTTP error response and frame limits', async () => {
+    const exactMessage = 'prompt is too long: 200001 tokens > 200000 maximum'
+    const smallPayload = JSON.stringify({ padding: 'x'.repeat(2 * 1024), error: { message: exactMessage } })
+    const largeFramePayload = JSON.stringify({ padding: 'x'.repeat(20 * 1024), error: { message: exactMessage } })
+    const fixtures = [
+      { body: smallPayload, maxResponseBytes: 1024 },
+      { body: `data: ${smallPayload}\n\n`, maxFrameBytes: 1024 },
+      { body: `data: ${largeFramePayload}\n\n` },
+    ]
+
+    for (const fixture of fixtures) {
+      const adapter = new AntigravityAdapter({
+        auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+        transport: { request: vi.fn(async () => new Response(fixture.body, { status: 400 })) },
+        ...('maxResponseBytes' in fixture ? { maxResponseBytes: fixture.maxResponseBytes } : {}),
+        ...('maxFrameBytes' in fixture ? { maxFrameBytes: fixture.maxFrameBytes } : {}),
+      })
+      const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+      expect(chunks.at(-1)).toMatchObject({
+        type: 'finish',
+        reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+      })
+    }
+  })
+
+  it('preserves mid-read cancellation and cancels the HTTP error body', async () => {
+    const controller = new AbortController()
+    let pulls = 0
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull: streamController => {
+        pulls += 1
+        if (pulls === 1) {
+          streamController.enqueue(new TextEncoder().encode('event: error\ndata: {"error":'))
+          return
+        }
+        return new Promise<void>(resolve => {
+          setTimeout(() => {
+            controller.abort()
+            resolve()
+          }, 0)
+        })
+      },
+      cancel: () => { cancelled = true },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({
+      model: 'antigravity-claude-opus-4-6-thinking',
+      signal: controller.signal,
+    }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'aborted', failure: { code: 'CANCELLED' } },
+    })
+    expect(pulls).toBeGreaterThanOrEqual(2)
+    expect(cancelled).toBe(true)
+  })
+
+  it.each([
+    { name: 'idle timeout', idleTimeoutMs: 5, totalTimeoutMs: 50 },
+    { name: 'total timeout', idleTimeoutMs: 50, totalTimeoutMs: 5 },
+  ])('bounds an HTTP error body on $name and cancels its reader', async fixture => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      pull: () => new Promise<void>(() => {}),
+      cancel: () => { cancelled = true },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body, { status: 400 })) },
+      idleTimeoutMs: fixture.idleTimeoutMs,
+      totalTimeoutMs: fixture.totalTimeoutMs,
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model: 'antigravity-claude-opus-4-6-thinking' }))
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+    })
+    expect(cancelled).toBe(true)
   })
 
   it('replays exactly once after a pre-delta authentication response', async () => {

@@ -3,6 +3,9 @@
 import { Buffer } from 'node:buffer'
 import {
   AgyRequestSessionStore,
+  CLAUDE_DESCRIPTION_PROMPT,
+  CLAUDE_TOOL_SYSTEM_INSTRUCTION,
+  SKIP_THOUGHT_SIGNATURE,
   applyClaudeTransforms,
   applyGeminiTransforms,
   buildAgyAgentRequestMetadata,
@@ -12,6 +15,7 @@ import {
   resolveModelWithTier,
 } from '@cortexkit/antigravity-auth-core'
 import {
+  CONTEXT_WINDOW_EXCEEDED_CODE,
   CallId,
   LlmAdapter,
   LlmError,
@@ -62,6 +66,9 @@ export const ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}
 export const ANTIGRAVITY_LLM_ROUTE = ANTIGRAVITY_PROVIDER
 const MODEL_CATALOG_TTL_MS = 30_000
 const MAX_MODEL_CATALOG_BYTES = 256 * 1024
+const MAX_PROVIDER_ERROR_BYTES = 64 * 1024
+const MAX_PROVIDER_ERROR_FRAME_BYTES = 16 * 1024
+const MAX_PROVIDER_ERROR_JSON_DEPTH = 8
 const MAX_PROVIDER_PARTS = 4096
 
 export interface AntigravityAuthCredentialSource {
@@ -100,7 +107,7 @@ interface ProviderEvent {
   readonly parts: readonly ProviderPart[]
   readonly usage?: TokenUsage
   readonly finish?: string
-  readonly error?: { readonly status?: number; readonly code?: string }
+  readonly error?: { readonly status?: number; readonly code?: string; readonly contextWindowExceeded?: boolean }
 }
 
 export interface AntigravityRequestMetadata {
@@ -272,6 +279,16 @@ export class AntigravityAdapter extends LlmAdapter {
           replayed = true
           continue
         }
+        if (response.status === 400 && await responseReportsContextWindowExceeded(response, {
+          ...(signal === undefined ? {} : { signal }),
+          idleTimeoutMs: this.options.idleTimeoutMs,
+          totalTimeoutMs: this.options.totalTimeoutMs,
+          maxResponseBytes: this.options.maxResponseBytes,
+          maxFrameBytes: this.options.maxFrameBytes,
+        })) {
+          throw contextWindowExceededError(response.status)
+        }
+        await cancelResponse(response)
         throw toLlmError(statusError)
       }
       try {
@@ -352,7 +369,11 @@ export class AntigravityAdapter extends LlmAdapter {
     if (current !== undefined) yield endBlock(current)
     if (usage !== undefined) yield { type: 'usage', usage }
     if (eventError !== undefined) {
-      yield finishChunk('error', safeProviderErrorCode(eventError.code), safeProviderStatus(eventError.status))
+      yield finishChunk(
+        'error',
+        eventError.contextWindowExceeded === true ? CONTEXT_WINDOW_EXCEEDED_CODE : safeProviderErrorCode(eventError.code),
+        safeProviderStatus(eventError.status),
+      )
       return
     }
     if (isAborted(options.signal)) {
@@ -715,15 +736,43 @@ async function buildAntigravityGeneratePayloadForAdapter(
   }
 }
 
+function groupClaudeFunctionResponses(
+  contents: readonly Record<string, unknown>[],
+  model: string,
+): readonly Record<string, unknown>[] {
+  if (antigravityModelFamily(model) !== 'claude') return contents
+  const grouped: Record<string, unknown>[] = []
+  let pendingResponses: Record<string, unknown>[] = []
+  const flushResponses = (): void => {
+    if (pendingResponses.length === 0) return
+    grouped.push({ role: 'user', parts: pendingResponses })
+    pendingResponses = []
+  }
+  for (const content of contents) {
+    const rawParts = Array.isArray(content.parts) ? content.parts : []
+    const responseParts = rawParts.filter(part => isRecord(part) && isRecord(part.functionResponse)) as Record<string, unknown>[]
+    const responseOnly = content.role === 'user' && rawParts.length > 0 && responseParts.length === rawParts.length
+    if (responseOnly) {
+      pendingResponses.push(...responseParts)
+      continue
+    }
+    flushResponses()
+    grouped.push(content)
+  }
+  flushResponses()
+  return grouped
+}
+
 function buildPayloadFromContents(
   options: GenerateOptions,
   credential: HostCredential,
   contents: readonly Record<string, unknown>[],
 ): Record<string, unknown> {
   const wireModel = resolveWireModel(options.model)
-  const request: Record<string, unknown> = { contents }
+  const requestContents = groupClaudeFunctionResponses(contents, options.model)
+  const request: Record<string, unknown> = { contents: requestContents }
   if (options.system !== undefined && options.system.trim().length > 0) {
-    request.systemInstruction = { parts: [{ text: options.system.slice(0, 64 * 1024) }] }
+    request.systemInstruction = { parts: [{ text: options.system }] }
   }
   const generationConfig: Record<string, unknown> = {}
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = boundedInteger(options.maxTokens, 1, 1_000_000, 'maxTokens')
@@ -739,6 +788,7 @@ function buildPayloadFromContents(
   const requestedEffort = normalizeReasoningEffort(options.reasoningEffort)
   const thinkingLevel = requestedEffort ?? resolved.thinkingLevel
   if (wireModel.toLowerCase().includes('claude')) {
+    applyClaudeToolHardening(request)
     applyClaudeTransforms(request, {
       model: wireModel,
       ...(resolved.thinkingBudget === undefined ? {} : { tierThinkingBudget: resolved.thinkingBudget }),
@@ -757,31 +807,119 @@ function buildPayloadFromContents(
   return { ...(project === undefined ? {} : { project }), model: wireModel, request }
 }
 
+function applyClaudeToolHardening(request: Record<string, unknown>): void {
+  if (!Array.isArray(request.tools) || request.tools.length === 0) return
+  request.tools = request.tools.map(tool => {
+    if (!isRecord(tool) || !Array.isArray(tool.functionDeclarations)) return tool
+    return {
+      ...tool,
+      functionDeclarations: tool.functionDeclarations.map(declaration => hardenClaudeToolDeclaration(declaration)),
+    }
+  })
+  const instructionPart = { text: CLAUDE_TOOL_SYSTEM_INSTRUCTION }
+  const existing = request.systemInstruction
+  if (isRecord(existing) && Array.isArray(existing.parts)) {
+    if (existing.parts.some(part => isRecord(part) && typeof part.text === 'string' && part.text.includes('CRITICAL TOOL USAGE INSTRUCTIONS'))) return
+    request.systemInstruction = { ...existing, parts: [...existing.parts, instructionPart] }
+  } else if (typeof existing === 'string') {
+    request.systemInstruction = { role: 'user', parts: [{ text: existing }, instructionPart] }
+  } else {
+    request.systemInstruction = { role: 'user', parts: [instructionPart] }
+  }
+}
+
+function hardenClaudeToolDeclaration(value: unknown): unknown {
+  if (!isRecord(value)) return value
+  const description = typeof value.description === 'string' ? value.description : ''
+  if (description.includes('STRICT PARAMETERS:')) return value
+  const schema = isRecord(value.parameters) ? value.parameters : undefined
+  const properties = schema !== undefined && isRecord(schema.properties) ? schema.properties : undefined
+  if (properties === undefined || Object.keys(properties).length === 0) return value
+  const required = new Set(Array.isArray(schema?.required) ? schema.required.filter(item => typeof item === 'string') : [])
+  const parameters = Object.entries(properties).map(([name, property]) => {
+    const requiredHint = required.has(name) ? ', REQUIRED' : ''
+    return `${name} (${claudeToolTypeHint(property)}${requiredHint})`
+  })
+  return {
+    ...value,
+    description: description + CLAUDE_DESCRIPTION_PROMPT.replace('{params}', parameters.join(', ')),
+  }
+}
+
+function claudeToolTypeHint(value: unknown): string {
+  if (!isRecord(value)) return 'unknown'
+  if (Array.isArray(value.enum)) {
+    return value.enum.length <= 5
+      ? `string ENUM[${value.enum.map(item => JSON.stringify(item)).join(', ')}]`
+      : `string ENUM[${value.enum.length} options]`
+  }
+  const type = typeof value.type === 'string' ? value.type : 'unknown'
+  if (type === 'array') {
+    if (!isRecord(value.items)) return 'ARRAY'
+    const itemType = typeof value.items.type === 'string' ? value.items.type : 'unknown'
+    if (itemType !== 'object') return `ARRAY_OF_${itemType.toUpperCase()}`
+    if (!isRecord(value.items.properties)) return 'ARRAY_OF_OBJECTS'
+    const nestedRequired = new Set(Array.isArray(value.items.required) ? value.items.required.filter(item => typeof item === 'string') : [])
+    const nested = Object.entries(value.items.properties).map(([name, property]) => {
+      const nestedType = isRecord(property) && typeof property.type === 'string' ? property.type : 'unknown'
+      return `${name}: ${nestedType}${nestedRequired.has(name) ? ' REQUIRED' : ''}`
+    })
+    return `ARRAY_OF_OBJECTS[${nested.join(', ')}]`
+  }
+  if (type === 'object' && isRecord(value.properties)) {
+    const nestedRequired = new Set(Array.isArray(value.required) ? value.required.filter(item => typeof item === 'string') : [])
+    const nested = Object.entries(value.properties).map(([name, property]) => {
+      const nestedType = isRecord(property) && typeof property.type === 'string' ? property.type : 'unknown'
+      return `${name}: ${nestedType}${nestedRequired.has(name) ? ' REQUIRED' : ''}`
+    })
+    return `object{${nested.join(', ')}}`
+  }
+  return type
+}
+
 function mapMessage(message: Message, model: string, toolNames: Map<string, string>): Record<string, unknown> {
   const parts: Record<string, unknown>[] = []
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
+  const isClaude = antigravityModelFamily(model) === 'claude'
+  let replayIndex = 0
+  let sawClaudeFunctionCall = false
   for (const block of message.content) {
-    const replayBlock = replayBlocks.find(r => r.kind === block.type)
+    const replayKind = block.type === 'text' || block.type === 'reasoning' || block.type === 'tool-call' ? block.type : undefined
+    const replayBlock = replayKind === undefined ? undefined : replayBlocks[replayIndex++]
+    const replaySignature = replayBlock !== undefined && replayBlock.kind === replayKind ? replayBlock.signature : undefined
     const blockSignature = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
       ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
-      ?? replayBlock?.signature
+      ?? replaySignature
     if (block.type === 'text') {
       if (block.text.length === 0 && message.content.length > 1) continue
       parts.push({ text: block.text, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'reasoning') {
+      if (isClaude && blockSignature === undefined) continue
       parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
-      rememberToolName(toolNames, block.id, block.name)
+      const callId = rememberToolName(toolNames, block.id, block.name)
+      const signature = isClaude
+        ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
+        : blockSignature
+      sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
+          ...(isClaude ? { id: callId } : {}),
           name: block.name,
           args: parseJsonObject(block.arguments),
         },
-        ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }),
+        ...(signature === undefined ? {} : { thoughtSignature: signature }),
       })
     } else if (block.type === 'tool-result') {
-      parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
+      const callId = requireToolCallId(block.toolCallId)
+      parts.push({
+        functionResponse: {
+          ...(isClaude ? { id: callId } : {}),
+          name: requireToolName(toolNames, callId),
+          response: { content: blocksToText(block.content) },
+        },
+      })
     } else if (block.type === 'image') {
       throw new LlmError('Antigravity text requests do not accept unresolved image blocks', 'UNSUPPORTED_MODALITY')
     }
@@ -804,11 +942,16 @@ async function mapMessageWithAttachments(
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
   const parts: Record<string, unknown>[] = []
+  const isClaude = antigravityModelFamily(model) === 'claude'
+  let replayIndex = 0
+  let sawClaudeFunctionCall = false
   for (const block of message.content) {
-    const replayBlock = replayBlocks.find(r => r.kind === block.type)
+    const replayKind = block.type === 'text' || block.type === 'reasoning' || block.type === 'tool-call' ? block.type : undefined
+    const replayBlock = replayKind === undefined ? undefined : replayBlocks[replayIndex++]
+    const replaySignature = replayBlock !== undefined && replayBlock.kind === replayKind ? replayBlock.signature : undefined
     const blockSignature = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
       ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
-      ?? replayBlock?.signature
+      ?? replaySignature
     if (block.type === 'image') {
       const stored = await attachments.readImage(block.attachment, signal)
       parts.push({ inlineData: { mimeType: stored.ref.mediaType, data: Buffer.from(stored.data).toString('base64') } })
@@ -816,35 +959,56 @@ async function mapMessageWithAttachments(
       if (block.text.length === 0 && message.content.length > 1) continue
       parts.push({ text: block.text, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'reasoning') {
+      if (isClaude && blockSignature === undefined) continue
       parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
-      rememberToolName(toolNames, block.id, block.name)
+      const callId = rememberToolName(toolNames, block.id, block.name)
+      const signature = isClaude
+        ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
+        : blockSignature
+      sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
+          ...(isClaude ? { id: callId } : {}),
           name: block.name,
           args: parseJsonObject(block.arguments),
         },
-        ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }),
+        ...(signature === undefined ? {} : { thoughtSignature: signature }),
       })
     } else if (block.type === 'tool-result') {
-      parts.push({ functionResponse: { name: requireToolName(toolNames, block.toolCallId), response: { content: blocksToText(block.content) } } })
+      const callId = requireToolCallId(block.toolCallId)
+      parts.push({
+        functionResponse: {
+          ...(isClaude ? { id: callId } : {}),
+          name: requireToolName(toolNames, callId),
+          response: { content: blocksToText(block.content) },
+        },
+      })
     }
   }
   return { role: message.role === 'assistant' ? 'model' : 'user', parts }
 }
 
-function rememberToolName(toolNames: Map<string, string>, callId: unknown, name: string): void {
+function rememberToolName(toolNames: Map<string, string>, callId: unknown, name: string): string {
   if (name.length === 0 || name.length > 256 || containsControl(name)) throw new LlmError('The tool call name is invalid', 'INVALID_ARGS')
-  const id = String(callId)
+  const id = requireToolCallId(callId)
   const existing = toolNames.get(id)
   if (existing !== undefined && existing !== name) throw new LlmError('A tool call id was reused with a different name', 'INVALID_ARGS')
   toolNames.set(id, name)
+  return id
 }
 
 function requireToolName(toolNames: ReadonlyMap<string, string>, callId: unknown): string {
-  const name = toolNames.get(String(callId))
+  const name = toolNames.get(requireToolCallId(callId))
   if (name === undefined) throw new LlmError('A tool result did not match a prior tool call', 'INVALID_ARGS')
   return name
+}
+
+function requireToolCallId(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512 || containsControl(value)) {
+    throw new LlmError('The tool call id is invalid', 'INVALID_ARGS')
+  }
+  return value
 }
 
 function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): string | undefined {
@@ -955,10 +1119,104 @@ function parsePart(value: unknown): ProviderPart | undefined {
 function errorDetails(value: Record<string, unknown>): NonNullable<ProviderEvent['error']> {
   const status = numberValue(value.status)
   const code = stringValue(value.code)
+  const contextWindowExceeded = providerErrorReportsContextWindowExceeded(value, 0)
   return {
     ...(status === undefined ? {} : { status }),
     ...(code === undefined ? {} : { code }),
+    ...(contextWindowExceeded ? { contextWindowExceeded: true } : {}),
   }
+}
+
+async function responseReportsContextWindowExceeded(
+  response: Response,
+  options: {
+    readonly signal?: AbortSignal
+    readonly idleTimeoutMs: number
+    readonly totalTimeoutMs: number
+    readonly maxResponseBytes: number
+    readonly maxFrameBytes: number
+  },
+): Promise<boolean> {
+  try {
+    for await (const event of iteratePrivateSse(response, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      idleTimeoutMs: options.idleTimeoutMs,
+      totalTimeoutMs: options.totalTimeoutMs,
+      maxBytes: Math.min(MAX_PROVIDER_ERROR_BYTES, options.maxResponseBytes),
+      maxFrameBytes: Math.min(MAX_PROVIDER_ERROR_FRAME_BYTES, options.maxFrameBytes),
+    })) {
+      const payload = event.data.replace(/^\)\]\}'(?:\r?\n)?/u, '')
+      if (providerErrorEnvelopeReportsContextWindowExceeded(payload, 0)) return true
+    }
+    return false
+  } catch (error) {
+    if (error instanceof PrivateTransportError && error.code === 'cancelled') throw toLlmError(error)
+    if (isAborted(options.signal)) throw new LlmError('The Antigravity request was cancelled', 'CANCELLED')
+    return false
+  }
+}
+
+function providerErrorReportsContextWindowExceeded(value: Record<string, unknown>, depth: number): boolean {
+  if (depth > MAX_PROVIDER_ERROR_JSON_DEPTH) return false
+  if (typeof value.message === 'string') {
+    if (isExactContextWindowExceededMessage(value.message)) return true
+    if (providerErrorEnvelopeReportsContextWindowExceeded(value.message, depth + 1)) return true
+  }
+  return isRecord(value.error) && providerErrorReportsContextWindowExceeded(value.error, depth + 1)
+}
+
+function providerErrorEnvelopeReportsContextWindowExceeded(value: string, depth: number): boolean {
+  if (depth > MAX_PROVIDER_ERROR_JSON_DEPTH || value.length === 0 || value.length > MAX_PROVIDER_ERROR_BYTES) return false
+  const json = value.trim()
+  if (!json.startsWith('{') || !jsonDepthIsBounded(json, MAX_PROVIDER_ERROR_JSON_DEPTH)) return false
+  try {
+    const parsed = JSON.parse(json) as unknown
+    return isRecord(parsed) && isRecord(parsed.error)
+      ? providerErrorReportsContextWindowExceeded(parsed.error, depth + 1)
+      : false
+  } catch {
+    return false
+  }
+}
+
+function isExactContextWindowExceededMessage(value: string): boolean {
+  const match = /^prompt is too long: ([0-9]{1,16}) tokens > ([0-9]{1,16}) maximum$/u.exec(value)
+  const actual = match?.[1]
+  const maximum = match?.[2]
+  return actual !== undefined && maximum !== undefined && BigInt(actual) > BigInt(maximum)
+}
+
+function jsonDepthIsBounded(value: string, maxDepth: number): boolean {
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (const character of value) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') {
+      inString = true
+      continue
+    }
+    if (character === '{' || character === '[') {
+      depth += 1
+      if (depth > maxDepth) return false
+    } else if (character === '}' || character === ']') {
+      depth -= 1
+      if (depth < 0) return false
+    }
+  }
+  return depth === 0 && !inString && !escaped
+}
+
+function contextWindowExceededError(status?: number): LlmError {
+  const message = 'The Antigravity request exceeded the model context window'
+  return status === undefined
+    ? new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE)
+    : new LlmError(message, CONTEXT_WINDOW_EXCEEDED_CODE, { status })
 }
 
 function parseUsage(value: unknown): TokenUsage | undefined {

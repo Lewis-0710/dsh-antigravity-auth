@@ -56,7 +56,7 @@ export function compatibleReplayState(
   message: Message,
   provider: string,
   model: string,
-  _blockKinds?: readonly ReplayBlockKind[],
+  blockKinds?: readonly ReplayBlockKind[],
 ): AntigravityReplayState | undefined {
   if (provider !== 'google-antigravity' || message.role !== 'assistant') return undefined
   const provenance = isRecord(message.source) ? (message.source as Record<string, unknown>) : undefined
@@ -80,6 +80,8 @@ export function compatibleReplayState(
     const signature = typeof item.signature === 'string' && safeSignature(item.signature) !== undefined ? item.signature : undefined
     blocks.push({ kind, ...(signature === undefined ? {} : { signature }) })
   }
+  if (blockKinds !== undefined
+    && (blocks.length !== blockKinds.length || blocks.some((block, index) => block.kind !== blockKinds[index]))) return undefined
   const finish = value.response.finish === undefined ? undefined : safeFinish(value.response.finish)
   if (value.response.finish !== undefined && finish === undefined) return undefined
   return {

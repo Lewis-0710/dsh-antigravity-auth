@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-31
+
+- Restored reliable Claude Opus tool selection by preserving the complete DSH system prompt and applying the audited Claude tool instruction, strict parameter descriptions, and validated function-calling mode.
+- Fixed Claude continuation after parallel tool execution by preserving call/response IDs, applying the safe thought-signature sentinel, dropping unsigned reasoning replay, and grouping correlated function responses.
+- Mapped exact bounded Antigravity context-window overflow responses into DSH compaction recovery while retaining fail-closed parsing, timeout, response-size, frame-size, depth, and redaction limits.
+
 ## [0.1.2] - 2026-08-27
 
 - Kept the Antigravity provider visible in DSH's stock model catalog during explicitly allowlisted transient live-discovery failures by falling back to the audited pinned text snapshot.
