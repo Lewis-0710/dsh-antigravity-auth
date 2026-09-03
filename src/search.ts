@@ -3,7 +3,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveModelWithTier } from '@cortexkit/antigravity-auth-core'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import { WebError } from '@deepseek-ai/dsh-web'
 import type { WebSearchProvider, WebSearchRequest, WebSearchResult, WebSearchSource } from '@deepseek-ai/dsh-web'
 import { createAntigravityAuthService } from './auth-service.ts'
@@ -29,7 +29,7 @@ export const inject = ['web', 'antigravityAuth']
 export const ANTIGRAVITY_SEARCH_PROVIDER_ID = 'antigravity'
 export const ANTIGRAVITY_SEARCH_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:generateContent` as const
 export const ANTIGRAVITY_SEARCH_MODEL = 'antigravity-gemini-3.7-flash'
-export const ANTIGRAVITY_SEARCH_SETTINGS_NAMESPACE = settingsNamespace('antigravity-search')
+export const ANTIGRAVITY_SEARCH_SETTINGS_NAMESPACE = 'antigravity-search'
 
 export interface AntigravitySearchSettings {
   enabled: boolean
@@ -137,9 +137,11 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
   if (candidate.web === undefined) return
   let current = (): AntigravitySearchSettings => config
   let lifecycle: CapabilityLifecycle | undefined
-  installSettingsSection(ctx, ANTIGRAVITY_SEARCH_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source; lifecycle?.sync() },
-    onChange: () => { lifecycle?.sync() },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, ANTIGRAVITY_SEARCH_SETTINGS_NAMESPACE, Config, config, {
+      setSource: source => { current = source; lifecycle?.sync() },
+      onChange: () => { lifecycle?.sync() },
+    })
   })
   const provided = candidate.get?.('antigravityAuth')
   const auth = isAuthService(provided) ? provided : createAntigravityAuthService()
@@ -148,7 +150,7 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
     auth,
     id: 'search',
     enabled: () => current().enabled,
-    register: () => candidate.web!.registerSearchProvider(new AntigravitySearchProvider({ auth, settings: current })),
+    register: () => candidate.web!.registerSearchProvider(new AntigravitySearchProvider({ auth, settings: () => current() })),
     ownsAuth: auth !== provided,
     label: 'antigravity-search: provider lifecycle',
   })

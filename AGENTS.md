@@ -13,14 +13,14 @@ This file supplements the workspace-level `AGENTS.md`. The workspace guide remai
 - Canonical local spec: `docs/specs/antigravity-auth-capability-bundle.md`
 - Canonical research report: `docs/research/antigravity-auth-plugin.md`
 
-The repository and issue tracker are private. Do not publish, change visibility, push, install into a live profile, or run live OAuth/private endpoint probes unless the user explicitly requests that separate action.
+The repository and issue tracker are public, while the integrated Antigravity backend surface is private and unofficial. Do not publish, change visibility, push, install into a live profile, or run live OAuth/private endpoint probes unless the user explicitly requests that separate action.
 
 ## DSH compatibility baseline
 
-- The minimum and tested DSH package baseline is `dsh-v0.1.1-rc.2` (`0.1.1-rc.2` on npm). The upgrade impact source is `docs/research/dsh-v0.1.1-rc.2-plugin-impact.md`.
-- DSH peer dependencies use `^0.1.1-rc.2`; development dependencies and the lockfile resolve the exact `0.1.1-rc.2` line. Do not reintroduce older or mixed DSH prerelease families.
+- The minimum and tested DSH package baseline is `dsh-v0.1.2-alpha.5` (`0.1.2-alpha.5` on npm). The upgrade impact source is `docs/research/dsh-v0.1.2-alpha.5-cross-plugin-impact.md`; the prior rc.2 assessment remains historical evidence only.
+- DSH peer dependencies use `^0.1.2-alpha.5`; development dependencies and the lockfile resolve the exact `0.1.2-alpha.5` line with Cordis `4.0.2` and Schemastery `3.18.2`. Do not reintroduce older or mixed DSH prerelease families.
 - A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
-- rc.2 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here. Its default `prepareCall()` and request-image projection additions remain optional for this custom adapter; do not add DeepSeek Files, PiAiAdapter auth, or unused authorization/session projection work speculatively.
+- alpha.5 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here, while using `ToolCallId`, `ctx.settings.installSection()`, Session snapshot accessors, and the current Connection/client package topology. Account RPC must stay behind the plugin-owned static loopback guard: only an explicit `127.0.0.1` Web bind reaches the real dispatcher; an absent, all-interface, or unknown Web bind receives only the inert `loopback-required` handler because alpha.5 has no public per-method or carrier authority tier.
 - Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
 - Credential lifecycle Issue `#5` is implemented at `dbc8783`, and the one-time rc.1 migration Issue `#17` (`[05A]`) is implemented at `efa4aaa`. The capability series through Issue `#16` is implemented on `main`; later repairs must preserve the scope of the already completed bootstrap Issue `#3`.
 

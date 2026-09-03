@@ -283,7 +283,28 @@ function buildResponseBody(
   current.once('end', cleanup)
   current.once('error', cleanup)
   current.once('close', cleanup)
-  return Readable.toWeb(current) as ReadableStream<Uint8Array>
+  return toWebBody(current)
+}
+
+function toWebBody(stream: Readable): ReadableStream<Uint8Array> {
+  const iterable: AsyncIterable<Uint8Array> = {
+    [Symbol.asyncIterator]: () => {
+      const iterator = stream[Symbol.asyncIterator]() as AsyncIterator<Uint8Array>
+      return {
+        next: () => iterator.next(),
+        return: async () => {
+          stream.destroy()
+          return iterator.return === undefined
+            ? { done: true, value: undefined }
+            : await iterator.return()
+        },
+      }
+    },
+  }
+  // Node supports ReadableStream.from() here, but TypeScript's DOM constructor type does not expose it yet.
+  return (ReadableStream as typeof ReadableStream & {
+    from<T>(source: AsyncIterable<T> | Iterable<T>): ReadableStream<T>
+  }).from(iterable)
 }
 
 function pipeStage(source: Readable, target: Transform, mapError: (error: Error) => Error = error => error): Readable {

@@ -7,6 +7,8 @@ const socketState = vi.hoisted(() => ({
   proxyRequest: '',
   proxyResponse: new Uint8Array(),
   holdProxyResponse: false,
+  streamBody: false,
+  socketClosed: false,
 }))
 
 vi.mock('node:net', async () => {
@@ -38,8 +40,11 @@ vi.mock('node:tls', async () => {
   const { Duplex } = await vi.importActual<typeof import('node:stream')>('node:stream')
   class FakeTlsSocket extends Duplex {
     private replied = false
+    private streaming = false
 
-    override _read(): void {}
+    override _read(): void {
+      if (this.streaming && !this.destroyed) this.push(Buffer.alloc(1024))
+    }
 
     override _write(chunk: Buffer, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
       socketState.request += chunk.toString('latin1')
@@ -48,7 +53,12 @@ vi.mock('node:tls', async () => {
         this.replied = true
         queueMicrotask(() => {
           this.push(socketState.response)
-          this.push(null)
+          if (socketState.streamBody) {
+            this.streaming = true
+            this.push(Buffer.alloc(1024))
+          } else {
+            this.push(null)
+          }
         })
       }
     }
@@ -56,6 +66,7 @@ vi.mock('node:tls', async () => {
   return {
     connect: vi.fn(() => {
       const socket = new FakeTlsSocket()
+      socket.once('close', () => { socketState.socketClosed = true })
       queueMicrotask(() => { socket.emit('secureConnect') })
       return socket
     }),
@@ -72,6 +83,8 @@ beforeEach(() => {
   socketState.request = ''
   socketState.proxyRequest = ''
   socketState.holdProxyResponse = false
+  socketState.streamBody = false
+  socketState.socketClosed = false
   socketState.proxyResponse = Buffer.from('HTTP/1.1 200 Connection established\r\n\r\n', 'latin1')
   socketState.response = Buffer.from(
     'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n'
@@ -179,6 +192,46 @@ describe('fixed private raw transport', () => {
     await expect(pending).rejects.toMatchObject({ code: 'cancelled', accepted: false })
     expect(socketState.proxyRequest).not.toContain('private-access-fixture')
     expect(socketState.request).toBe('')
+  })
+
+  it('closes an active fixed-length body when cancelled before its first read', async () => {
+    socketState.streamBody = true
+    socketState.response = Buffer.from(
+      'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1073741824\r\n\r\n',
+      'latin1',
+    )
+    const response = await createPrivateTransport().request({
+      url: ANTIGRAVITY_GENERATE_ENDPOINT,
+      accessToken: 'access-secret',
+      body: '{}',
+    })
+    if (response.body === null) throw new Error('Expected an active response body')
+
+    await expect(response.body.cancel()).resolves.toBeUndefined()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(socketState.socketClosed).toBe(true)
+  })
+
+  it('cancels an active fixed-length body without enqueueing into a closed Web controller', async () => {
+    socketState.streamBody = true
+    socketState.response = Buffer.from(
+      'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1073741824\r\n\r\n',
+      'latin1',
+    )
+    const response = await createPrivateTransport().request({
+      url: ANTIGRAVITY_GENERATE_ENDPOINT,
+      accessToken: 'access-secret',
+      body: '{}',
+    })
+    if (response.body === null) throw new Error('Expected an active response body')
+    const reader = response.body.getReader()
+    await reader.read()
+    await reader.read()
+
+    await expect(reader.cancel()).resolves.toBeUndefined()
+    reader.releaseLock()
+    await new Promise<void>(resolve => { setImmediate(resolve) })
+    expect(socketState.socketClosed).toBe(true)
   })
 
   it('maps malformed gzip bodies to protocol drift without exposing bytes', async () => {

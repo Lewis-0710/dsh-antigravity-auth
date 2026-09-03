@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveModelWithTier } from '@cortexkit/antigravity-auth-core'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
 import { HarnessError } from '@deepseek-ai/dsh-llm'
@@ -32,7 +32,7 @@ export const ANALYZE_VIDEO_TOOL_NAME = 'analyze_video'
 export const UNDERSTAND_VIDEO_TOOL_NAME = ANALYZE_VIDEO_TOOL_NAME
 export const ANTIGRAVITY_VIDEO_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:generateContent` as const
 export const ANTIGRAVITY_VIDEO_MODEL = 'antigravity-gemini-3.7-flash'
-export const ANTIGRAVITY_VIDEO_SETTINGS_NAMESPACE = settingsNamespace('antigravity-video')
+export const ANTIGRAVITY_VIDEO_SETTINGS_NAMESPACE = 'antigravity-video'
 
 export interface AntigravityVideoSettings {
   readonly enabled: boolean
@@ -154,9 +154,11 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
   if (candidate.tools === undefined || candidate.fs === undefined) return
   let current = (): AntigravityVideoSettings => config
   let lifecycle: CapabilityLifecycle | undefined
-  installSettingsSection(ctx, ANTIGRAVITY_VIDEO_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source; lifecycle?.sync() },
-    onChange: () => { lifecycle?.sync() },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, ANTIGRAVITY_VIDEO_SETTINGS_NAMESPACE, Config, config, {
+      setSource: source => { current = source; lifecycle?.sync() },
+      onChange: () => { lifecycle?.sync() },
+    })
   })
   const provided = candidate.get?.('antigravityAuth')
   const auth = isAuthService(provided) ? provided : createAntigravityAuthService()
@@ -166,7 +168,7 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
     id: 'video',
     enabled: () => current().enabled,
     register: () => {
-      const disposers = createAntigravityVideoTools({ auth, fs: candidate.fs!, settings: current }).map(tool => candidate.tools!.register(tool))
+      const disposers = createAntigravityVideoTools({ auth, fs: candidate.fs!, settings: () => current() }).map(tool => candidate.tools!.register(tool))
       return () => { for (const dispose of disposers.reverse()) dispose() }
     },
     ownsAuth: auth !== provided,

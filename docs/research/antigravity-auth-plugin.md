@@ -1,13 +1,13 @@
 # DSH Antigravity OAuth 模拟登录插件：实现前研究（单账号、非官方）
 
-> 修订日期：**2026-08-25**
+> 修订日期：**2026-09-02**
 > 目标包名：**`dsh-antigravity-auth`**
 > 用户确认的主路径：在 DSH Host 内模拟 Antigravity OAuth，并调用社区逆向得到的 Antigravity 私有 Cloud Code contract；**不是**官方 `agy` 子进程桥，也不是 AI Studio API key / Vertex ADC。
 > 账号范围：只支持用户自己的**单个账号**；不提供多账号、轮换、quota pool、header-style fallback 或跨账号重试。
 > `dsh-codex-auth` 基线：`0.2.2`，commit [`e9b6cb6ba3da927da0d2f10458008aec1be58bfc`](https://github.com/suntianc/dsh-codex-auth/tree/e9b6cb6ba3da927da0d2f10458008aec1be58bfc)。
-> 社区逆向基线：`@cortexkit/antigravity-auth-core@2.1.0` / `@cortexkit/pi-antigravity-auth@2.1.0`，commit [`8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73`](https://github.com/cortexkit/antigravity-auth/tree/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73)。
-> 当前 DSH 开发基线：[`dsh-v0.1.1-rc.2`](https://github.com/deepseek-ai/deepseek-harness/tree/b150a551b8d465e31e418e1b2eaf5e79bbb7d28e)，commit `b150a551b8d465e31e418e1b2eaf5e79bbb7d28e`；原始 research 使用 rc.7/rc.8 的历史证据保留用于对照。
-> 升级影响依据本项目报告 [`dsh-v0.1.1-rc.2-plugin-impact.md`](dsh-v0.1.1-rc.2-plugin-impact.md)：本插件需要 coherent dependency/peer 升级与完整离线回归，但现有 public seams 不要求行为迁移。
+> 社区逆向基线：`@cortexkit/antigravity-auth-core@2.2.0` / `@cortexkit/pi-antigravity-auth@2.1.0`，commit [`351c2bf09f007792e7bc183ba73d11e2c57146fe`](https://github.com/cortexkit/antigravity-auth/tree/351c2bf09f007792e7bc183ba73d11e2c57146fe)。
+> 当前 DSH 开发基线：[`dsh-v0.1.2-alpha.5`](https://github.com/deepseek-ai/deepseek-harness/tree/db6bdc3576c2d4e7c965e8e3ed0c2a731eed87f5)，commit `db6bdc3576c2d4e7c965e8e3ed0c2a731eed87f5`；原始 research 与 rc.2 影响报告保留为历史证据。
+> 升级影响依据本项目报告 [`dsh-v0.1.2-alpha.5-cross-plugin-impact.md`](dsh-v0.1.2-alpha.5-cross-plugin-impact.md)：本插件需要 coherent dependency/peer graph、公开 API owner 迁移和新的 plugin-owned account RPC activation guard。
 > 本次仍是**研究与设计**：未读取用户 token/keychain/cookie，未启动真实 OAuth，未调用任何私有 endpoint，也未消耗 Antigravity 额度。
 
 ## A. 用户已确认的不可变约束
@@ -24,12 +24,13 @@
 
 ## 0. 结论先行
 
-### 0.0 DSH `0.1.1-rc.2` 升级策略
+### 0.0 DSH `0.1.2-alpha.5` 升级策略
 
-- 直接 DSH peer range 升到 `^0.1.1-rc.2`；dev dependencies 与 lockfile 使用 exact rc.2 coherent graph，禁止混合更早的 DSH prerelease family。
+- 直接 DSH peer range 升到 `^0.1.2-alpha.5`；dev dependencies 与 lockfile 使用 exact alpha.5 coherent graph，并同步 Cordis `4.0.2` 与 Schemastery `3.18.2`，禁止混合其它 DSH prerelease family。
 - 将升级作为独立 compatibility prefactor；不追改已经实现的 capability shell/bootstrap ticket。
 - 升级 gate 是 clean install → `pnpm peers check` → OAuth/RPC/UI/Wire Identity regression → 完整 `pnpm run check`。
-- rc.2 新增默认 `LlmAdapter.prepareCall()`、模型输入模态投影、`ImageAttachmentRef.originalDimensions` 与 `AttachmentStore.readImageRequest()`；现有 custom adapter 的 `stream()`、`saveImage()`、`readImage()` 路径保持兼容。
+- 迁移到 `ToolCallId`、`ctx.settings.installSection()`、Session snapshot accessor、Connection 的 `ConnectionRpcResult` 以及 Cordis/UI Settings/UI Renderer 对应的 Client type owners；移除 alpha.5 未发布的 runtime/apiproxy 旧包。
+- alpha.5 不再提供逐 method 或 Host 侧 carrier authority。插件只有在 WebServer 明确绑定 `127.0.0.1` 时使用真实 account dispatcher；缺失或其它 bind 只注册 value-free denial stub。Client UI 再按 `ConnectionHandle.isLoopback` 收敛可见面，但该 hint 不承担授权；owner-contained 自定义 carrier 在上游提供 Host 侧事实前保持 fail closed。
 - 本插件继续使用 plugin-owned private transport 与 Wire Identity，不自动采用 DeepSeek Files API，也不为未使用的 request-image seam 增加 shallow adapter。
 - 后续 DSH prerelease family 升级必须先产出新的 impact assessment，再整体升级 dependency graph。
 
@@ -55,7 +56,7 @@
 
 Google FAQ 明确写明，第三方软件、工具或服务使用 Antigravity 登录违反条款，可能导致账号暂停或终止。[Antigravity FAQ](https://antigravity.google/docs/faq/)；[Antigravity Additional Terms](https://antigravity.google/terms)
 
-社区项目自身也给出同样警告，并提到 suspension、ban 与 shadow-ban 风险。[CortexKit README — Risk warning](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/README.md#risk-and-terms-of-service-warning)
+社区项目自身也给出同样警告，并提到 suspension、ban 与 shadow-ban 风险。[CortexKit README — Risk warning](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/README.md#risk-and-terms-of-service-warning)
 
 用户只用自己的单个账号，可以移除账号池与额度规避设计，但**不会改变 OAuth client/private endpoint 仍未获 Google 支持这一事实**。
 
@@ -72,7 +73,7 @@ Google FAQ 明确写明，第三方软件、工具或服务使用 Antigravity �
 | `list_images` | DSH provider-independent 能力 | **Gate I 后可实现** |
 | 单账号 quota | 私有 quota endpoint 社区可见 | **可实现，未获官方保证** |
 | Workspace 视频理解 | 社区 modality 未声明 video | **仅 Gate V POC，不能预先承诺** |
-| Web composer 原生视频附件 | DSH `0.1.1-rc.2` impact assessment 仍无 video lifecycle | **当前不可做，需独立 DSH 上游任务** |
+| Web composer 原生视频附件 | DSH `0.1.2-alpha.5` impact assessment 仍无 video lifecycle | **当前不可做，需独立 DSH 上游任务** |
 
 ## 1. 政策与证据分层
 
@@ -86,16 +87,16 @@ Google FAQ 明确写明，第三方软件、工具或服务使用 Antigravity �
 
 固定社区源码中与本方案直接相关的证据：
 
-- OAuth metadata、scopes、redirect、私有 endpoints：[`constants.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/constants.ts)
-- authorize/exchange/refresh/project lookup：[`antigravity/oauth.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/antigravity/oauth.ts)
-- project load/onboarding：[`project.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/project.ts)
-- raw HTTP/1.1 transport：[`agy-transport.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/agy-transport.ts)
-- request/session metadata：[`agy-request-metadata.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/agy-request-metadata.ts)
-- model registry：[`model-registry.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/model-registry.ts)
-- Pi request/stream mapping：[`packages/pi/src/convert.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/pi/src/convert.ts)；[`stream.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/pi/src/stream.ts)
-- grounded search：[`packages/opencode/src/plugin/search.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/opencode/src/plugin/search.ts)
-- image inlineData admission：[`request-helpers.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/opencode/src/plugin/request-helpers.ts)；[`image-saver.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/opencode/src/plugin/image-saver.ts)
-- quota/model probes：[`quota-manager.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/quota-manager.ts)
+- OAuth metadata、scopes、redirect、私有 endpoints：[`constants.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/constants.ts)
+- authorize/exchange/refresh/project lookup：[`antigravity/oauth.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/antigravity/oauth.ts)
+- project load/onboarding：[`project.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/project.ts)
+- raw HTTP/1.1 transport：[`agy-transport.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/agy-transport.ts)
+- request/session metadata：[`agy-request-metadata.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/agy-request-metadata.ts)
+- model registry：[`model-registry.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/model-registry.ts)
+- Pi request/stream mapping：[`packages/pi/src/convert.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/pi/src/convert.ts)；[`stream.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/pi/src/stream.ts)
+- grounded search：[`packages/opencode/src/plugin/search.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/opencode/src/plugin/search.ts)
+- image inlineData admission：[`request-helpers.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/opencode/src/plugin/request-helpers.ts)；[`image-saver.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/opencode/src/plugin/image-saver.ts)
+- quota/model probes：[`quota-manager.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/quota-manager.ts)
 
 ## 2. Gate 0：DSH attribution 与私有 transport 身份
 
@@ -111,7 +112,7 @@ DSH `LlmAdapter` 公共类型明确要求每个 provider HTTP request 包含 `at
 
 ### 2.2 社区 transport 的行为
 
-社区 raw transport 复现了抓取到的 `agy` HTTP/1.1 framing、header 顺序、chunked body 与 CLI-shaped User-Agent；`fingerprint.ts` 也明确说明这些值来自抓包观察。[`fingerprint.ts`](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/core/src/fingerprint.ts)
+社区 raw transport 复现了抓取到的 `agy` HTTP/1.1 framing、header 顺序、chunked body 与 AGY CLI 1.1.24 User-Agent；content request capture 只含该 provider User-Agent，不含 obsolete desktop `X-Goog-Api-Client` / `Client-Metadata` headers。`fingerprint.ts` 也明确说明这些值来自抓包观察。[`fingerprint.ts`](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/core/src/fingerprint.ts)
 
 但没有官方文档证明私有 endpoint **一定拒绝**其它 User-Agent。不能把社区为兼容而做的模拟，升级成已证实的服务端校验规则。
 
@@ -157,7 +158,7 @@ DSH attribution carrier:      X-DeepSeek-Harness-Attribution: deepseek-harness/.
 - offline access + consent；
 - authorization-code exchange 与 refresh-token exchange。
 
-报告不重复 client id/client metadata 的具体字符串；实现优先从**固定版本** `@cortexkit/antigravity-auth-core@2.1.0` 导入。Authorization URL 按 OAuth 协议必然把 client id、redirect、scopes 与 PKCE challenge 交给浏览器；除此之外，不把这些值拆成 settings/status 字段或写进日志，token-exchange metadata 只留在 Host。
+报告不重复 client id/client metadata 的具体字符串；实现优先从**固定版本** `@cortexkit/antigravity-auth-core@2.2.0` 导入。Authorization URL 按 OAuth 协议必然把 client id、redirect、scopes 与 PKCE challenge 交给浏览器；除此之外，不把这些值拆成 settings/status 字段或写进日志，token-exchange metadata 只留在 Host。
 
 静态 OAuth client metadata 对 distributed desktop application 无法构成真正机密，但它仍是 Antigravity application 的绑定信息，不应被误标成用户 secret，也不应成为可编辑 settings。
 
@@ -293,7 +294,7 @@ OAuth 成功不等于私有模型可用。社区通过私有 `v1internal:loadCod
 
 ## 4. 社区 package 的复用边界
 
-### 4.1 可以复用的 `@cortexkit/antigravity-auth-core@2.1.0` 公共面
+### 4.1 可以复用的 `@cortexkit/antigravity-auth-core@2.2.0` 公共面
 
 固定 exact version 与 lockfile integrity，审计后只导入：
 
@@ -316,7 +317,7 @@ OAuth 成功不等于私有模型可用。社区通过私有 `v1internal:loadCod
 
 ### 4.3 为什么不能直接使用 `@cortexkit/pi-antigravity-auth`
 
-该 package 的唯一入口是一个 Pi Coding Agent `ExtensionAPI` 注册器，不是 `@earendil-works/pi-ai` `Provider` factory，也没有公开 `./stream` / `./convert` subpath。[Pi package manifest](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/pi/package.json)；[Pi entry](https://github.com/cortexkit/antigravity-auth/blob/8efa48ba3d7f2d6f97e0a390fc56e0588c4d6f73/packages/pi/src/index.ts)
+该 package 的唯一入口是一个 Pi Coding Agent `ExtensionAPI` 注册器，不是 `@earendil-works/pi-ai` `Provider` factory，也没有公开 `./stream` / `./convert` subpath。[Pi package manifest](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/pi/package.json)；[Pi entry](https://github.com/cortexkit/antigravity-auth/blob/351c2bf09f007792e7bc183ba73d11e2c57146fe/packages/pi/src/index.ts)
 
 因此不能把默认 export 塞进 DSH `PiAiAdapter`。标准 pi-ai Google provider 又调用公开 `generativelanguage.googleapis.com` + API key，不等于 private Cloud Code Bearer transport。
 
@@ -327,9 +328,10 @@ OAuth 成功不等于私有模型可用。社区通过私有 `v1internal:loadCod
 ### 5.1 route 与模型
 
 - DSH provider route：`google-antigravity`；
-- 模型初始 catalog 只取 community registry 中 `antigravity-*` entries；不暴露 Gemini CLI fallback entries；
-- 登录后用私有 `fetchAvailableModels` 做 advisory intersection；
-- catalog 缓存有版本/时间；失败时保留“社区 snapshot，未验证”标记，而不是冒充 live 可用；
+- 模型初始 catalog 只取 audited core `2.2.0` community registry 中 `antigravity-*` entries；不暴露 Gemini CLI fallback entries；
+- Gemini 3.8 Flash 使用 core 捕获的 `gemini-3.8-flash-medium` 基础 wire route、`MODEL_PLACEHOLDER_M319` metadata 与原生 Medium 默认 reasoning effort；显式 Low/High effort 分别解析到 captured tier route 与对应 model enum；
+- 登录后用私有 `fetchAvailableModels` 做 advisory intersection；服务端的 `gemini-3.8-flash-tiered` 目录别名规范化到 3.8 tier family，成功结果会过滤账号目录中不存在的旧路由；
+- catalog 缓存有版本/时间；失败时保留“社区 snapshot，未验证”标记，而不是冒充 live 可用，因此降级期间可能继续显示 core 仍收录的 Gemini 3.5 Flash；
 - image-output-only route 不进入普通 chat catalog，交给 Image tool。
 
 ### 5.2 DSH request → private request
@@ -340,17 +342,17 @@ OAuth 成功不等于私有模型可用。社区通过私有 `v1internal:loadCod
 - `messages` → Gemini-shaped `contents`；
 - user `ImageBlock` → `ctx.attachments.readImage()` → bounded base64 `inlineData`；
 - tool schemas → sanitizer 后的 `functionDeclarations`；
-- reasoning effort → model resolver 的 thinking budget/level；
+- reasoning effort → model resolver 的 thinking budget/level；Gemini 3.8 Low/Medium/High 使用 AGY 1.1.24 capture 的 numeric budgets `1000/4000/-1`，而不是 `thinkingLevel`；
 - max tokens/temperature/stop 仅在私有 schema 已验证时发送；不支持的 option 明确报错；
 - `sessionId` 只用于产生 adapter-private request metadata，不直接泄露 DSH durable id；
-- outer envelope 包含 community-observed project/request/model/requestType fields。
+- outer envelope 包含 community-observed project/request/model/`userAgent: "antigravity"`/requestType fields，并按 captured 顺序序列化。
 
 ### 5.3 private stream → DSH `StreamChunk`
 
 - SSE `candidates[].content.parts[].text` → text/reasoning delta；
 - `functionCall` → `tool-call-delta`，arguments 保持 raw JSON string；
 - usageMetadata → `TokenUsage`，先发 usage 再发 terminal finish；
-- finish reason → `stop/tool-calls/max-tokens/error/aborted`；
+- finish reason → `stop/tool-calls/max-tokens/error/aborted`；成功 terminal event 后继续排空 SSE framing/EOF，再完成 DSH stream，禁止中途取消 Node raw-to-Web reader；
 - embedded error/promptFeedback → structured `LlmError`；
 - unknown part 只记录类型名/大小，不记录内容，并按 protocol-drift 失败。
 
@@ -457,7 +459,7 @@ Gate I 未通过时，不注册 Image tools/gallery。
 
 Google Gemini 的公开 API 支持视频，只能作为对照，不能证明 Antigravity private endpoint 接受相同 payload。[Gemini video understanding](https://ai.google.dev/gemini-api/docs/video-understanding)
 
-DSH `0.1.1-rc.2` attachment seam 仍只接受 PNG/JPEG/WebP/GIF，没有 durable video ref、browser prompt part 或 ACP video projection。[DSH attachment README](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.1-rc.2/packages/attachment/attachment/README.md)
+DSH `0.1.2-alpha.5` attachment seam 仍只接受 PNG/JPEG/WebP/GIF，没有 durable video ref、browser prompt part 或 ACP video projection。[DSH attachment README](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.1.2-alpha.5/packages/attachment/attachment/README.md)
 
 ### 8.2 Workspace Tool POC
 
@@ -688,7 +690,7 @@ Host rows 独立挂载：Auth/LLM、Search、Image、Video。未通过 Gate 的 
 
 - 新独立 private repository；
 - Auth store、PKCE coordinator、loopback server 的 mock；
-- fixed core 2.1.0 dependency audit；
+- fixed core 2.2.0 dependency audit；
 - private client/SSE/adapter fixtures；
 - UI risk/status；
 - 全部 no-network tests。

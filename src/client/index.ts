@@ -1,9 +1,10 @@
 /** Browser half of the private Antigravity bootstrap capability bundle. */
 
-import type { ClientContext, SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { createAntigravityAuthRpcClient } from '../rpc-contract.ts'
 import { AntigravityAuthSettings } from './AntigravityAuthSettings.tsx'
@@ -35,6 +36,7 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'antigravity-auth: copy dictionaries')
 
   const connection = ctx.get('connection') as unknown as ConnectionHandle
+  if (!connection.isLoopback) return
   const rpc = createAntigravityAuthRpcClient(connection.rpc)
   const t = ctx.locale.bind(NS) as AntigravityAuthSettingsProps['t']
   const settingsScope = (ctx as ClientContext & { settingsScope?: { bind<T>(spec: { namespace: string; decode?: (value: unknown) => T | undefined }): SettingsScope<T> } }).settingsScope

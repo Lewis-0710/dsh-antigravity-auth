@@ -3,6 +3,7 @@
 import { LOGIN_ERROR_CODES, type LoginErrorCode } from './login-types.ts'
 
 const OPERATION_ERROR_CODES = [
+  'loopback-required',
   'invalid-grant',
   'network',
   'timeout',
@@ -24,6 +25,7 @@ export type SafeRpcErrorCode = (typeof SAFE_RPC_ERROR_CODES)[number]
 
 const SAFE_RPC_ERROR_MESSAGES: Readonly<Partial<Record<SafeRpcErrorCode, string>>> = Object.freeze({
   'bad-request': 'antigravity-auth: invalid request',
+  'loopback-required': 'Antigravity account controls require a loopback-bound DSH Host',
   cancelled: 'The operation was cancelled',
   'risk-acknowledgement-required': 'Risk acknowledgement is required before login',
   'port-conflict': 'The fixed OAuth callback port is already in use',

@@ -11,13 +11,13 @@ import { Buffer } from 'node:buffer'
 import {
   ANTIGRAVITY_ENDPOINT,
   ANTIGRAVITY_ENDPOINT_PROD,
-  ANTIGRAVITY_HEADERS,
   buildAgyCliHeaderPairs,
+  buildAntigravityHarnessUserAgent,
 } from '@cortexkit/antigravity-auth-core'
 import { attributionHeaders as dshAttributionHeaders } from '@deepseek-ai/dsh-llm'
 
 export const DSH_ATTRIBUTION_HEADER = 'X-DeepSeek-Harness-Attribution' as const
-export const AGY_PROVIDER_USER_AGENT = ANTIGRAVITY_HEADERS['User-Agent']
+export const AGY_PROVIDER_USER_AGENT = buildAntigravityHarnessUserAgent()
 export const ANTIGRAVITY_WIRE_ORIGIN = new URL(ANTIGRAVITY_ENDPOINT).origin
 export const ANTIGRAVITY_WIRE_ORIGINS = Object.freeze([
   new URL(ANTIGRAVITY_ENDPOINT).origin,
@@ -38,8 +38,6 @@ export type WireHeaderPair = readonly [name: string, value: string]
 
 export interface WireIdentityHeaders {
   readonly 'User-Agent': string
-  readonly 'X-Goog-Api-Client': string
-  readonly 'Client-Metadata': string
   readonly [DSH_ATTRIBUTION_HEADER]: string
 }
 
@@ -63,14 +61,9 @@ export class WireIdentityError extends Error {
 /** Build the fixed provider identity plus the one required DSH carrier. */
 export function buildWireIdentityHeaders(): WireIdentityHeaders {
   const attribution = readAttributionValue()
-  const provider = {
-    'User-Agent': ANTIGRAVITY_HEADERS['User-Agent'],
-    'X-Goog-Api-Client': ANTIGRAVITY_HEADERS['X-Goog-Api-Client'],
-    'Client-Metadata': ANTIGRAVITY_HEADERS['Client-Metadata'],
-  }
-  for (const [name, value] of Object.entries(provider)) assertSafeHeaderValue(name, value, 'WIRE_PROVIDER_HEADER_UNSAFE')
+  assertSafeHeaderValue('User-Agent', AGY_PROVIDER_USER_AGENT, 'WIRE_PROVIDER_HEADER_UNSAFE')
   return Object.freeze({
-    ...provider,
+    'User-Agent': AGY_PROVIDER_USER_AGENT,
     [DSH_ATTRIBUTION_HEADER]: attribution,
   })
 }
@@ -113,11 +106,7 @@ export function createWireIdentity(): WireIdentity {
       const immutablePair = Object.freeze([pair[0], pair[1]] as const)
       result.push(immutablePair)
       if (pair[0] === 'User-Agent') {
-        result.push(
-          Object.freeze(['X-Goog-Api-Client', headers['X-Goog-Api-Client']]),
-          Object.freeze(['Client-Metadata', headers['Client-Metadata']]),
-          Object.freeze([DSH_ATTRIBUTION_HEADER, headers[DSH_ATTRIBUTION_HEADER]]),
-        )
+        result.push(Object.freeze([DSH_ATTRIBUTION_HEADER, headers[DSH_ATTRIBUTION_HEADER]]))
       }
     }
     return Object.freeze(result)
@@ -146,19 +135,15 @@ export function assertWireIdentityInvariant(value: unknown): asserts value is Wi
     throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity headers must be an object')
   }
   const headers = value as Record<string, unknown>
-  const expected = ['Client-Metadata', 'User-Agent', 'X-Goog-Api-Client', DSH_ATTRIBUTION_HEADER].sort()
+  const expected = ['User-Agent', DSH_ATTRIBUTION_HEADER].sort()
   const keys = Object.keys(headers).sort()
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity headers contain an unexpected field')
   }
-  if (
-    headers['User-Agent'] !== ANTIGRAVITY_HEADERS['User-Agent']
-    || headers['X-Goog-Api-Client'] !== ANTIGRAVITY_HEADERS['X-Goog-Api-Client']
-    || headers['Client-Metadata'] !== ANTIGRAVITY_HEADERS['Client-Metadata']
-  ) {
+  if (headers['User-Agent'] !== AGY_PROVIDER_USER_AGENT) {
     throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity provider headers changed')
   }
-  if (headers[DSH_ATTRIBUTION_HEADER] === ANTIGRAVITY_HEADERS['User-Agent']) {
+  if (headers[DSH_ATTRIBUTION_HEADER] === AGY_PROVIDER_USER_AGENT) {
     throw new WireIdentityError('WIRE_IDENTITY_INVARIANT', 'Wire identity attribution was replaced by the provider')
   }
   for (const key of expected) {
@@ -198,7 +183,7 @@ function readAttributionValue(): string {
   if (attribution === undefined) {
     throw new WireIdentityError('WIRE_ATTRIBUTION_MISSING', 'DSH attribution did not contain a User-Agent')
   }
-  if (attribution === ANTIGRAVITY_HEADERS['User-Agent']) {
+  if (attribution === AGY_PROVIDER_USER_AGENT) {
     throw new WireIdentityError(
       'WIRE_ATTRIBUTION_PROVIDER_OVERRIDE',
       'DSH attribution was replaced by the Antigravity provider identity',

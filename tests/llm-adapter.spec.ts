@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { CONTEXT_WINDOW_EXCEEDED_CODE } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { CONTEXT_WINDOW_EXCEEDED_CODE, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions, Message, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { createApiProxy, RpcId } from '@deepseek-ai/dsh-host-apiproxy'
 import { AntigravityAdapter, ANTIGRAVITY_AVAILABLE_MODELS_ENDPOINT, ANTIGRAVITY_PROVIDER, buildAntigravityGeneratePayload } from '../src/llm-adapter.ts'
 import type { HostCredential } from '../src/credential-coordinator.ts'
 import { PrivateTransportError, type PrivateTransportRequest } from '../src/private-transport.ts'
@@ -68,6 +67,37 @@ describe('Antigravity LLM adapter', () => {
     const finish = chunks.at(-1)
     expect(finish?.type).toBe('finish')
     if (finish?.type === 'finish') expect(finish.replayState).toMatchObject({ response: { provider: ANTIGRAVITY_PROVIDER }, blocks: [{ kind: 'text', signature: 'provider-sig' }] })
+  })
+
+  it('drains the Gemini 3.8 stream after a terminal event instead of cancelling the live body early', async () => {
+    const encoder = new TextEncoder()
+    let cancelled = false
+    let tailDelivered = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"response":{"parts":[{"text":"ok"}],"finishReason":"STOP"}}\n\n'))
+        timer = setTimeout(() => {
+          tailDelivered = true
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'))
+          controller.close()
+        }, 10)
+      },
+      cancel() {
+        cancelled = true
+        if (timer !== undefined) clearTimeout(timer)
+      },
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request: vi.fn(async () => new Response(body)) },
+    })
+
+    const chunks = await collect(adapter.stream(options({ model: 'antigravity-gemini-3.8-flash' })))
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(tailDelivered).toBe(true)
+    expect(cancelled).toBe(false)
   })
 
   it.each([
@@ -489,6 +519,87 @@ describe('Antigravity LLM adapter', () => {
     expect(chunks.some(chunk => chunk.type === 'text-delta' && chunk.text === 'ok')).toBe(true)
   })
 
+  it('exposes newly supported Gemini 3.8 while filtering absent legacy models through the public catalog', async () => {
+    const ctx = new Context()
+    try {
+      const runtime = new LlmRuntime(ctx)
+      runtime.registerAdapter([ANTIGRAVITY_PROVIDER], new AntigravityAdapter({
+        auth: { credential: vi.fn(async () => credential('access')) },
+        transport: {
+          request: vi.fn(async () => new Response(JSON.stringify({
+            models: {
+              'gemini-3.8-flash-tiered': { displayName: 'Gemini 3.8 Flash' },
+            },
+          }))),
+        },
+      }))
+
+      await expect(runtime.listModels(ANTIGRAVITY_PROVIDER).then(models => models.map(model => model.id)))
+        .resolves.toEqual(['antigravity-gemini-3.8-flash'])
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
+  it('uses Gemini 3.8 native medium as the public runtime default', async () => {
+    const request = vi.fn(async (_input: PrivateTransportRequest) => new Response(
+      'data: {"response":{"parts":[{"text":"ok"}],"finishReason":"STOP"}}\n\n',
+    ))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request },
+    })
+
+    const resolved = await adapter.resolveModel(ANTIGRAVITY_PROVIDER, 'antigravity-gemini-3.8-flash')
+    expect(resolved.reasoning?.defaultEffort).toBe('medium')
+
+    await collectThroughRuntime(adapter, options({ model: 'antigravity-gemini-3.8-flash' }))
+    const body = JSON.parse(String(request.mock.calls[0]?.[0].body))
+    expect(body).toMatchObject({
+      model: 'gemini-3.8-flash-medium',
+      userAgent: 'antigravity',
+      requestType: 'agent',
+      request: {
+        labels: { model_enum: 'MODEL_PLACEHOLDER_M319' },
+        generationConfig: {
+          maxOutputTokens: 65536,
+          thinkingConfig: { includeThoughts: true, thinkingBudget: 4000 },
+        },
+      },
+    })
+    expect(body.request.generationConfig.thinkingConfig).not.toHaveProperty('thinkingLevel')
+    expect(Object.keys(body)).toEqual(['project', 'requestId', 'request', 'model', 'userAgent', 'requestType'])
+  })
+
+  it('maps an explicit Gemini 3.8 High effort to the captured High wire route', async () => {
+    const request = vi.fn(async (_input: PrivateTransportRequest) => new Response(
+      'data: {"response":{"parts":[{"text":"ok"}],"finishReason":"STOP"}}\n\n',
+    ))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access')) },
+      transport: { request },
+    })
+
+    await collectThroughRuntime(adapter, options({
+      model: 'antigravity-gemini-3.8-flash',
+      reasoningEffort: ReasoningEffortId('high'),
+    }))
+    const body = JSON.parse(String(request.mock.calls[0]?.[0].body))
+    expect(body).toMatchObject({
+      model: 'gemini-3.8-flash-high',
+      userAgent: 'antigravity',
+      requestType: 'agent',
+      request: {
+        labels: { model_enum: 'MODEL_PLACEHOLDER_M318' },
+        generationConfig: {
+          maxOutputTokens: 65536,
+          thinkingConfig: { includeThoughts: true, thinkingBudget: -1 },
+        },
+      },
+    })
+    expect(body.request.generationConfig.thinkingConfig).not.toHaveProperty('thinkingLevel')
+  })
+
   it('intersects the pinned snapshot with the authenticated live model catalog', async () => {
     const transport = {
       request: vi.fn(async (_input: PrivateTransportRequest) => new Response(JSON.stringify({
@@ -571,6 +682,7 @@ describe('Antigravity LLM adapter', () => {
       transport: { request: rateRequest },
     })
     const rateSnapshot = rateLimited.catalogSnapshot().models.map(model => model.id)
+    expect(rateSnapshot).toContain('antigravity-gemini-3.8-flash')
     await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER).then(models => models.map(model => model.id)))
       .resolves.toEqual(rateSnapshot)
     await expect(rateLimited.listModels(ANTIGRAVITY_PROVIDER)).resolves.toHaveLength(rateSnapshot.length)
@@ -687,27 +799,16 @@ describe('Antigravity LLM adapter', () => {
         transport: { request: vi.fn(async () => new Response('', { status: 429 })) },
       })
       runtime.registerAdapter([ANTIGRAVITY_PROVIDER], adapter)
-      const api = createApiProxy({
-        llm: runtime,
-        userQuestions: { registerProvider: vi.fn(() => vi.fn()) },
-        inject: vi.fn(),
-        on: vi.fn(),
-        effect: vi.fn(),
-        get: vi.fn(() => undefined),
-      } as never, {
-        defaultModelSelection: () => ({ provider: ANTIGRAVITY_PROVIDER, model: 'antigravity-gemini-3.7-flash' }),
-        cwd: process.cwd(),
-      })
 
-      const response = await api.llm.models({ rpcId: RpcId('issue-19'), payload: {} })
-      expect(response.result.ok).toBe(true)
-      if (!response.result.ok) throw new Error(response.result.error.message)
-      expect(response.result.value.failures).toEqual([])
-      expect(response.result.value.groups).toHaveLength(1)
-      expect(response.result.value.groups[0]).toMatchObject({
-        id: ANTIGRAVITY_PROVIDER,
-        models: adapter.catalogSnapshot().models.map(model => ({ id: model.id })),
-      })
+      expect(runtime.listProviders()).toEqual([
+        expect.objectContaining({ id: ANTIGRAVITY_PROVIDER }),
+      ])
+      await expect(runtime.listModels(ANTIGRAVITY_PROVIDER)).resolves.toEqual(
+        adapter.catalogSnapshot().models.map(model => expect.objectContaining({
+          provider: ANTIGRAVITY_PROVIDER,
+          id: model.id,
+        })),
+      )
     } finally {
       await ctx.fiber.dispose()
     }

@@ -27,7 +27,7 @@
 
 所有 secret-bearing private requests 由一个 Host-only Wire Identity module 统一构造 headers/framing。OAuth code/verifier/token、private response bodies 和媒体 base64 永不进入客户端、RPC、settings、日志或 fixture。默认 CI 只运行 mock/fixture；live gates 独立 opt-in，并按 OAuth、attribution/text、LLM、Search、Image、Video 顺序最小化执行。
 
-开发与验证基线升级为 DSH `0.1.1-rc.2`。peer range 从 `^0.1.1-rc.2` 开始，开发依赖与 lockfile 使用 coherent exact rc.2 graph；干净安装必须通过 `pnpm peers check`。影响评估确认 rc.2 新增的默认 `LlmAdapter.prepareCall()`、模型输入模态投影及 AttachmentStore request-image 类型均为兼容扩展，本插件继续使用自有 private transport 与 `AttachmentStore.readImage()`，不引入 DeepSeek Files、PiAiAdapter auth、`dsh-authorization` 或 session projection 迁移。
+开发与验证基线升级为 DSH `0.1.2-alpha.5`。直接 DSH peer range 从 `^0.1.2-alpha.5` 开始，开发依赖与 lockfile 使用 coherent exact alpha.5 graph，并同步 Cordis `4.0.2` 与 Schemastery `3.18.2`；干净安装必须通过 `pnpm peers check`。插件使用 alpha.5 的 `ToolCallId`、`ctx.settings.installSection()`、Session snapshot accessor 和新的 Connection/client package topology。由于 alpha.5 移除了逐 RPC method 与 Host 侧 carrier authority，只有明确的 `127.0.0.1` Web bind 启用真实 account dispatcher；缺失、all-interface 或未知 Web bind 只注册 value-free `loopback-required` stub，客户端同时按公开 `ConnectionHandle.isLoopback` 隐藏非 loopback account UI。客户端 hint 不是授权事实，owner-contained 自定义 carrier 在上游提供对应 Host seam 前仍 fail closed。
 
 ## User Stories
 
@@ -62,7 +62,7 @@
 29. As a 安全审阅者, I want provider User-Agent 与 secondary identity value 都经过 header-safe validation, so that CRLF、控制字符和 per-request identity 注入被拒绝。
 30. As a 安全审阅者, I want private callers 无法省略或覆盖 DSH secondary attribution, so that plugin-owned policy 不会成为通用隐身开关。
 31. As a 插件维护者, I want 所有 private operations 使用同一个 Wire Identity module, so that Search、Image、Video、Quota 与 LLM 不会产生身份漂移。
-32. As a 插件维护者, I want 插件以 DSH `0.1.1-rc.2` 为最低和测试基线并保持 coherent peer graph, so that 不兼容或混合 prerelease family 会在安装检查时 fail-loud。
+32. As a 插件维护者, I want 插件以 DSH `0.1.2-alpha.5` 为最低和测试基线并保持 coherent peer graph, so that 不兼容或混合 prerelease family 会在安装检查时 fail-loud。
 33. As a 插件维护者, I want 所有 private requests 通过一个 Wire Identity module, so that exact `agy` identity 与 DSH attribution 不会散落在多个 callers 中。
 34. As a 插件维护者, I want 固定 community core 版本和 lockfile integrity, so that OAuth metadata 与 wire identity 不会被无审计升级改变。
 35. As a 安全审阅者, I want private endpoint 是不可配置 allowlist, so that用户不能把 Bearer token 发送到任意 host。
@@ -129,15 +129,15 @@
 - 所有实现都位于 `dsh-antigravity-auth` capability bundle；DSH core repository、runtime packages 与用户 profile 保持不变。
 - 不创建替代整个 `ctx.llm` 的 Cordis plugin，不使用 package-manager override，不 patch installed packages，也不复制 DSH core implementation。
 - 插件通过现有 `LlmAdapter` seam 注册自有 provider，并把 exact provider identity 与 DSH secondary attribution 的 carrier adaptation 限制在插件内部。
-- DSH compatibility baseline 是 `0.1.1-rc.2`：所有直接 DSH peers 使用 `^0.1.1-rc.2`，开发依赖固定 exact rc.2，lockfile 不允许混入更早的 DSH prerelease family；每个后续 issue 都在该基线上开发。
-- 该升级是独立 compatibility prefactor：在已完成的 credential lifecycle 后、project discovery 前执行；它不追改或重新打开已实现的 capability shell/bootstrap scope。
-- rc.2 的默认 `prepareCall()`、模型输入模态与 request-image additions 不要求当前 custom adapter 改写 transport 或采用 DeepSeek Files，不为未使用的 seam 增加 speculative adapters。
+- DSH compatibility baseline 是 `0.1.2-alpha.5`：所有直接 DSH peers 使用 `^0.1.2-alpha.5`，开发依赖固定 exact alpha.5、Cordis `4.0.2`、Schemastery `3.18.2`，lockfile 不允许混入其它 DSH prerelease family；每个后续 issue 都在该基线上开发。
+- 该升级是独立 compatibility prefactor：在已完成的 credential lifecycle 后执行；它迁移公开 API owner 与包 topology，但不重新打开已实现的 capability shell/bootstrap scope。
+- alpha.5 的 `ToolCallId`、Settings service method、Session snapshot accessors、Connection result types 与 client Context/UI owner packages 是当前接口；本插件仍保留自有 private transport 与 `AttachmentStore.readImage()`，不为未使用的 DeepSeek Files 或 PiAiAdapter seam 增加 speculative adapters。
 - `dsh-antigravity-auth` 保持 private。发布 npm、安装到 live profile、真实 OAuth 与 private endpoint probe 都不是完成本 spec 的默认动作。
 
 ### Plugin-owned wire identity interface
 
 - Wire Identity module 一次性构造 provider-required User-Agent 与 DSH secondary attribution carrier，是所有 private operations 的唯一 identity seam。
-- provider User-Agent 是固定 community snapshot 中已审计的静态值，并经过 HTTP header safety validation；空值、控制字符、CR/LF 与 per-request user input 被拒绝。
+- provider User-Agent 是固定 community snapshot 中已审计的 AGY CLI 1.1.24 静态 identity，并经过 HTTP header safety validation；content request 不携带 obsolete desktop `X-Goog-Api-Client` / `Client-Metadata` headers，空值、控制字符、CR/LF 与 per-request user input 被拒绝。
 - module 调用公开 `attributionHeaders()`，读取其格式化后的真实 DSH identity value，并将该值放入固定的 `X-DeepSeek-Harness-Attribution` carrier；不复制 formatter、不伪造 AppIdentity。
 - module 总是返回 provider `User-Agent` 与 secondary attribution 两个 headers，调用方不能要求省略、重命名或覆盖 secondary carrier。
 - 现有 DSH `attributionHeaders()`、`LlmAdapter`、PiAiAdapter 与所有 core packages 均不修改。
@@ -158,8 +158,8 @@
 - **Image Tools module** 通过 DSH Tool interface 提供 `generate_image` 和 `list_images`，并依赖 AttachmentStore 与 Filesystem interfaces，而不是私有 disk directory。
 - **Video Tool module** 只在 Gate V 通过后注册 workspace-path 视频理解。它不新增 session video block，也不实现视频生成。
 - **Usage module** 返回 normalized、value-free quota snapshot，不暴露 raw response、token 或 exact project id。
-- **RPC module** 使用 typed loopback-only contract，客户端只得到授权 URL、一次性 flow metadata、value-free status/usage 和结构化错误。
-- **Client module** 提供 Auth、Search、Image、Video、Usage settings views；未通过 gate 的 capability 必须显示原因而不是假装可用。
+- **RPC module** 使用 typed account contract，客户端只得到授权 URL、一次性 flow metadata、value-free status/usage 和结构化错误。alpha.5 下由 plugin-owned Host activation guard 保持 loopback policy：只有明确的 `127.0.0.1` Web bind 使用真实 dispatcher；缺失或其它 bind 永远只到达 inert `loopback-required` stub。
+- **Client module** 提供 Auth、Search、Image、Video、Usage settings views；未通过 gate 的 capability 必须显示原因而不是假装可用，且 `ConnectionHandle.isLoopback` 为 false 时不注册 account settings section。该 UI gate 只用于收敛可见面，Host guard 才是执行边界。
 
 ### OAuth and credential decisions
 
@@ -189,11 +189,11 @@
 ### LLM decisions
 
 - provider route 固定为 `google-antigravity`。
-- model catalog 初始来自固定 community snapshot，并与登录后的 available-models probe 取 advisory intersection；设置 UI 区分 snapshot、live-available、unavailable、refresh-failed 与 protocol-drift。catalog absence 不得变成 exact pinned-model request rejection。
+- model catalog 初始来自固定 audited community snapshot（当前为 `@cortexkit/antigravity-auth-core@2.2.0`），并与登录后的 available-models probe 取 advisory intersection；live `gemini-3.8-flash-tiered` 目录别名必须规范化为该模型的 tier family。Gemini 3.8 Flash 使用 captured `gemini-3.8-flash-medium` 基础 route 与原生 Medium 默认 reasoning effort，显式 Low/High effort 映射到对应 captured tier route；Low/Medium/High 分别发送 AGY 1.1.24 capture 的 numeric thinking budget、model enum、max-output default，并包含 `userAgent: "antigravity"` outer-envelope field。成功的 live intersection 会过滤账号目录中不存在的旧路由；暂时失败或协议漂移仍回退 snapshot，因此可能短暂保留 Gemini 3.5 Flash 等 core 兼容路由。设置 UI 区分 snapshot、live-available、unavailable、refresh-failed 与 protocol-drift。catalog absence 不得变成 exact pinned-model request rejection。
 - system、messages、image blocks、tool schemas、reasoning effort 和 supported generation options 被转换为 private request envelope；没有证据的 option fail-loud。
 - DSH session id 不直接发送；Private Client 生成 adapter-owned request/session metadata。
 - stream parser 映射 text、reasoning、function call、usage、finish 与 embedded errors；unknown provider parts 触发 bounded protocol-drift error。
-- usage chunk 必须在 terminal finish 之前发出；tool arguments 保持 raw JSON string。
+- usage chunk 必须在 terminal finish 之前发出；tool arguments 保持 raw JSON string。成功的 provider terminal event 不得提前取消响应 reader；必须排空剩余 SSE framing/EOF 后再完成 DSH stream，避免 Node raw-to-Web bridge 的重复关闭竞态。
 - replay metadata 只在同 adapter、兼容 model family 和 schema version 下恢复；block mismatch、cross-model、fork 或 malformed metadata 触发安全降级。
 - model family 以 Gemini、Claude、GPT-OSS 独立 gate，不从单个 family 的成功推断其它 family。
 
@@ -321,11 +321,11 @@
 
 - quota payload按 window duration/type映射，不依赖数组位置；remaining clamp、reset validation与unknown-field drop。
 - Usage Host timeout、transport ignores abort时的 lifecycle detach、minimum refresh interval与429 no storm。
-- RPC request/reply schema、unknown endpoint、structured error、caller cancellation和 value-free leak scan。
-- risk acknowledgement、pending login、logged-in、project-unavailable、Gate pending、disabled、protocol-drift和 logout/revoke UI states。
+- RPC request/reply schema、unknown endpoint、structured error、caller cancellation和 value-free leak scan；只有明确 loopback bind 走真实 dispatcher，缺失/all-interface/unknown bind 对所有 endpoint 只返回同一个 value-free denial 且不触碰 service。
+- risk acknowledgement、pending login、logged-in、project-unavailable、Gate pending、disabled、protocol-drift和 logout/revoke UI states；非 loopback client 不注册 account settings section。
 - 客户端没有 token/client metadata/custom endpoint/account switch controls。
 - Cordis rows独立 mount/unmount，未通过 gate 的 capability 不注册。
-- 干净安装解析 exact DSH `0.1.1-rc.2` development graph，`pnpm peers check` 无 warning，lockfile 不包含其他 DSH prerelease package entries。
+- 干净安装解析 exact DSH `0.1.2-alpha.5` development graph，`pnpm peers check` 无 warning，lockfile 不包含其他 DSH prerelease package entries。
 - 完整 `check` gate涵盖 lint、typecheck、unit/integration tests、Host/client build、package smoke与publint。
 - packed file list只包含声明的 runtime、types、client、显式 `scripts/live-gates.mjs` CLI、patch、README、CHANGELOG和license artifacts；package smoke 必须验证 script 与其 bundled runner 同时存在。
 
@@ -365,6 +365,6 @@
 - community source只证明逆向 contract 在固定 snapshot 中存在，不证明 Google 官方支持、稳定性或目标账号当前可用性。
 - OAuth client id/client metadata 的具体值不进入本 spec 或 issue body；实现通过固定依赖获得，并限制在 Host flow中使用。
 - 插件 private transport 的 identity policy 完全由 plugin-owned Wire Identity module 提供；任何需要修改 DSH core 才能继续的情况都使 Gate 0 失败，而不是扩展本项目 scope。
-- 项目已经完成 plugin-owned Wire Identity、capability shell、单账号 PKCE login 与 credential lifecycle；后续 issue 必须从 DSH `0.1.1-rc.2` coherent dependency baseline 继续，不回退到更早的 prerelease research baseline。
+- 项目已经完成 plugin-owned Wire Identity、capability shell、单账号 PKCE login 与 credential lifecycle；后续 issue 必须从 DSH `0.1.2-alpha.5` coherent dependency baseline 继续，不回退到更早的 prerelease research baseline。
 - 参考实现与测试 prior art 是 `dsh-codex-auth@0.2.2` 的 Auth、typed RPC、WebRuntime Search、ToolRuntime Image、AttachmentStore、Usage、client settings与package smoke modules；复制其interface模式，不复制其 provider-specific wire assumptions。
 - 完成定义是：clean install、`pnpm peers check`、所有非 live tests 和 package gates通过，DSH core 保持无 diff，插件所有 capability gate状态可被诚实呈现。真实账号可用性不是离线实现完成的证明；live gates需要单独授权与单独结果记录。

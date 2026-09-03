@@ -4,7 +4,7 @@ import { Buffer } from 'node:buffer'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveModelWithTier } from '@cortexkit/antigravity-auth-core'
 import z from '@deepseek-ai/schemastery'
-import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
+import type {} from '@deepseek-ai/dsh-settings'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { FileSystem } from '@deepseek-ai/dsh-fs'
@@ -41,7 +41,7 @@ export const GENERATE_IMAGE_TOOL_NAME = 'generate_image'
 export const LIST_IMAGES_TOOL_NAME = 'list_images'
 export const ANTIGRAVITY_IMAGE_ENDPOINT = `${ANTIGRAVITY_WIRE_ORIGIN}/v1internal:generateContent` as const
 export const ANTIGRAVITY_IMAGE_MODEL = 'antigravity-gemini-3.1-flash-image'
-export const ANTIGRAVITY_IMAGE_SETTINGS_NAMESPACE = settingsNamespace('antigravity-image')
+export const ANTIGRAVITY_IMAGE_SETTINGS_NAMESPACE = 'antigravity-image'
 
 export interface Config extends AntigravityImageSettings {}
 
@@ -348,13 +348,15 @@ export function apply(ctx?: Context, config: Config = { enabled: true, model: AN
   if (candidate.tools === undefined || candidate.attachments === undefined || candidate.fs === undefined) return
   let current = (): AntigravityImageSettings => config
   let lifecycle: CapabilityLifecycle | undefined
-  installSettingsSection(ctx, ANTIGRAVITY_IMAGE_SETTINGS_NAMESPACE, Config, config, {
-    setSource: source => { current = source; lifecycle?.sync() },
-    onChange: () => { lifecycle?.sync() },
+  ctx.inject(['settings'], (settingsCtx) => {
+    settingsCtx.settings.installSection(ctx, ANTIGRAVITY_IMAGE_SETTINGS_NAMESPACE, Config, config, {
+      setSource: source => { current = source; lifecycle?.sync() },
+      onChange: () => { lifecycle?.sync() },
+    })
   })
   const provided = candidate.get?.('antigravityAuth')
   const auth = isAuthService(provided) ? provided : createAntigravityAuthService()
-  const options: AntigravityImageToolOptions = { auth, attachments: candidate.attachments!, fs: candidate.fs!, settings: current }
+  const options: AntigravityImageToolOptions = { auth, attachments: candidate.attachments!, fs: candidate.fs!, settings: () => current() }
   lifecycle = mountCapabilityLifecycle({
     ctx,
     auth,

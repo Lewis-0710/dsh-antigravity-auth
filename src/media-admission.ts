@@ -238,7 +238,7 @@ export function sessionImageCatalog(agent: Agent): readonly SessionImageCatalogE
     }
     if (value.type === 'tool-result' && Array.isArray(value.content)) visit(value.content, origin, depth + 1)
   }
-  for (const event of agent.session.events) {
+  for (const event of agent.session.snapshotEvents()) {
     const rawEvent: unknown = event
     if (!isRecord(rawEvent) || !isRecord(rawEvent.data)) continue
     if (rawEvent.type === 'user/message') visit(rawEvent.data.content, 'user')

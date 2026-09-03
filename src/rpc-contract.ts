@@ -1,6 +1,6 @@
 /** Browser-safe, value-free RPC contract for the Antigravity login flow. */
 
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ConnectionRpcResult as RpcResult } from '@deepseek-ai/dsh-client-connection/client'
 import { CAPABILITY_ROW_IDS } from './status.ts'
 import type {
   AntigravityStatusView,
@@ -46,7 +46,7 @@ export interface AntigravityAuthConnectionRpc {
   ): Promise<RpcResult<unknown>>
 }
 
-/** Build the browser face over the plugin-owned loopback channel. */
+/** Build the browser face over the plugin-owned guarded account channel. */
 export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc): AntigravityAuthRpcClient {
   return {
     status: signal => callValidated(rpc, 'status', {}, signal, value => {

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.1.4-alpha.5] - 2026-09-03
+
+- Raised the development and peer baseline to DSH `0.1.2-alpha.5`, Cordis `4.0.2`, and Schemastery `3.18.2`, with one coherent prerelease dependency graph.
+- Migrated tool-call IDs, Settings registration, Session event reads, Connection result types, browser Context owners, and client injection metadata to alpha.5 public APIs; removed the retired client-runtime and Host apiproxy packages.
+- Preserved fail-closed account controls after alpha.5 removed per-method RPC authority: only an explicit `127.0.0.1` Web bind uses the real dispatcher; absent, all-interface, and unknown binds receive an inert value-free denial, while non-loopback clients hide the settings section.
+- Updated the audited community core snapshot to `2.2.0`, normalizing the live `gemini-3.8-flash-tiered` directory alias so Gemini 3.8 Flash survives live intersection with its native Medium default and captured Low/Medium/High wire routes and request metadata.
+- Realigned private requests with the audited AGY 1.1.24 wire identity and envelope: the fixed CLI User-Agent replaces obsolete desktop/X-Goog metadata headers while preserving the mandatory DSH secondary attribution, and Gemini 3.8 sends captured numeric thinking budgets plus the `userAgent` field.
+- Drained successful SSE bodies after provider terminal events and replaced Node's race-prone `Readable.toWeb()` bridge with its async-iterable Web Stream bridge, preventing legitimate response cancellation from crashing the Host with `ERR_INVALID_STATE`.
+- Refreshed the release README with current Gemini 3.8 behavior, exact prerelease/tag/tarball installs, the real Host row ID, and no obsolete rc.2 migration warnings.
+
 ## [0.1.3] - 2026-08-31
 
 - Restored reliable Claude Opus tool selection by preserving the complete DSH system prompt and applying the audited Claude tool instruction, strict parameter descriptions, and validated function-calling mode.

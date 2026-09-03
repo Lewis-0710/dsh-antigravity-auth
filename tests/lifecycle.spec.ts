@@ -30,9 +30,10 @@ function gateStatus(id: 'search' | 'image' | 'video', state: 'available' | 'poc-
 describe('bootstrap lifecycle boundary', () => {
   it('mounts the Host row without OAuth, private transport, timers, or listeners', () => {
     const dispose = vi.fn()
-    const handle = vi.fn((_channel: string, _handler: unknown, _options: unknown) => dispose)
+    const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
       connection: { rpc: { handle } },
+      get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
     }))
     const fetch = vi.fn()
     globalThis.fetch = fetch as typeof globalThis.fetch
@@ -43,17 +44,45 @@ describe('bootstrap lifecycle boundary', () => {
     expect(fetch).not.toHaveBeenCalled()
     expect(setTimeout).not.toHaveBeenCalled()
     expect(handle).toHaveBeenCalledOnce()
+    expect(handle.mock.calls[0]).toHaveLength(2)
     expect(handle.mock.calls[0]?.[0]).toBe('/antigravity-auth')
-    expect(handle.mock.calls[0]?.[2]).toEqual({ authority: 'loopback' })
 
     const registration = handle.mock.results[0]?.value as (() => void) | undefined
     registration?.()
     expect(dispose).toHaveBeenCalledOnce()
   })
 
+  it('registers only a value-free denial handler on an all-interface Web bind', async () => {
+    const dispose = vi.fn()
+    const handle = vi.fn((_channel: string, handler: unknown) => {
+      expect(typeof handler).toBe('function')
+      return dispose
+    })
+    const warn = vi.fn()
+    const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
+      connection: { rpc: { handle } },
+      get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
+      logger: { warn },
+    }))
+
+    applyAuth({ inject } as never)
+
+    expect(handle).toHaveBeenCalledOnce()
+    const handler = handle.mock.calls[0]?.[1] as ((endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>) | undefined
+    await expect(handler?.('status', { forbidden: 'value' }, new AbortController().signal)).resolves.toEqual({
+      ok: false,
+      error: {
+        code: 'loopback-required',
+        message: 'Antigravity account controls require a loopback-bound DSH Host',
+        details: {},
+      },
+    })
+    expect(warn).toHaveBeenCalledOnce()
+  })
+
   it('releases the actual Host RPC registration when a Cordis context is disposed', async () => {
     const dispose = vi.fn()
-    const handle = vi.fn((_channel: string, _handler: unknown, _options: unknown) => dispose)
+    const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
     const ctx = new Context()
     const unprovide = ctx.provide('connection', { rpc: { handle } })
     try {
@@ -89,6 +118,7 @@ describe('bootstrap lifecycle boundary', () => {
         connection: { rpc: { handle: vi.fn(() => vi.fn()) } },
         llm: { registerAdapter, listProviders: vi.fn(() => []) },
         provide: vi.fn((_name: string, service: AntigravityAuthService) => { provided = service; return vi.fn(async () => {}) }),
+        get: vi.fn((service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined),
         inject: vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback(runtime)),
         effect: vi.fn((setup: () => () => Promise<void>) => { cleanup = setup() }),
       }

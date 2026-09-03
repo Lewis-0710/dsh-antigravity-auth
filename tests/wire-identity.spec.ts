@@ -1,6 +1,7 @@
-import { ANTIGRAVITY_HEADERS } from '@cortexkit/antigravity-auth-core'
+import { buildAntigravityHarnessUserAgent } from '@cortexkit/antigravity-auth-core'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  AGY_PROVIDER_USER_AGENT,
   DSH_ATTRIBUTION_HEADER,
   WireIdentityError,
   createWireIdentity,
@@ -11,7 +12,7 @@ vi.mock('@deepseek-ai/dsh-llm', () => ({
   attributionHeaders: () => attributionHeadersMock(),
 }))
 
-const DSH_USER_AGENT = 'deepseek-harness/0.1.1-rc.2 (+https://github.com/deepseek-ai/deepseek-harness)'
+const DSH_USER_AGENT = 'deepseek-harness/0.1.2-alpha.5 (+https://github.com/deepseek-ai/deepseek-harness)'
 
 beforeEach(() => {
   attributionHeadersMock.mockReset()
@@ -25,8 +26,10 @@ function identity() {
 describe('plugin-owned Wire Identity', () => {
   it('keeps the audited Antigravity provider identity and adds one DSH carrier', () => {
     const wire = identity()
+    expect(AGY_PROVIDER_USER_AGENT).toBe(buildAntigravityHarnessUserAgent())
+    expect(AGY_PROVIDER_USER_AGENT).toContain('antigravity/cli/1.1.24')
     expect(wire.headers()).toEqual({
-      ...ANTIGRAVITY_HEADERS,
+      'User-Agent': AGY_PROVIDER_USER_AGENT,
       [DSH_ATTRIBUTION_HEADER]: DSH_USER_AGENT,
     })
     expect(Object.isFrozen(wire.headers())).toBe(true)
@@ -47,9 +50,7 @@ describe('plugin-owned Wire Identity', () => {
     })
     expect(pairs).toEqual([
       ['Host', 'daily-cloudcode-pa.googleapis.com'],
-      ['User-Agent', ANTIGRAVITY_HEADERS['User-Agent']],
-      ['X-Goog-Api-Client', ANTIGRAVITY_HEADERS['X-Goog-Api-Client']],
-      ['Client-Metadata', ANTIGRAVITY_HEADERS['Client-Metadata']],
+      ['User-Agent', AGY_PROVIDER_USER_AGENT],
       [DSH_ATTRIBUTION_HEADER, DSH_USER_AGENT],
       ['Transfer-Encoding', 'chunked'],
       ['Authorization', 'Bearer access-token'],
@@ -76,9 +77,7 @@ describe('plugin-owned Wire Identity', () => {
     expect(raw).toBe([
       'POST /v1internal:streamGenerateContent HTTP/1.1',
       'Host: daily-cloudcode-pa.googleapis.com',
-      `User-Agent: ${ANTIGRAVITY_HEADERS['User-Agent']}`,
-      `X-Goog-Api-Client: ${ANTIGRAVITY_HEADERS['X-Goog-Api-Client']}`,
-      `Client-Metadata: ${ANTIGRAVITY_HEADERS['Client-Metadata']}`,
+      `User-Agent: ${AGY_PROVIDER_USER_AGENT}`,
       `${DSH_ATTRIBUTION_HEADER}: ${DSH_USER_AGENT}`,
       'Transfer-Encoding: chunked',
       'Authorization: Bearer access-token',
@@ -120,7 +119,7 @@ describe('plugin-owned Wire Identity', () => {
   })
 
   it('rejects attribution replaced by the provider identity', () => {
-    attributionHeadersMock.mockReturnValue({ 'user-agent': ANTIGRAVITY_HEADERS['User-Agent'] })
+    attributionHeadersMock.mockReturnValue({ 'user-agent': AGY_PROVIDER_USER_AGENT })
     try {
       createWireIdentity()
       expect.fail('expected provider-overridden attribution to be rejected')

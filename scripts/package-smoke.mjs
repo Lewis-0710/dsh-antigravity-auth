@@ -28,6 +28,28 @@ try {
   if (!changelog.includes(`## [${String(manifest.version)}]`)) {
     throw new Error(`package smoke: CHANGELOG.md lacks release ${String(manifest.version)}`)
   }
+  const retiredPackages = new Set([
+    '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-host-apiproxy',
+  ])
+  for (const field of ['dependencies', 'peerDependencies', 'devDependencies']) {
+    for (const dependency of Object.keys(manifest[field] ?? {})) {
+      if (retiredPackages.has(dependency)) throw new Error(`package smoke: ${field} retains ${dependency}`)
+    }
+  }
+  const clientInject = manifest.dsh?.client?.inject
+  if (!Array.isArray(clientInject) || clientInject.some(dependency => retiredPackages.has(dependency))) {
+    throw new Error('package smoke: client injection retains a removed alpha.5 package')
+  }
+  for (const [dependency, range] of Object.entries(manifest.peerDependencies ?? {})) {
+    if (dependency.startsWith('@deepseek-ai/dsh-') && range !== '^0.1.2-alpha.5') {
+      throw new Error(`package smoke: ${dependency} does not use the alpha.5 peer baseline`)
+    }
+  }
+  if (manifest.peerDependencies?.['@deepseek-ai/cordis'] !== '^4.0.2'
+    || manifest.peerDependencies?.['@deepseek-ai/schemastery'] !== '^3.18.2') {
+    throw new Error('package smoke: Cordis or Schemastery peer baseline is not alpha.5-coherent')
+  }
   const patch = await readFile(resolve(packageRoot, 'cordis.patch.yml'), 'utf8')
   for (const row of ['antigravity-auth', 'antigravity-search', 'antigravity-image', 'antigravity-video']) {
     if (!patch.includes(`id: ${row}`)) throw new Error(`package smoke: patch lacks independent row ${row}`)
@@ -98,16 +120,27 @@ try {
     if (!liveGateRunnerSource.includes(marker)) throw new Error(`package smoke: packed live gate runner lacks ${marker}`)
   }
 
+  const hostEntrySource = await readFile(resolve(packageRoot, 'lib/index.js'), 'utf8')
+  if (!hostEntrySource.includes('loopback-required')) {
+    throw new Error('package smoke: Host entry lacks the alpha.5 account RPC guard')
+  }
+  for (const marker of ['dsh-client-runtime', 'dsh-host-apiproxy']) {
+    if (hostEntrySource.includes(marker)) throw new Error(`package smoke: Host entry retains ${marker}`)
+  }
+
   const source = await readFile(resolve(packageRoot, 'lib/wire-identity.js'), 'utf8')
-  for (const marker of ['X-DeepSeek-Harness-Attribution', 'buildAgyCliHeaderPairs', 'ANTIGRAVITY_HEADERS']) {
+  for (const marker of ['X-DeepSeek-Harness-Attribution', 'buildAgyCliHeaderPairs', 'buildAntigravityHarnessUserAgent']) {
     if (!source.includes(marker)) throw new Error(`package smoke: Wire Identity artifact lacks ${marker}`)
+  }
+  for (const marker of ['ANTIGRAVITY_HEADERS', 'X-Goog-Api-Client', 'Client-Metadata']) {
+    if (source.includes(marker)) throw new Error(`package smoke: Wire Identity artifact retains obsolete ${marker}`)
   }
   if (source.includes('deepseek-harness core')) throw new Error('package smoke: artifact contains an invalid core implementation claim')
 
   const clientTarget = manifest.exports?.['./client']?.default
   if (typeof clientTarget !== 'string') throw new Error('package smoke: client export is missing')
   const clientSource = await readFile(resolve(packageRoot, clientTarget), 'utf8')
-  for (const marker of ['node:', '@cortexkit/antigravity-auth-core', 'globalThis.fetch']) {
+  for (const marker of ['node:', '@cortexkit/antigravity-auth-core', '@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-host-apiproxy', 'globalThis.fetch']) {
     if (clientSource.includes(marker)) throw new Error(`package smoke: client artifact contains Host-only marker ${marker}`)
   }
   let registration

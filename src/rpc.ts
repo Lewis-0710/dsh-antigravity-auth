@@ -1,6 +1,6 @@
-/** Host dispatcher for the Antigravity OAuth loopback RPC channel. */
+/** Host dispatcher protected by the Antigravity account RPC activation guard. */
 
-import type { RpcResult } from '@deepseek-ai/dsh-host-apiproxy/api'
+import type { ConnectionRpcResult as RpcResult } from '@deepseek-ai/dsh-client-connection'
 import { OAuthFlowError } from './oauth-flow.ts'
 import { CredentialOperationError, credentialErrorMessage } from './credential-coordinator.ts'
 import type { BootstrapStatusService } from './status.ts'

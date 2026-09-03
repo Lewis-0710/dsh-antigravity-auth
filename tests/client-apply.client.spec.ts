@@ -1,6 +1,6 @@
 /** Browser contribution registration and cleanup. */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import { describe, expect, it, vi } from 'vitest'
 import { apply, inject } from '../src/client/index.ts'
 import type { AntigravityAuthKey } from '../src/client/locales.ts'
@@ -11,7 +11,7 @@ interface SlotRecord {
   component: unknown
 }
 
-function bench() {
+function bench(isLoopback = true) {
   const call = vi.fn().mockResolvedValue({
     ok: true as const,
     value: { status: createStatusView(false, { phase: 'idle', configured: false, projectAvailable: false }) },
@@ -43,7 +43,7 @@ function bench() {
       },
     },
     get(service: string) {
-      if (service === 'connection') return { rpc: { call } }
+      if (service === 'connection') return { isLoopback, rpc: { call } }
       throw new Error(`unexpected service: ${service}`)
     },
     effect(effect: () => () => void) {
@@ -85,6 +85,18 @@ describe('Antigravity client apply', () => {
     b.dispose()
     expect(b.slots).toHaveLength(0)
     expect(b.listeners.size).toBe(0)
+    expect(b.dictionaries.size).toBe(0)
+  })
+
+  it('does not expose account controls to a non-loopback browser connection', () => {
+    const b = bench(false)
+
+    expect(b.slots).toHaveLength(0)
+    expect(b.listeners.size).toBe(0)
+    expect(b.call).not.toHaveBeenCalled()
+    expect(b.dictionaries.size).toBe(1)
+
+    b.dispose()
     expect(b.dictionaries.size).toBe(0)
   })
 })

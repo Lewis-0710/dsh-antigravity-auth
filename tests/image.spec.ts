@@ -18,7 +18,7 @@ vi.mock('../src/media-admission.ts', async importOriginal => {
 })
 
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
-const agent = { session: { header: { cwd: '/workspace' }, events: [] } } as never
+const agent = { session: { header: { cwd: '/workspace' }, snapshotEvents: () => [] } } as never
 const exec = { agent, signal: new AbortController().signal } as unknown as ToolRunContext
 
 function imageResponse(mediaType = 'image/png'): Response {
@@ -107,7 +107,7 @@ describe('Antigravity image tools', () => {
     const sessionAgent = {
       session: {
         header: { cwd: '/workspace' },
-        events: [{ type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId: 'call', content: [{ type: 'image', attachment }] }] } } }],
+        snapshotEvents: () => [{ type: 'tool/result', data: { message: { content: [{ type: 'tool-result', toolCallId: 'call', content: [{ type: 'image', attachment }] }] } } }],
       },
     } as never
     const listExec = { agent: sessionAgent, signal: new AbortController().signal } as unknown as ToolRunContext

@@ -12,11 +12,12 @@ import {
   fnv1a64Signed,
   getPublicModelDefinitions,
   getResolverAliasMap,
+  orderAgyRequestPayloadInPlace,
   resolveModelWithTier,
 } from '@cortexkit/antigravity-auth-core'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
-  CallId,
+  ToolCallId,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -362,9 +363,6 @@ export class AntigravityAdapter extends LlmAdapter {
           if (part.text.length > 0) yield { type: 'text-delta', index: current.index, text: part.text }
         }
       }
-      if (finish !== undefined) {
-        break
-      }
     }
     if (current !== undefined) yield endBlock(current)
     if (usage !== undefined) yield { type: 'usage', usage }
@@ -512,7 +510,7 @@ function getModelReasoningEfforts(modelId: string): { efforts: readonly { id: Re
         { id: ReasoningEffortId('medium'), name: 'Medium' },
         { id: ReasoningEffortId('high'), name: 'High' },
       ],
-      defaultEffort: ReasoningEffortId('high'),
+      defaultEffort: ReasoningEffortId(lower.includes('gemini-3.8-flash') ? 'medium' : 'high'),
     }
   }
   if (lower.includes('pro')) {
@@ -575,6 +573,12 @@ function parseLiveModelIds(
       live.add('gemini-3.7-flash-low')
       live.add('gemini-3.7-flash-high')
     }
+    if (cleanId === 'gemini-3.8-flash-tiered' || cleanId.startsWith('gemini-3.8-flash')) {
+      live.add('gemini-3.8-flash')
+      live.add('gemini-3.8-flash-medium')
+      live.add('gemini-3.8-flash-low')
+      live.add('gemini-3.8-flash-high')
+    }
     if (rawEntry.modelName !== undefined && typeof rawEntry.modelName === 'string') {
       if (!safeModelId(rawEntry.modelName)) throw new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
       const cleanName = cleanModelId(rawEntry.modelName)
@@ -632,7 +636,7 @@ function containsControl(value: string): boolean {
 interface BlockState {
   readonly index: number
   readonly kind: 'text' | 'reasoning' | 'tool-call'
-  readonly id: ReturnType<typeof CallId>
+  readonly id: ReturnType<typeof ToolCallId>
   name?: string
   text: string
   signature?: string
@@ -644,7 +648,7 @@ function beginBlock(states: BlockState[], part: ProviderPart): BlockState {
     ? {
         index,
         kind: 'tool-call',
-        id: CallId(part.id ?? `antigravity-call-${String(index)}`),
+        id: ToolCallId(part.id ?? `antigravity-call-${String(index)}`),
         ...(part.name === undefined ? {} : { name: part.name }),
         text: '',
         ...(part.signature === undefined ? {} : { signature: part.signature }),
@@ -652,7 +656,7 @@ function beginBlock(states: BlockState[], part: ProviderPart): BlockState {
     : {
         index,
         kind: part.kind,
-        id: CallId(`antigravity-block-${String(index)}`),
+        id: ToolCallId(`antigravity-block-${String(index)}`),
         text: '',
         ...(part.signature === undefined ? {} : { signature: part.signature }),
       }
@@ -725,13 +729,17 @@ async function buildAntigravityGeneratePayloadForAdapter(
     contents.push(await mapMessageWithAttachments(message, options.model, toolNames, attachments, options.signal))
   }
   const payload = buildPayloadFromContents(options, credential, contents)
-  const metadata = buildAgyAgentRequestMetadata(session, payload.request as Record<string, unknown>, resolveWireModel(options.model), timestamp)
+  const metadata = buildAgyAgentRequestMetadata(session, payload.request as Record<string, unknown>, resolveWireModel(options.model, options.reasoningEffort), timestamp)
   const request = payload.request as Record<string, unknown>
   request.labels = metadata.labels
   request.sessionId = metadata.sessionId
+  orderAgyRequestPayloadInPlace(request)
   return {
-    ...payload,
+    ...(payload.project === undefined ? {} : { project: payload.project }),
     requestId: metadata.requestId,
+    request,
+    model: payload.model,
+    userAgent: 'antigravity',
     requestType: 'agent',
   }
 }
@@ -768,7 +776,8 @@ function buildPayloadFromContents(
   credential: HostCredential,
   contents: readonly Record<string, unknown>[],
 ): Record<string, unknown> {
-  const wireModel = resolveWireModel(options.model)
+  const wireModel = resolveWireModel(options.model, options.reasoningEffort)
+  const usesCapturedGemini38ThinkingBudget = /^gemini-3\.8-flash-(?:low|medium|high)$/u.test(wireModel)
   const requestContents = groupClaudeFunctionResponses(contents, options.model)
   const request: Record<string, unknown> = { contents: requestContents }
   if (options.system !== undefined && options.system.trim().length > 0) {
@@ -776,6 +785,7 @@ function buildPayloadFromContents(
   }
   const generationConfig: Record<string, unknown> = {}
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = boundedInteger(options.maxTokens, 1, 1_000_000, 'maxTokens')
+  else if (usesCapturedGemini38ThinkingBudget) generationConfig.maxOutputTokens = 65536
   if (options.temperature !== undefined) generationConfig.temperature = boundedNumber(options.temperature, -100, 100, 'temperature')
   if (options.stop !== undefined) generationConfig.stopSequences = options.stop.slice(0, 16).map(item => item.slice(0, 256))
   if (options.reasoningEffort !== undefined) generationConfig.thinkingConfig = { thinkingLevel: String(options.reasoningEffort) }
@@ -784,7 +794,7 @@ function buildPayloadFromContents(
     const declarations = buildFunctionDeclarations(options.tools)
     if (declarations.length > 0) request.tools = [{ functionDeclarations: declarations }]
   }
-  const resolved = resolveModelWithTier(options.model, { cli_first: false })
+  const resolved = resolveModelWithTier(usesCapturedGemini38ThinkingBudget ? wireModel : options.model, { cli_first: false })
   const requestedEffort = normalizeReasoningEffort(options.reasoningEffort)
   const thinkingLevel = requestedEffort ?? resolved.thinkingLevel
   if (wireModel.toLowerCase().includes('claude')) {
@@ -798,10 +808,17 @@ function buildPayloadFromContents(
   } else {
     applyGeminiTransforms(request, {
       model: wireModel,
-      ...(thinkingLevel === undefined ? {} : { tierThinkingLevel: thinkingLevel as 'low' | 'medium' | 'high' }),
+      ...(thinkingLevel === undefined || usesCapturedGemini38ThinkingBudget ? {} : { tierThinkingLevel: thinkingLevel as 'low' | 'medium' | 'high' }),
       ...(resolved.thinkingBudget === undefined ? {} : { tierThinkingBudget: resolved.thinkingBudget }),
       ...(options.reasoningEffort === undefined && resolved.thinkingBudget === undefined ? {} : { normalizedThinking: { includeThoughts: true, ...(resolved.thinkingBudget === undefined ? {} : { thinkingBudget: resolved.thinkingBudget }) } }),
     })
+    if (usesCapturedGemini38ThinkingBudget) {
+      const transformedConfig = request.generationConfig
+      if (!isRecord(transformedConfig) || typeof resolved.thinkingBudget !== 'number') {
+        throw new LlmError('The Gemini 3.8 captured thinking configuration could not be resolved', 'PROTOCOL_DRIFT')
+      }
+      transformedConfig.thinkingConfig = { includeThoughts: true, thinkingBudget: resolved.thinkingBudget }
+    }
   }
   const project = credential.projectId === 'inductive-dreamer-qrkws' || !credential.projectId ? undefined : credential.projectId
   return { ...(project === undefined ? {} : { project }), model: wireModel, request }
@@ -1017,11 +1034,15 @@ function normalizeReasoningEffort(value: GenerateOptions['reasoningEffort']): st
   return ['minimal', 'low', 'medium', 'high'].includes(normalized) ? normalized : undefined
 }
 
-function resolveWireModel(model: string): string {
+function resolveWireModel(model: string, reasoningEffort?: GenerateOptions['reasoningEffort']): string {
   if (model === 'antigravity-gemini-3.7-flash' || model === 'gemini-3.7-flash') {
     return 'gemini-3-flash'
   }
-  const resolved = resolveModelWithTier(model, { cli_first: false })
+  const effort = normalizeReasoningEffort(reasoningEffort)
+  const routeModel = effort !== undefined && (model === 'antigravity-gemini-3.8-flash' || model === 'gemini-3.8-flash')
+    ? `${model}-${effort}`
+    : model
+  const resolved = resolveModelWithTier(routeModel, { cli_first: false })
   if (resolved.actualModel.startsWith('gemini-3.7-flash')) {
     return 'gemini-3-flash'
   }

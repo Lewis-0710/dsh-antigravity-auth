@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope, SettingsScopeSnapshot } from '@deepseek-ai/dsh-client-ui-settings/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AntigravityAuthSettings } from '../src/client/AntigravityAuthSettings.tsx'
 import { en, zh } from '../src/client/locales.ts'
@@ -63,6 +63,7 @@ class ReceiverBoundSettingsScope<T> implements SettingsScope<T> {
     return () => { this.listeners.delete(listener) }
   }
 
+  async mutate(): Promise<void> {}
   async set(): Promise<void> {}
   async unset(): Promise<void> {}
 }

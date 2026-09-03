@@ -3,17 +3,19 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-llm'
 import { createAntigravityAuthService } from './auth-service.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
 import { ANTIGRAVITY_AUTH_RPC_CHANNEL, handleAntigravityAuthRpc } from './rpc.ts'
+import { createLoopbackRpcGuard } from './loopback-rpc.ts'
 import { mountCapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-auth'
 export const inject = ['connection', 'llm', 'attachments']
 
-/** Mount the Host-only OAuth service and its loopback RPC channel. */
+/** Mount the Host-only OAuth service and its guarded account RPC channel. */
 export function apply(ctx: Context): void {
   const service = createAntigravityAuthService({
     storePath: defaultAuthStorePath(),
@@ -32,11 +34,17 @@ export function apply(ctx: Context): void {
   })
   const contextWithProvide = ctx as Context & { provide?: (name: string, value: unknown) => () => Promise<void> | void }
   const unprovide = contextWithProvide.provide?.('antigravityAuth', service) ?? (() => {})
-  ctx.inject(['connection'], connectionCtx => connectionCtx.connection.rpc.handle(
-    ANTIGRAVITY_AUTH_RPC_CHANNEL,
-    (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
-    { authority: 'loopback' },
-  ))
+  ctx.inject(['connection'], (connectionCtx) => {
+    const webServer = connectionCtx.get('webServer')
+    const guard = createLoopbackRpcGuard(
+      webServer?.host,
+      (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
+    )
+    if (guard.mode === 'blocked') {
+      connectionCtx.logger.warn('antigravity-auth: account RPC is disabled because the WebServer is not loopback-bound')
+    }
+    return connectionCtx.connection.rpc.handle(ANTIGRAVITY_AUTH_RPC_CHANNEL, guard.handler)
+  })
   mountCapabilityLifecycle({
     ctx,
     auth: service,

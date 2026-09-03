@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
-import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
 import type { QuotaStatusView } from '../quota.ts'
 import type { AntigravitySearchSettings } from '../search.ts'
