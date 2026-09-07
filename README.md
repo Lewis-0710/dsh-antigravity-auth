@@ -1,11 +1,13 @@
 # dsh-antigravity-auth
 
+> **DSH compatibility:** Supports separately verified `0.1.2-alpha.5` and `0.1.3-alpha.1` graphs. The new DSH prerelease is source-only while its npm packages are unavailable; development dependencies retain alpha.5. See [source verification](docs/dsh-source-verification.md).
+
 [![npm alpha version](https://img.shields.io/npm/v/dsh-antigravity-auth/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
 
-Current alpha release: **v0.1.4-alpha.5**, aligned with DSH `0.1.2-alpha.5`, Cordis `4.0.2`, and Schemastery `3.18.2`.
+Current alpha release: **v0.1.4-alpha.6**, supporting DSH `0.1.2-alpha.5` and `0.1.3-alpha.1`, with, Cordis `4.0.2`, and Schemastery `3.18.2`.
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -77,28 +79,32 @@ Multimodal `analyze_video` tool accepts workspace MP4 videos, performing bounded
 
 ## Requirements
 
-- DeepSeek Harness `0.1.2-alpha.5` (minimum and tested prerelease baseline; direct peers use `^0.1.2-alpha.5`).
+- DeepSeek Harness `0.1.2-alpha.5` or `0.1.3-alpha.1` (separately verified graphs; direct peers accept both prerelease lines).
 - Node.js `^22.19.0` or `>=24.0.0`.
 - `pnpm` available on `PATH` (`11.7.0` is the tested project package manager).
 - A Google account with Antigravity access.
 
 ## Install from npm
 
-The npm package includes prebuilt Host and browser bundles. Install the alpha.5-aligned release explicitly:
+The npm package includes prebuilt Host and browser bundles. Install the release for either verified DSH graph explicitly:
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.5
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.6
 ```
 
 With the Web Host bound explicitly to `127.0.0.1`, restart `dsh web`, open Settings, and select **Antigravity Auth**.
 
 ## Install a prebuilt GitHub release
 
+These GitHub examples pin the earlier 0.1.4-alpha.5 release; use the npm command above for 0.1.4-alpha.6.
+
 ```sh
 dsh plugin --profile web add https://github.com/suntianc/dsh-antigravity-auth/releases/download/v0.1.4-alpha.5/dsh-antigravity-auth-0.1.4-alpha.5.tgz
 ```
 
 ## Install from the tagged GitHub source
+
+These GitHub examples pin the earlier 0.1.4-alpha.5 release; use the npm command above for 0.1.4-alpha.6.
 
 ```sh
 dsh plugin --profile web add github:suntianc/dsh-antigravity-auth#v0.1.4-alpha.5
@@ -111,20 +117,17 @@ dsh, then run the command again. Only grant this permission after reviewing the 
 ## Install a tarball
 
 ```sh
-git clone --branch v0.1.4-alpha.5 --depth 1 https://github.com/suntianc/dsh-antigravity-auth.git
-cd dsh-antigravity-auth
-pnpm install
-pnpm pack
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.4-alpha.5.tgz
+npm pack dsh-antigravity-auth@0.1.4-alpha.6
+dsh plugin --profile web add ./dsh-antigravity-auth-0.1.4-alpha.6.tgz
 ```
 
 ## Upgrade
 
-Stop the running `dsh web` process and verify that the Host itself is already on DSH `0.1.2-alpha.5`; upgrade DSH first if it is not. Then install the matching plugin release and verify the profile entry:
+Stop the running `dsh web` process and verify that the Host itself is already on DSH `0.1.2-alpha.5` or `0.1.3-alpha.1`; upgrade DSH first if it is not. Then install the matching plugin release and verify the profile entry:
 
 ```sh
-dsh --version # must report 0.1.2-alpha.5
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.5
+dsh --version # must report 0.1.2-alpha.5 or 0.1.3-alpha.1
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.6
 dsh plugin --profile web list
 ```
 

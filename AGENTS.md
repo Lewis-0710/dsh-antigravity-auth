@@ -18,7 +18,7 @@ The repository and issue tracker are public, while the integrated Antigravity ba
 ## DSH compatibility baseline
 
 - The minimum and tested DSH package baseline is `dsh-v0.1.2-alpha.5` (`0.1.2-alpha.5` on npm). The upgrade impact source is `docs/research/dsh-v0.1.2-alpha.5-cross-plugin-impact.md`; the prior rc.2 assessment remains historical evidence only.
-- DSH peer dependencies use `^0.1.2-alpha.5`; development dependencies and the lockfile resolve the exact `0.1.2-alpha.5` line with Cordis `4.0.2` and Schemastery `3.18.2`. Do not reintroduce older or mixed DSH prerelease families.
+- DSH peer dependencies use `^0.1.2-alpha.5 || ^0.1.3-alpha.1`; development dependencies and the lockfile resolve the exact `0.1.2-alpha.5` line with Cordis `4.0.2` and Schemastery `3.18.2`. Do not reintroduce older or mixed DSH prerelease families.
 - A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
 - alpha.5 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here, while using `ToolCallId`, `ctx.settings.installSection()`, Session snapshot accessors, and the current Connection/client package topology. Account RPC must stay behind the plugin-owned static loopback guard: only an explicit `127.0.0.1` Web bind reaches the real dispatcher; an absent, all-interface, or unknown Web bind receives only the inert `loopback-required` handler because alpha.5 has no public per-method or carrier authority tier.
 - Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
@@ -81,3 +81,7 @@ Every handoff must state:
 - changed files;
 - tests/checks executed;
 - whether any live account, profile, remote, commit, push, publish, or deployment action occurred.
+
+## Additional verified source target
+
+DSH `0.1.3-alpha.1` at `d347e703908d0406b7a7ef80e3a0e594d86b2215` is verified through the isolated workflow in `docs/dsh-source-verification.md`. Keep the installable alpha.5 dev/lock baseline until the new npm family is available; peers explicitly include both targets. This is two separate coherent graphs, not permission to mix prereleases. Run both `pnpm run check` and the source check when changing compatibility-sensitive behavior.
