@@ -11,7 +11,7 @@ import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
 import { ANTIGRAVITY_AUTH_RPC_CHANNEL, handleAntigravityAuthRpc } from './rpc.ts'
-import { createLoopbackRpcGuard } from './loopback-rpc.ts'
+import { createLoopbackRpcGuard, loopbackMode, type LoopbackRpcMode } from './loopback-rpc.ts'
 import { mountCapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-auth'
@@ -23,6 +23,10 @@ export function apply(ctx: Context): void {
     storePath: defaultAuthStorePath(),
     autoActivateGates: true,
   })
+  // Shared account-control activation state: the connection inject below
+  // records the WebServer bind; the slash command and account RPC consult the
+  // same policy, so a non-loopback composition denies every account operation.
+  let accountMode: LoopbackRpcMode = 'blocked'
   const runtime = ctx as unknown as {
     llm?: {
       listProviders?: () => readonly { id: string }[]
@@ -38,6 +42,7 @@ export function apply(ctx: Context): void {
   const unprovide = contextWithProvide.provide?.('antigravityAuth', service) ?? (() => {})
   ctx.inject(['connection'], (connectionCtx) => {
     const webServer = connectionCtx.get('webServer')
+    accountMode = loopbackMode(webServer?.host)
     const guard = createLoopbackRpcGuard(
       webServer?.host,
       (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
@@ -64,7 +69,7 @@ export function apply(ctx: Context): void {
     cleanup: unprovide,
     label: 'antigravity-auth: OAuth and LLM operations',
   })
-  ctx.inject(['commands'], commandCtx => commandCtx.commands.register(createAntigravityAuthCommand(service)))
+  ctx.inject(['commands'], commandCtx => commandCtx.commands.register(createAntigravityAuthCommand(service, () => accountMode)))
 }
 
 export * from './auth-service.ts'

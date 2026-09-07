@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -257,5 +258,58 @@ describe('bootstrap lifecycle boundary', () => {
     expect(() => applyImage()).not.toThrow()
     expect(() => applyVideo()).not.toThrow()
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('denies account operations through the slash command on a non-loopback bind', async () => {
+    let registered: CommandDefinition | undefined
+    const handle = vi.fn(() => vi.fn())
+    const warn = vi.fn()
+    const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
+      connection: { rpc: { handle } },
+      commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
+      get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
+      logger: { warn },
+    }))
+
+    applyAuth({ inject } as never)
+    expect(registered).toBeDefined()
+    expect(warn).toHaveBeenCalledOnce()
+
+    await expect(registered!.handler({ rawInput: 'logout' } as never)).resolves.toEqual({
+      kind: 'error',
+      text: 'Antigravity account controls require a loopback-bound DSH Host',
+    })
+  })
+
+  it('allows the slash command only on an explicit loopback bind', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-loopback-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    try {
+      let registered: CommandDefinition | undefined
+      const handle = vi.fn(() => vi.fn())
+      const warn = vi.fn()
+      const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
+        connection: { rpc: { handle } },
+        commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
+        get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
+        logger: { warn },
+      }))
+
+      applyAuth({ inject } as never)
+      expect(registered).toBeDefined()
+      expect(warn).not.toHaveBeenCalled()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a loopback-bound')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

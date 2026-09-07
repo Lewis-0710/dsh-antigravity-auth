@@ -127,7 +127,7 @@ dsh plugin --profile web list
 
 ## 终端登录命令
 
-在提供 DSH `commands` 缝的交互界面（例如 `deepseek-tui` profile）上，本 bundle 会注册 `antigravity-auth` slash 命令，作为 Web 设置卡片的替代登录入口：
+在提供 DSH `commands` 缝的交互界面上，本 bundle 会注册 `antigravity-auth` slash 命令，作为 Web 设置卡片的替代入口：
 
 ```text
 /antigravity-auth            # 查看当前登录状态（默认）
@@ -136,7 +136,9 @@ dsh plugin --profile web list
 /antigravity-auth logout     # 清除共享的 Antigravity 凭证
 ```
 
-`login` 会确认非官方通道的风险提示、启动 loopback OAuth 流程，并打印需要在浏览器中打开的授权链接；回调在 `127.0.0.1:51121` 完成登录。之后可运行 `/antigravity-auth status` 确认。Token、verifier 与授权码绝不会出现在命令输出或会话日志中。
+账户操作与账户 RPC 共享同一 fail-closed 激活策略：仅在 DSH WebServer 显式绑定 `127.0.0.1` 时执行。其他组合（all-interface 绑定，或无 Web Host 的终端 profile）下，命令返回 `loopback-required` 错误且不触碰认证服务。
+
+`login` 会确认非官方通道的风险提示，并在 `127.0.0.1:51121` 启动 loopback OAuth 流程。授权链接**不会**被回显到命令结果中：`CommandResult.text` 会被原样写入会话的 `command/done` 事件，而该链接携带 OAuth state 句柄与 PKCE challenge。请在 loopback 绑定的 Host 上通过 Antigravity Auth 设置卡片显示的授权链接完成登录，然后运行 `/antigravity-auth status`。Token、verifier、授权码与回调 URL 绝不会出现在命令输出或会话日志中。
 
 ## Host 配置
 

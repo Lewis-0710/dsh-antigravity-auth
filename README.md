@@ -135,7 +135,7 @@ Restart `dsh web` and refresh the browser.
 
 ## Terminal login command
 
-On interactive surfaces that host the DSH `commands` seam (for example the `deepseek-tui` profile), the bundle registers an `antigravity-auth` slash command as an alternative to the Web settings card:
+On interactive surfaces that host the DSH `commands` seam, the bundle registers an `antigravity-auth` slash command as an alternative to the Web settings card:
 
 ```text
 /antigravity-auth            # show current login state (default)
@@ -144,7 +144,9 @@ On interactive surfaces that host the DSH `commands` seam (for example the `deep
 /antigravity-auth logout     # clear the shared Antigravity credential
 ```
 
-`login` acknowledges the unofficial-channel risk note, starts the loopback OAuth flow, and prints the authorization URL to open in your browser; the callback completes the login on `127.0.0.1:51121`. Run `/antigravity-auth status` afterwards to confirm. Tokens, verifier, and codes never appear in command output or the session log.
+Account operations share the same fail-closed activation policy as the account RPC: they run only when the DSH WebServer is bound explicitly to `127.0.0.1`. On any other composition (all-interface bind, or a terminal profile with no Web Host) the command answers a `loopback-required` error without touching the auth service.
+
+`login` acknowledges the unofficial-channel risk note and starts the loopback OAuth flow on `127.0.0.1:51121`. The authorization URL is deliberately **not** echoed into the command result: `CommandResult.text` is persisted verbatim into the session's `command/done` event, and the URL carries the OAuth state handle and PKCE challenge. Complete sign-in from the authorization link shown by the Antigravity Auth settings card on the loopback-bound Host, then run `/antigravity-auth status`. Tokens, verifier, codes, and callback URLs never appear in command output or the session log.
 
 ## Host configuration
 

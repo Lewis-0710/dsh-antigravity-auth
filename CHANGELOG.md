@@ -5,7 +5,7 @@
 - Add explicit DSH `0.1.3-alpha.1` source compatibility alongside the npm alpha.5 baseline; keep dependency graphs separate.
 - Add reproducible isolated source-package checks and coherent lockfile validation.
 
-- Added an `antigravity-auth` slash command for terminal surfaces that host the DSH `commands` seam: `status` (default), `login`, `cancel`, and `logout` operations against the shared Host OAuth service. `login` acknowledges the unofficial-channel risk note, starts the loopback OAuth flow, and prints the authorization URL for the browser; tokens, verifier, and codes never appear in command output or the session log.
+- Added an `antigravity-auth` slash command for surfaces that host the DSH `commands` seam: `status` (default), `login`, `cancel`, and `logout` operations against the shared Host OAuth service. Account operations share the account RPC's fail-closed activation policy and run only on an explicitly `127.0.0.1`-bound DSH WebServer; any other composition answers `loopback-required` without touching the auth service. `login` acknowledges the unofficial-channel risk note and starts the loopback OAuth flow without echoing the authorization URL (state handle and PKCE challenge) into persisted command results or the session log.
 
 ## [0.1.4-alpha.5] - 2026-09-03
 

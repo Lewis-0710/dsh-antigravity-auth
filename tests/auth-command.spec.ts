@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createAntigravityAuthCommand } from '../src/auth-command.ts'
 import type { LogoutResult } from '../src/credential-coordinator.ts'
 import type { LoginActionResult, LoginStartResult } from '../src/login-types.ts'
+import type { LoopbackRpcMode } from '../src/loopback-rpc.ts'
 import type { AntigravityStatusView, RiskAcknowledgementResult } from '../src/status.ts'
 
 const AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state'
@@ -69,13 +70,17 @@ function emptyService() {
   }
 }
 
+function makeCommand(service: ReturnType<typeof emptyService>, mode: LoopbackRpcMode = 'enabled') {
+  return createAntigravityAuthCommand(service, () => mode)
+}
+
 describe('Antigravity auth command', () => {
   it('reports value-free login status by default', async () => {
     const service = {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => idleStatus()),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: '' } as never)).resolves.toEqual({
       kind: 'success',
@@ -89,7 +94,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => configuredStatus()),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'status' } as never)).resolves.toEqual({
       kind: 'success',
@@ -102,7 +107,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => pendingStatus()),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: '' } as never)).resolves.toEqual({
       kind: 'success',
@@ -110,7 +115,7 @@ describe('Antigravity auth command', () => {
     })
   })
 
-  it('starts the browser authorization flow after acknowledging risk', async () => {
+  it('starts the browser authorization flow after acknowledging risk without persisting the authorization URL', async () => {
     const service = {
       ...emptyService(),
       acknowledgeRisk: vi.fn(async (): Promise<RiskAcknowledgementResult> => ({ acknowledged: true })),
@@ -122,12 +127,20 @@ describe('Antigravity auth command', () => {
       })),
       status: vi.fn(async (): Promise<AntigravityStatusView> => idleStatus()),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
-    await expect(command.handler({ rawInput: ' login ' } as never)).resolves.toEqual({
+    const result = await command.handler({ rawInput: ' login ' } as never)
+    expect(result).toEqual({
       kind: 'success',
-      text: `Antigravity authorization started (unofficial Antigravity channel, personal use). Open ${AUTHORIZATION_URL} in your browser; after authorizing, run /antigravity-auth status.`,
+      text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in, then run /antigravity-auth status.',
     })
+    // The OAuth authorization URL (state handle + PKCE challenge) must not be
+    // persisted into the session's command/done event via the result text.
+    if (result.kind === 'success') {
+      expect(result.text).not.toContain(AUTHORIZATION_URL)
+      expect(result.text).not.toContain('state=')
+      expect(result.text).not.toContain('code_challenge')
+    }
     expect(service.acknowledgeRisk).toHaveBeenCalledTimes(1)
     expect(service.startLogin).toHaveBeenCalledTimes(1)
   })
@@ -137,7 +150,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => pendingStatus()),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'login' } as never)).resolves.toEqual({
       kind: 'error',
@@ -152,7 +165,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       cancelLogin: vi.fn(async (): Promise<LoginActionResult> => ({ phase: 'cancelled' })),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'cancel' } as never)).resolves.toEqual({
       kind: 'success',
@@ -166,7 +179,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       logout: vi.fn(async (): Promise<LogoutResult> => ({ state: 'logged-out' })),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'logout' } as never)).resolves.toEqual({
       kind: 'success',
@@ -177,7 +190,7 @@ describe('Antigravity auth command', () => {
 
   it('rejects unknown operations without touching the account', async () => {
     const service = emptyService()
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'device' } as never)).resolves.toEqual({
       kind: 'error',
@@ -194,11 +207,29 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => { throw new Error('auth store is locked') }),
     }
-    const command = createAntigravityAuthCommand(service)
+    const command = makeCommand(service)
 
     await expect(command.handler({ rawInput: 'status' } as never)).resolves.toEqual({
       kind: 'error',
       text: 'reading Antigravity auth status failed: auth store is locked',
     })
   })
+
+  it.each(['', 'status', 'login', 'cancel', 'logout'])(
+    'denies %s off-loopback without reaching the auth service',
+    async (rawInput) => {
+      const service = emptyService()
+      const command = makeCommand(service, 'blocked')
+
+      await expect(command.handler({ rawInput } as never)).resolves.toEqual({
+        kind: 'error',
+        text: 'Antigravity account controls require a loopback-bound DSH Host',
+      })
+      expect(service.status).not.toHaveBeenCalled()
+      expect(service.acknowledgeRisk).not.toHaveBeenCalled()
+      expect(service.startLogin).not.toHaveBeenCalled()
+      expect(service.cancelLogin).not.toHaveBeenCalled()
+      expect(service.logout).not.toHaveBeenCalled()
+    },
+  )
 })
