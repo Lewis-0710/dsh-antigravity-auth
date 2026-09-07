@@ -15,7 +15,7 @@ import { createLoopbackRpcGuard } from './loopback-rpc.ts'
 import { mountCapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-auth'
-export const inject = ['connection', 'llm', 'attachments']
+export const inject = ['llm', 'attachments']
 
 /** Mount the Host-only OAuth service and its guarded account RPC channel. */
 export function apply(ctx: Context): void {
