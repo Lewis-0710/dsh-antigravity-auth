@@ -125,6 +125,19 @@ dsh plugin --profile web list
 
 重启 `dsh web` 并刷新浏览器。
 
+## 终端登录命令
+
+在提供 DSH `commands` 缝的交互界面（例如 `deepseek-tui` profile）上，本 bundle 会注册 `antigravity-auth` slash 命令，作为 Web 设置卡片的替代登录入口：
+
+```text
+/antigravity-auth            # 查看当前登录状态（默认）
+/antigravity-auth login      # 启动 Google OAuth 授权流程
+/antigravity-auth cancel     # 取消进行中的授权
+/antigravity-auth logout     # 清除共享的 Antigravity 凭证
+```
+
+`login` 会确认非官方通道的风险提示、启动 loopback OAuth 流程，并打印需要在浏览器中打开的授权链接；回调在 `127.0.0.1:51121` 完成登录。之后可运行 `/antigravity-auth status` 确认。Token、verifier 与授权码绝不会出现在命令输出或会话日志中。
+
 ## Host 配置
 
 能力包 patch 按依赖顺序启用独立的 Host 行：

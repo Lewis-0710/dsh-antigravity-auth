@@ -33,6 +33,7 @@ describe('bootstrap lifecycle boundary', () => {
     const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
       connection: { rpc: { handle } },
+      commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
     }))
     const fetch = vi.fn()
@@ -61,6 +62,7 @@ describe('bootstrap lifecycle boundary', () => {
     const warn = vi.fn()
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
       connection: { rpc: { handle } },
+      commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
       logger: { warn },
     }))
@@ -116,6 +118,7 @@ describe('bootstrap lifecycle boundary', () => {
       const registerAdapter = vi.fn(() => disposeAdapter)
       const runtime = {
         connection: { rpc: { handle: vi.fn(() => vi.fn()) } },
+        commands: { register: vi.fn(() => vi.fn()) },
         llm: { registerAdapter, listProviders: vi.fn(() => []) },
         provide: vi.fn((_name: string, service: AntigravityAuthService) => { provided = service; return vi.fn(async () => {}) }),
         get: vi.fn((service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined),

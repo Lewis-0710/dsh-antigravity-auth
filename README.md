@@ -133,6 +133,19 @@ dsh plugin --profile web list
 
 Restart `dsh web` and refresh the browser.
 
+## Terminal login command
+
+On interactive surfaces that host the DSH `commands` seam (for example the `deepseek-tui` profile), the bundle registers an `antigravity-auth` slash command as an alternative to the Web settings card:
+
+```text
+/antigravity-auth            # show current login state (default)
+/antigravity-auth login      # start the Google OAuth authorization flow
+/antigravity-auth cancel     # cancel a pending authorization
+/antigravity-auth logout     # clear the shared Antigravity credential
+```
+
+`login` acknowledges the unofficial-channel risk note, starts the loopback OAuth flow, and prints the authorization URL to open in your browser; the callback completes the login on `127.0.0.1:51121`. Run `/antigravity-auth status` afterwards to confirm. Tokens, verifier, and codes never appear in command output or the session log.
+
 ## Host configuration
 
 The bundle patch activates independent Host rows in dependency order:

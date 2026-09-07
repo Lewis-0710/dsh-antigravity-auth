@@ -3,9 +3,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-client-connection'
+import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-llm'
 import { createAntigravityAuthService } from './auth-service.ts'
+import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
 import { ANTIGRAVITY_AUTH_RPC_CHANNEL, handleAntigravityAuthRpc } from './rpc.ts'
@@ -62,6 +64,7 @@ export function apply(ctx: Context): void {
     cleanup: unprovide,
     label: 'antigravity-auth: OAuth and LLM operations',
   })
+  ctx.inject(['commands'], commandCtx => commandCtx.commands.register(createAntigravityAuthCommand(service)))
 }
 
 export * from './auth-service.ts'

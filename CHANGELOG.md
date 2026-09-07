@@ -5,6 +5,8 @@
 - Add explicit DSH `0.1.3-alpha.1` source compatibility alongside the npm alpha.5 baseline; keep dependency graphs separate.
 - Add reproducible isolated source-package checks and coherent lockfile validation.
 
+- Added an `antigravity-auth` slash command for terminal surfaces that host the DSH `commands` seam: `status` (default), `login`, `cancel`, and `logout` operations against the shared Host OAuth service. `login` acknowledges the unofficial-channel risk note, starts the loopback OAuth flow, and prints the authorization URL for the browser; tokens, verifier, and codes never appear in command output or the session log.
+
 ## [0.1.4-alpha.5] - 2026-09-03
 
 - Raised the development and peer baseline to DSH `0.1.2-alpha.5`, Cordis `4.0.2`, and Schemastery `3.18.2`, with one coherent prerelease dependency graph.

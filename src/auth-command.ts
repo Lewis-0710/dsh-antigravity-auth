@@ -1,0 +1,87 @@
+/** Human command for inspecting and starting the shared Antigravity login. */
+import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
+import type { AntigravityAuthService } from './auth-service.ts'
+import type { AntigravityStatusView } from './status.ts'
+
+type AuthCommandService = Pick<
+  AntigravityAuthService,
+  'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout'
+>
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function formatStatus(status: AntigravityStatusView): string {
+  const login = status.login
+  const parts = [
+    login.configured ? 'configured' : 'not configured',
+    login.projectAvailable ? 'project available' : 'no project',
+  ]
+  if (login.maskedEmail !== undefined) parts.push(login.maskedEmail)
+  if (login.phase === 'pending') {
+    parts.push('authorization pending')
+  } else if (login.phase !== 'idle' && login.phase !== 'success') {
+    parts.push(`phase ${login.phase}`)
+  }
+  if (login.errorCode !== undefined) parts.push(`error ${login.errorCode}`)
+  const available = status.capabilities
+    .filter(capability => capability.state === 'available')
+    .map(capability => capability.id)
+  if (available.length > 0) parts.push(`available: ${available.join(', ')}`)
+  return `Antigravity auth: ${parts.join('; ')}`
+}
+
+/** Build the slash command shared by every interactive DSH surface. */
+export function createAntigravityAuthCommand(service: AuthCommandService): CommandDefinition {
+  return {
+    name: 'antigravity-auth',
+    description: 'Inspect or start the Antigravity OAuth login',
+    input: { hint: '[status|login|cancel|logout]' },
+    handler: async ({ rawInput }) => {
+      const operation = rawInput.trim() || 'status'
+      if (operation === 'status') {
+        try {
+          return { kind: 'success', text: formatStatus(await service.status()) }
+        } catch (error) {
+          return { kind: 'error', text: `reading Antigravity auth status failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'login') {
+        try {
+          const current = await service.status()
+          if (current.login.phase === 'pending') {
+            return { kind: 'error', text: 'an Antigravity authorization is already pending; finish it in the browser or run /antigravity-auth cancel' }
+          }
+          await service.acknowledgeRisk()
+          const started = await service.startLogin()
+          return {
+            kind: 'success',
+            text: `Antigravity authorization started (unofficial Antigravity channel, personal use). Open ${started.authorizationUrl} in your browser; after authorizing, run /antigravity-auth status.`,
+          }
+        } catch (error) {
+          return { kind: 'error', text: `starting Antigravity login failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'cancel') {
+        try {
+          const result = await service.cancelLogin()
+          return result.phase === 'cancelled'
+            ? { kind: 'success', text: 'Antigravity authorization cancelled.' }
+            : { kind: 'error', text: `Antigravity authorization could not be cancelled (phase ${result.phase}).` }
+        } catch (error) {
+          return { kind: 'error', text: `cancelling Antigravity login failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'logout') {
+        try {
+          await service.logout()
+          return { kind: 'success', text: 'Antigravity logged out.' }
+        } catch (error) {
+          return { kind: 'error', text: `logging out of Antigravity failed: ${errorMessage(error)}` }
+        }
+      }
+      return { kind: 'error', text: `unknown operation "${operation}" (available: status, login, cancel, logout)` }
+    },
+  }
+}
