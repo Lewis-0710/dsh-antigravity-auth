@@ -1,7 +1,8 @@
 /** Human command for inspecting and starting the shared Antigravity login. */
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import type { AntigravityAuthService } from './auth-service.ts'
-import { LOOPBACK_REQUIRED_MESSAGE, type LoopbackRpcMode } from './loopback-rpc.ts'
+import { ACCOUNT_COMMAND_DENIED_MESSAGE, type LoopbackRpcMode } from './loopback-rpc.ts'
+import { openAuthorizationUrl } from './open-authorization-url.ts'
 import type { AntigravityStatusView } from './status.ts'
 
 type AuthCommandService = Pick<
@@ -36,13 +37,18 @@ function formatStatus(status: AntigravityStatusView): string {
 /**
  * Build the slash command shared by every interactive DSH surface.
  * @param service - the shared Host auth service.
- * @param accountMode - live account-control activation mode (the same loopback
- * policy the account RPC uses); when blocked the command denies every
- * operation without touching the auth service.
+ * @param accountMode - live account-control activation for this Host
+ * composition (enabled on a local terminal Host with no WebServer or a
+ * loopback-bound WebServer, blocked on a public Web bind); when blocked the
+ * command denies every operation without touching the auth service.
+ * @param openUrl - best-effort Host browser launcher for the authorization
+ * URL; the URL is delivered there and never echoed into the command result,
+ * because `CommandResult.text` is persisted verbatim into `command/done`.
  */
 export function createAntigravityAuthCommand(
   service: AuthCommandService,
   accountMode: () => LoopbackRpcMode,
+  openUrl: (url: string) => void = openAuthorizationUrl,
 ): CommandDefinition {
   return {
     name: 'antigravity-auth',
@@ -50,7 +56,7 @@ export function createAntigravityAuthCommand(
     input: { hint: '[status|login|cancel|logout]' },
     handler: async ({ rawInput }) => {
       if (accountMode() === 'blocked') {
-        return { kind: 'error', text: LOOPBACK_REQUIRED_MESSAGE }
+        return { kind: 'error', text: ACCOUNT_COMMAND_DENIED_MESSAGE }
       }
       const operation = rawInput.trim() || 'status'
       if (operation === 'status') {
@@ -67,10 +73,14 @@ export function createAntigravityAuthCommand(
             return { kind: 'error', text: 'an Antigravity authorization is already pending; finish it in the browser or run /antigravity-auth cancel' }
           }
           await service.acknowledgeRisk()
-          await service.startLogin()
+          const started = await service.startLogin()
+          // Terminal handoff: hand the authorization URL to the host browser.
+          // It is not echoed into the result text, which the session persists
+          // verbatim into command/done together with the OAuth state handle.
+          openUrl(started.authorizationUrl)
           return {
             kind: 'success',
-            text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in, then run /antigravity-auth status.',
+            text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',
           }
         } catch (error) {
           return { kind: 'error', text: `starting Antigravity login failed: ${errorMessage(error)}` }

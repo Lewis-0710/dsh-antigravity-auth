@@ -1,11 +1,13 @@
 # Changelog
 
+## [Unreleased]
+
+- Added an `antigravity-auth` slash command (`status` default, `login`, `cancel`, `logout`) on surfaces that host the DSH `commands` seam. Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer, or an explicitly `127.0.0.1`-bound one) and are denied before touching the auth service whenever the WebServer exposes the shared commands seam on another interface. `login` opens the Google sign-in page in the default browser (best-effort platform opener) and never echoes the authorization URL (state handle and PKCE challenge) into persisted command results or the session log.
+
 ## [0.1.4-alpha.6] - 2026-09-07
 
 - Add explicit DSH `0.1.3-alpha.1` source compatibility alongside the npm alpha.5 baseline; keep dependency graphs separate.
 - Add reproducible isolated source-package checks and coherent lockfile validation.
-
-- Added an `antigravity-auth` slash command for surfaces that host the DSH `commands` seam: `status` (default), `login`, `cancel`, and `logout` operations against the shared Host OAuth service. Account operations share the account RPC's fail-closed activation policy and run only on an explicitly `127.0.0.1`-bound DSH WebServer; any other composition answers `loopback-required` without touching the auth service. `login` acknowledges the unofficial-channel risk note and starts the loopback OAuth flow without echoing the authorization URL (state handle and PKCE challenge) into persisted command results or the session log.
 
 ## [0.1.4-alpha.5] - 2026-09-03
 

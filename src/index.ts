@@ -11,7 +11,9 @@ import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
 import { ANTIGRAVITY_AUTH_RPC_CHANNEL, handleAntigravityAuthRpc } from './rpc.ts'
-import { createLoopbackRpcGuard, loopbackMode, type LoopbackRpcMode } from './loopback-rpc.ts'
+import {
+  commandAccountMode, createLoopbackRpcGuard, type LoopbackRpcMode,
+} from './loopback-rpc.ts'
 import { mountCapabilityLifecycle } from './capability-lifecycle.ts'
 
 export const name = 'antigravity-auth'
@@ -23,10 +25,12 @@ export function apply(ctx: Context): void {
     storePath: defaultAuthStorePath(),
     autoActivateGates: true,
   })
-  // Shared account-control activation state: the connection inject below
-  // records the WebServer bind; the slash command and account RPC consult the
-  // same policy, so a non-loopback composition denies every account operation.
-  let accountMode: LoopbackRpcMode = 'blocked'
+  // Account-control activation for the slash command. A terminal composition
+  // composes no public WebServer, so the command starts enabled (local-only
+  // dispatch); the connection inject below records the WebServer bind and
+  // blocks every account operation when the commands seam is exposed beyond
+  // loopback. The account RPC keeps its own ADR-0008 static loopback guard.
+  let accountMode: LoopbackRpcMode = 'enabled'
   const runtime = ctx as unknown as {
     llm?: {
       listProviders?: () => readonly { id: string }[]
@@ -42,7 +46,7 @@ export function apply(ctx: Context): void {
   const unprovide = contextWithProvide.provide?.('antigravityAuth', service) ?? (() => {})
   ctx.inject(['connection'], (connectionCtx) => {
     const webServer = connectionCtx.get('webServer')
-    accountMode = loopbackMode(webServer?.host)
+    accountMode = commandAccountMode(webServer)
     const guard = createLoopbackRpcGuard(
       webServer?.host,
       (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),

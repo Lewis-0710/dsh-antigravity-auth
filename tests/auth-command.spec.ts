@@ -5,7 +5,7 @@ import type { LoginActionResult, LoginStartResult } from '../src/login-types.ts'
 import type { LoopbackRpcMode } from '../src/loopback-rpc.ts'
 import type { AntigravityStatusView, RiskAcknowledgementResult } from '../src/status.ts'
 
-const AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state'
+const AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth?state=test-state&code_challenge=challenge'
 
 function idleStatus(): AntigravityStatusView {
   return {
@@ -70,8 +70,10 @@ function emptyService() {
   }
 }
 
-function makeCommand(service: ReturnType<typeof emptyService>, mode: LoopbackRpcMode = 'enabled') {
-  return createAntigravityAuthCommand(service, () => mode)
+function makeHarness(service: ReturnType<typeof emptyService>, mode: LoopbackRpcMode = 'enabled') {
+  const openUrl = vi.fn()
+  const command = createAntigravityAuthCommand(service, () => mode, openUrl)
+  return { command, openUrl }
 }
 
 describe('Antigravity auth command', () => {
@@ -80,13 +82,14 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => idleStatus()),
     }
-    const command = makeCommand(service)
+    const { command, openUrl } = makeHarness(service)
 
     await expect(command.handler({ rawInput: '' } as never)).resolves.toEqual({
       kind: 'success',
       text: 'Antigravity auth: not configured; no project',
     })
     expect(service.startLogin).not.toHaveBeenCalled()
+    expect(openUrl).not.toHaveBeenCalled()
   })
 
   it('reports a configured account with available capabilities', async () => {
@@ -94,7 +97,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => configuredStatus()),
     }
-    const command = makeCommand(service)
+    const { command } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'status' } as never)).resolves.toEqual({
       kind: 'success',
@@ -107,7 +110,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => pendingStatus()),
     }
-    const command = makeCommand(service)
+    const { command } = makeHarness(service)
 
     await expect(command.handler({ rawInput: '' } as never)).resolves.toEqual({
       kind: 'success',
@@ -115,7 +118,7 @@ describe('Antigravity auth command', () => {
     })
   })
 
-  it('starts the browser authorization flow after acknowledging risk without persisting the authorization URL', async () => {
+  it('hands the authorization URL to the host browser without persisting it in the command result', async () => {
     const service = {
       ...emptyService(),
       acknowledgeRisk: vi.fn(async (): Promise<RiskAcknowledgementResult> => ({ acknowledged: true })),
@@ -127,15 +130,17 @@ describe('Antigravity auth command', () => {
       })),
       status: vi.fn(async (): Promise<AntigravityStatusView> => idleStatus()),
     }
-    const command = makeCommand(service)
+    const { command, openUrl } = makeHarness(service)
 
     const result = await command.handler({ rawInput: ' login ' } as never)
     expect(result).toEqual({
       kind: 'success',
-      text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in, then run /antigravity-auth status.',
+      text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',
     })
-    // The OAuth authorization URL (state handle + PKCE challenge) must not be
-    // persisted into the session's command/done event via the result text.
+    // The URL is delivered to the host browser, never into the session's
+    // command/done event (the result text persists verbatim; the URL carries
+    // the OAuth state handle and PKCE challenge).
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(AUTHORIZATION_URL)
     if (result.kind === 'success') {
       expect(result.text).not.toContain(AUTHORIZATION_URL)
       expect(result.text).not.toContain('state=')
@@ -145,12 +150,12 @@ describe('Antigravity auth command', () => {
     expect(service.startLogin).toHaveBeenCalledTimes(1)
   })
 
-  it('refuses to start login while an authorization is already pending', async () => {
+  it('does not launch a browser when login is already pending', async () => {
     const service = {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => pendingStatus()),
     }
-    const command = makeCommand(service)
+    const { command, openUrl } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'login' } as never)).resolves.toEqual({
       kind: 'error',
@@ -158,6 +163,7 @@ describe('Antigravity auth command', () => {
     })
     expect(service.startLogin).not.toHaveBeenCalled()
     expect(service.acknowledgeRisk).not.toHaveBeenCalled()
+    expect(openUrl).not.toHaveBeenCalled()
   })
 
   it('cancels a pending authorization', async () => {
@@ -165,7 +171,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       cancelLogin: vi.fn(async (): Promise<LoginActionResult> => ({ phase: 'cancelled' })),
     }
-    const command = makeCommand(service)
+    const { command } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'cancel' } as never)).resolves.toEqual({
       kind: 'success',
@@ -179,7 +185,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       logout: vi.fn(async (): Promise<LogoutResult> => ({ state: 'logged-out' })),
     }
-    const command = makeCommand(service)
+    const { command } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'logout' } as never)).resolves.toEqual({
       kind: 'success',
@@ -190,7 +196,7 @@ describe('Antigravity auth command', () => {
 
   it('rejects unknown operations without touching the account', async () => {
     const service = emptyService()
-    const command = makeCommand(service)
+    const { command, openUrl } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'device' } as never)).resolves.toEqual({
       kind: 'error',
@@ -200,6 +206,7 @@ describe('Antigravity auth command', () => {
     expect(service.startLogin).not.toHaveBeenCalled()
     expect(service.cancelLogin).not.toHaveBeenCalled()
     expect(service.logout).not.toHaveBeenCalled()
+    expect(openUrl).not.toHaveBeenCalled()
   })
 
   it('surfaces service failures as command errors', async () => {
@@ -207,7 +214,7 @@ describe('Antigravity auth command', () => {
       ...emptyService(),
       status: vi.fn(async (): Promise<AntigravityStatusView> => { throw new Error('auth store is locked') }),
     }
-    const command = makeCommand(service)
+    const { command } = makeHarness(service)
 
     await expect(command.handler({ rawInput: 'status' } as never)).resolves.toEqual({
       kind: 'error',
@@ -216,20 +223,21 @@ describe('Antigravity auth command', () => {
   })
 
   it.each(['', 'status', 'login', 'cancel', 'logout'])(
-    'denies %s off-loopback without reaching the auth service',
+    'denies %s on a public-Web composition without reaching the auth service',
     async (rawInput) => {
       const service = emptyService()
-      const command = makeCommand(service, 'blocked')
+      const { command, openUrl } = makeHarness(service, 'blocked')
 
       await expect(command.handler({ rawInput } as never)).resolves.toEqual({
         kind: 'error',
-        text: 'Antigravity account controls require a loopback-bound DSH Host',
+        text: 'Antigravity account commands require a local DSH Host (no WebServer or 127.0.0.1-bound)',
       })
       expect(service.status).not.toHaveBeenCalled()
       expect(service.acknowledgeRisk).not.toHaveBeenCalled()
       expect(service.startLogin).not.toHaveBeenCalled()
       expect(service.cancelLogin).not.toHaveBeenCalled()
       expect(service.logout).not.toHaveBeenCalled()
+      expect(openUrl).not.toHaveBeenCalled()
     },
   )
 })

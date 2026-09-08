@@ -144,9 +144,9 @@ On interactive surfaces that host the DSH `commands` seam, the bundle registers 
 /antigravity-auth logout     # clear the shared Antigravity credential
 ```
 
-Account operations share the same fail-closed activation policy as the account RPC: they run only when the DSH WebServer is bound explicitly to `127.0.0.1`. On any other composition (all-interface bind, or a terminal profile with no Web Host) the command answers a `loopback-required` error without touching the auth service.
+Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer at all, or one bound explicitly to `127.0.0.1`) and are denied before touching the auth service only when the WebServer exposes the shared `commands` seam on any other interface. The account RPC keeps its own stricter ADR-0008 guard (a real dispatcher on the explicit `127.0.0.1` bind only).
 
-`login` acknowledges the unofficial-channel risk note and starts the loopback OAuth flow on `127.0.0.1:51121`. The authorization URL is deliberately **not** echoed into the command result: `CommandResult.text` is persisted verbatim into the session's `command/done` event, and the URL carries the OAuth state handle and PKCE challenge. Complete sign-in from the authorization link shown by the Antigravity Auth settings card on the loopback-bound Host, then run `/antigravity-auth status`. Tokens, verifier, codes, and callback URLs never appear in command output or the session log.
+`login` acknowledges the unofficial-channel risk note and starts the loopback OAuth flow, whose temporary callback listener binds `127.0.0.1:51121` independently of any DSH WebServer. The command then opens the Google sign-in page in your default browser with a best-effort platform opener; the authorization URL is **not** echoed into the command result, because `CommandResult.text` is persisted verbatim into the session's `command/done` event and the URL carries the OAuth state handle and PKCE challenge. Complete sign-in in the browser, then run `/antigravity-auth status`. Tokens, verifier, codes, and callback URLs never appear in command output or the session log. DSH exposes no public transient-presentation or browser-launch API for plugins, so on a Host without a desktop browser the interactive handoff cannot complete from the terminal.
 
 ## Host configuration
 

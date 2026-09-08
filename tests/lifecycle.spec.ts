@@ -260,7 +260,7 @@ describe('bootstrap lifecycle boundary', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('denies account operations through the slash command on a non-loopback bind', async () => {
+  it('denies account operations through the slash command on a public Web bind', async () => {
     let registered: CommandDefinition | undefined
     const handle = vi.fn(() => vi.fn())
     const warn = vi.fn()
@@ -277,11 +277,11 @@ describe('bootstrap lifecycle boundary', () => {
 
     await expect(registered!.handler({ rawInput: 'logout' } as never)).resolves.toEqual({
       kind: 'error',
-      text: 'Antigravity account controls require a loopback-bound DSH Host',
+      text: 'Antigravity account commands require a local DSH Host (no WebServer or 127.0.0.1-bound)',
     })
   })
 
-  it('allows the slash command only on an explicit loopback bind', async () => {
+  it('allows the slash command on an explicit loopback bind', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-loopback-'))
     const previousDataHome = process.env.XDG_DATA_HOME
     process.env.XDG_DATA_HOME = root
@@ -304,11 +304,68 @@ describe('bootstrap lifecycle boundary', () => {
       expect(result.kind).toBe('success')
       if (result.kind === 'success') {
         expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
-        expect(result.text).not.toContain('require a loopback-bound')
+        expect(result.text).not.toContain('require a local DSH Host')
       }
     } finally {
       if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
       else process.env.XDG_DATA_HOME = previousDataHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('allows the slash command on a terminal composition without a WebServer service', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-terminal-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    const ctx = new Context()
+    try {
+      let registered: CommandDefinition | undefined
+      ctx.provide('connection', { rpc: { handle: vi.fn(() => vi.fn()) } })
+      ctx.provide('commands', {
+        register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} },
+      })
+      applyAuth(ctx)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(registered).toBeDefined()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a local DSH Host')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('allows the slash command on a terminal composition without WebServer or connection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-terminal-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    const ctx = new Context()
+    try {
+      let registered: CommandDefinition | undefined
+      ctx.provide('commands', {
+        register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} },
+      })
+      applyAuth(ctx)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(registered).toBeDefined()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a local DSH Host')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await ctx.fiber.dispose()
       await rm(root, { recursive: true, force: true })
     }
   })
