@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 
-- Added an `antigravity-auth` slash command (`status` default, `login`, `cancel`, `logout`) on surfaces that host the DSH `commands` seam. Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer, or an explicitly `127.0.0.1`-bound one) and are denied before touching the auth service whenever the WebServer exposes the shared commands seam on another interface. `login` opens the Google sign-in page in the default browser (best-effort platform opener) and never echoes the authorization URL (state handle and PKCE challenge) into persisted command results or the session log.
+- Added an `antigravity-auth` slash command (`status` default, `login`, `cancel`, `logout`) on surfaces that host the DSH `commands` seam. Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer, or an explicitly `127.0.0.1`-bound one) and are denied before touching the auth service whenever the WebServer exposes the shared commands seam on another interface. `login` opens the Google sign-in page in the default browser (best-effort platform opener) and never echoes the authorization URL (state handle and PKCE challenge) into persisted command results or the session log. The Windows opener passes the URL quoted and verbatim to `cmd /c start`, so every `&`-separated OAuth parameter reaches the browser, and a failed browser launch is reported without reproducing the URL.
 
 ## [0.1.4-alpha.6] - 2026-09-07
 

@@ -6,10 +6,10 @@
  * DSH exposes no public transient-presentation or browser-authority API for
  * plugins to hand off an external login URL, so this module spawns the
  * platform default opener directly, mirroring the best-effort helper the DSH
- * TUI renderer uses for its own hrefs, and swallows every failure: a Host
- * without a desktop browser simply cannot complete interactive Google sign-in
- * from the terminal (documented limitation; no public Host API exists to
- * close it).
+ * TUI renderer uses for its own hrefs, and reports every failure as `false`: a
+ * Host without a desktop browser simply cannot complete interactive Google
+ * sign-in from the terminal (documented limitation; no public Host API exists
+ * to close it).
  *
  * @module antigravity-auth/open-authorization-url
  */
@@ -25,6 +25,13 @@ export interface OpenerSpec {
   readonly command: string
   /** Arguments, with the URL last on POSIX. */
   readonly args: string[]
+  /**
+   * Whether the argument list must reach the Windows shell without Node's own
+   * quoting. `cmd` splits an unquoted `&` into a second command, and libuv
+   * quotes an argument only when it contains whitespace or a quote, so the
+   * Windows opener supplies its own quotes and disables Node's rewriting.
+   */
+  readonly verbatimArguments: boolean
 }
 
 /** The Google authorization endpoint this plugin starts logins against. */
@@ -33,13 +40,21 @@ const AUTHORIZATION_HOST = 'accounts.google.com'
 /**
  * Resolve the host default-browser opener. Darwin uses `open`, Windows
  * `cmd /c start`, elsewhere `xdg-open`.
+ *
+ * The Windows command line is `cmd /c start "" "<url>"`: the empty quoted token
+ * is the `start` window title (without it `start` treats the URL as the title),
+ * and the quoted URL keeps its `&`-separated query parameters from being read
+ * as command separators. Both quotes reach `cmd` verbatim because Node's
+ * default argument handling would leave a `&`-only argument unquoted.
  * @param platform - `process.platform` snapshot.
  * @param url - already-validated https authorization URL.
  */
 export function openerSpec(platform: NodeJS.Platform, url: string): OpenerSpec {
-  if (platform === 'darwin') return { command: 'open', args: [url] }
-  if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', '', url] }
-  return { command: 'xdg-open', args: [url] }
+  if (platform === 'darwin') return { command: 'open', args: [url], verbatimArguments: false }
+  if (platform === 'win32') {
+    return { command: 'cmd', args: ['/c', 'start', '""', `"${url}"`], verbatimArguments: true }
+  }
+  return { command: 'xdg-open', args: [url], verbatimArguments: false }
 }
 
 /**
@@ -61,24 +76,36 @@ export function isAntigravityAuthorizationUrl(value: string): boolean {
  * @param url - the Google authorization URL returned by `OAuthFlow.start()`.
  * @param spawnFn - injectable spawn.
  * @param platform - injectable platform.
+ * @returns true once the opener process spawned; false when the URL is not an
+ * Antigravity authorization URL, spawn threw, or the opener could not start.
+ * The URL never enters the returned value or a diagnostic.
  */
-export function openAuthorizationUrl(
+export async function openAuthorizationUrl(
   url: string,
   spawnFn: OpenSpawnFn = spawn,
   platform: NodeJS.Platform = process.platform,
-): void {
-  if (!isAntigravityAuthorizationUrl(url)) return
+): Promise<boolean> {
+  if (!isAntigravityAuthorizationUrl(url)) return false
   const spec = openerSpec(platform, url)
   try {
     const child: ChildProcess = spawnFn(spec.command, spec.args, {
       detached: true,
       stdio: 'ignore',
+      windowsVerbatimArguments: spec.verbatimArguments,
     })
-    child.on('error', () => {
-      // Missing opener or EACCES: the launch is best-effort.
+    return await new Promise<boolean>((resolve) => {
+      child.once('error', () => {
+        // Missing opener or EACCES: the launch is best-effort, and the URL must
+        // not be reproduced in a failure report.
+        resolve(false)
+      })
+      child.once('spawn', () => {
+        child.unref()
+        resolve(true)
+      })
     })
-    child.unref()
   } catch {
-    // spawn threw synchronously (invalid argv on a stub): ignore.
+    // spawn threw synchronously (invalid argv on a stub): report no launch.
+    return false
   }
 }

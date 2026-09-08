@@ -2,16 +2,37 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import CommandRuntime from '@deepseek-ai/dsh-commands'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import { Context } from '@deepseek-ai/cordis'
+import { EventEmitter } from 'node:events'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { AntigravityAuthService } from '../src/auth-service.ts'
 import { apply as applyAuth } from '../src/index.ts'
+
+const { spawnMock } = vi.hoisted(() => ({ spawnMock: vi.fn() }))
+
+// The opener spawns the platform browser launcher through this module; every
+// other child_process export stays real.
+vi.mock('node:child_process', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:child_process')>()
+  return { ...actual, spawn: spawnMock }
+})
 
 const contexts: Context[] = []
 const tempDirs: string[] = []
 
+/** A realistic authorization URL: many `&`-separated parameters and percent-encoded values. */
+const SYNTHETIC_AUTHORIZATION_URL = 'https://accounts.google.com/o/oauth2/v2/auth'
+  + '?client_id=1234567890-abcdef.apps.googleusercontent.com'
+  + '&redirect_uri=http%3A%2F%2F127.0.0.1%3A51121%2Foauth2callback'
+  + '&response_type=code'
+  + '&code_challenge=8Jk2Yr4t1sB_9pQ-abcXYZ'
+  + '&code_challenge_method=S256'
+  + '&state=af0ifjsldkj-state-value'
+
 afterEach(async () => {
+  spawnMock.mockReset()
   for (const ctx of contexts.splice(0)) {
     await ctx.fiber.dispose()
   }
@@ -44,6 +65,16 @@ async function mountTerminal(): Promise<{ ctx: Context; agent: Agent }> {
   }
 }
 
+/** Install an opener double whose child reports a successful spawn. */
+function stubOpenerSpawn(): { child: EventEmitter & { unref: ReturnType<typeof vi.fn> } } {
+  const child = Object.assign(new EventEmitter(), { unref: vi.fn() })
+  spawnMock.mockImplementation(() => {
+    queueMicrotask(() => child.emit('spawn'))
+    return child
+  })
+  return { child }
+}
+
 describe('antigravity-auth slash command on a terminal composition (no WebServer/connection)', () => {
   it('dispatches status through the real command runtime to the shared auth service', async () => {
     const { ctx, agent } = await mountTerminal()
@@ -70,5 +101,38 @@ describe('antigravity-auth slash command on a terminal composition (no WebServer
       expect(execution.result.text).toContain('could not be cancelled')
       expect(execution.result.text).not.toContain('require a local DSH Host')
     }
+  })
+
+  it('hands the login authorization URL to the opener and keeps it out of the session log', async () => {
+    const { ctx, agent } = await mountTerminal()
+    const service = (ctx as unknown as { get(name: string): AntigravityAuthService }).get('antigravityAuth')
+    vi.spyOn(service, 'startLogin').mockResolvedValue({
+      started: true,
+      phase: 'pending',
+      authorizationUrl: SYNTHETIC_AUTHORIZATION_URL,
+      expiresAt: '2026-09-07T09:00:00.000Z',
+    })
+    const { child } = stubOpenerSpawn()
+
+    const execution = await ctx.commands.execute(agent, '/antigravity-auth login', [], new AbortController().signal)
+
+    expect(execution?.result.kind).toBe('success')
+    if (execution?.result.kind === 'success') {
+      expect(execution.result.text).not.toContain(SYNTHETIC_AUTHORIZATION_URL)
+      expect(execution.result.text).not.toContain('state=')
+      expect(execution.result.text).not.toContain('code_challenge')
+    }
+    // The real opener received the complete URL, including every query parameter.
+    expect(spawnMock).toHaveBeenCalledTimes(1)
+    expect(spawnMock.mock.calls[0]?.[1]?.join(' ')).toContain(SYNTHETIC_AUTHORIZATION_URL)
+    expect(child.unref).toHaveBeenCalledTimes(1)
+
+    // CommandRuntime persists the command lifecycle into the session; neither
+    // command/run nor command/done may retain the OAuth state or PKCE challenge.
+    const logged = JSON.stringify(agent.session.ownEvents())
+    expect(logged).toContain('command/done')
+    expect(logged).not.toContain(SYNTHETIC_AUTHORIZATION_URL)
+    expect(logged).not.toContain('state=')
+    expect(logged).not.toContain('code_challenge')
   })
 })

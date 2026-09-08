@@ -43,12 +43,14 @@ function formatStatus(status: AntigravityStatusView): string {
  * command denies every operation without touching the auth service.
  * @param openUrl - best-effort Host browser launcher for the authorization
  * URL; the URL is delivered there and never echoed into the command result,
- * because `CommandResult.text` is persisted verbatim into `command/done`.
+ * because `CommandResult.text` is persisted verbatim into `command/done`. The
+ * resolved false value means the Host has no usable browser launch, which the
+ * command reports without reproducing the URL.
  */
 export function createAntigravityAuthCommand(
   service: AuthCommandService,
   accountMode: () => LoopbackRpcMode,
-  openUrl: (url: string) => void = openAuthorizationUrl,
+  openUrl: (url: string) => boolean | Promise<boolean> = openAuthorizationUrl,
 ): CommandDefinition {
   return {
     name: 'antigravity-auth',
@@ -77,7 +79,13 @@ export function createAntigravityAuthCommand(
           // Terminal handoff: hand the authorization URL to the host browser.
           // It is not echoed into the result text, which the session persists
           // verbatim into command/done together with the OAuth state handle.
-          openUrl(started.authorizationUrl)
+          const opened = await openUrl(started.authorizationUrl)
+          if (!opened) {
+            return {
+              kind: 'error',
+              text: 'Antigravity authorization started, but this Host could not open a browser automatically; complete sign-in in a browser on this Host, then run /antigravity-auth status.',
+            }
+          }
           return {
             kind: 'success',
             text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',

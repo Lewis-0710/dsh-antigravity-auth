@@ -70,8 +70,12 @@ function emptyService() {
   }
 }
 
-function makeHarness(service: ReturnType<typeof emptyService>, mode: LoopbackRpcMode = 'enabled') {
-  const openUrl = vi.fn()
+function makeHarness(
+  service: ReturnType<typeof emptyService>,
+  mode: LoopbackRpcMode = 'enabled',
+  opened = true,
+) {
+  const openUrl = vi.fn(async () => opened)
   const command = createAntigravityAuthCommand(service, () => mode, openUrl)
   return { command, openUrl }
 }
@@ -148,6 +152,32 @@ describe('Antigravity auth command', () => {
     }
     expect(service.acknowledgeRisk).toHaveBeenCalledTimes(1)
     expect(service.startLogin).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports a failed browser handoff without persisting the authorization URL', async () => {
+    const service = {
+      ...emptyService(),
+      acknowledgeRisk: vi.fn(async (): Promise<RiskAcknowledgementResult> => ({ acknowledged: true })),
+      startLogin: vi.fn(async (): Promise<LoginStartResult> => ({
+        started: true,
+        phase: 'pending',
+        authorizationUrl: AUTHORIZATION_URL,
+        expiresAt: '2026-09-07T09:00:00.000Z',
+      })),
+      status: vi.fn(async (): Promise<AntigravityStatusView> => idleStatus()),
+    }
+    const { command, openUrl } = makeHarness(service, 'enabled', false)
+
+    const result = await command.handler({ rawInput: 'login' } as never)
+
+    expect(result).toEqual({
+      kind: 'error',
+      text: 'Antigravity authorization started, but this Host could not open a browser automatically; complete sign-in in a browser on this Host, then run /antigravity-auth status.',
+    })
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(AUTHORIZATION_URL)
+    expect(JSON.stringify(result)).not.toContain(AUTHORIZATION_URL)
+    expect(JSON.stringify(result)).not.toContain('state=')
+    expect(JSON.stringify(result)).not.toContain('code_challenge')
   })
 
   it('does not launch a browser when login is already pending', async () => {

@@ -138,7 +138,7 @@ dsh plugin --profile web list
 
 账户操作面向本地终端登录入口：在无 DSH WebServer、或显式绑定 `127.0.0.1` 的本地 Host 上执行；仅当 WebServer 在其它网卡上暴露共享的 `commands` 缝时，命令才会在不触碰认证服务的前提下被拒绝。账户 RPC 仍保留其更严格的 ADR-0008 守卫（真实 dispatcher 仅挂在显式 `127.0.0.1` bind 上）。
 
-`login` 会确认非官方通道的风险提示，并启动 loopback OAuth 流程——其临时回调监听器绑定在 `127.0.0.1:51121`，与任何 DSH WebServer 相互独立。随后命令会用尽力而为的平台浏览器开启器打开 Google 登录页；授权链接**不会**被回显到命令结果中，因为 `CommandResult.text` 会被原样写入会话的 `command/done` 事件，而该链接携带 OAuth state 句柄与 PKCE challenge。请在浏览器中完成登录，然后运行 `/antigravity-auth status`。Token、verifier、授权码与回调 URL 绝不会出现在命令输出或会话日志中。DSH 未提供供插件使用的公开瞬时展示/浏览器唤起 API，因此在没有桌面浏览器的 Host 上，无法从终端完成交互式登录。
+`login` 会确认非官方通道的风险提示，并启动 loopback OAuth 流程——其临时回调监听器绑定在 `127.0.0.1:51121`，与任何 DSH WebServer 相互独立。随后命令会用尽力而为的平台浏览器开启器打开 Google 登录页；授权链接**不会**被回显到命令结果中，因为 `CommandResult.text` 会被原样写入会话的 `command/done` 事件，而该链接携带 OAuth state 句柄与 PKCE challenge。在 Windows 上开启器为 `cmd /c start "" "<url>"`：URL 带引号且禁用 Node 的参数改写，因此以 `&` 分隔的每个 OAuth 参数都会完整到达浏览器。若开启器无法启动，命令会如实报告该失败且不复现 URL。请在浏览器中完成登录，然后运行 `/antigravity-auth status`。Token、verifier、授权码与回调 URL 绝不会出现在命令输出或会话日志中。DSH 未提供供插件使用的公开瞬时展示/浏览器唤起 API，因此在没有桌面浏览器的 Host 上，无法从终端完成交互式登录。
 
 ## Host 配置
 
