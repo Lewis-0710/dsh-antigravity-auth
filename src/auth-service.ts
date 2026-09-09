@@ -254,6 +254,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
       expiresAt: token.expiresAt,
       projectId: project.projectId,
     }, committed)
+    // The browser redirect commits through the flow's loopback listener, which
+    // never reaches the public completeCallback wrapper. Publish the committed
+    // credential here so capability lifecycles register the LLM/search/image/
+    // video routes without a Host restart.
+    this.notifyStatus()
   }
 
   private notifyStatus(): void {

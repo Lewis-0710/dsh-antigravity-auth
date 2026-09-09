@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Added an `antigravity-auth` slash command (`status` default, `login`, `cancel`, `logout`) on surfaces that host the DSH `commands` seam. Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer, or an explicitly `127.0.0.1`-bound one) and are denied before touching the auth service whenever the WebServer exposes the shared commands seam on another interface. `login` opens the Google sign-in page in the default browser (best-effort platform opener) and never echoes the authorization URL (state handle and PKCE challenge) into persisted command results or the session log. The Windows opener passes the URL quoted and verbatim to `cmd /c start`, so every `&`-separated OAuth parameter reaches the browser, and a failed browser launch is reported without reproducing the URL. A pending authorization no longer blocks `login`: the command cancels the previous flow and starts a fresh PKCE exchange, matching the Web settings card, so an abandoned browser handoff can be retried immediately instead of waiting out the five-minute TTL.
+- Fixed capability registration after a successful browser login. The OAuth loopback callback commits the credential without passing through the public `completeCallback` wrapper, so the committed state was never published to status listeners and the LLM provider plus Search/Image/Video routes stayed unregistered until the Host restarted. The commit point now notifies status listeners, so the running Host registers those routes immediately.
+
 ## [0.1.4-alpha.6] - 2026-09-07
 
 - Add explicit DSH `0.1.3-alpha.1` source compatibility alongside the npm alpha.5 baseline; keep dependency graphs separate.

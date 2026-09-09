@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,6 +34,7 @@ describe('bootstrap lifecycle boundary', () => {
     const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
       connection: { rpc: { handle } },
+      commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
     }))
     const fetch = vi.fn()
@@ -61,6 +63,7 @@ describe('bootstrap lifecycle boundary', () => {
     const warn = vi.fn()
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
       connection: { rpc: { handle } },
+      commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
       logger: { warn },
     }))
@@ -116,6 +119,7 @@ describe('bootstrap lifecycle boundary', () => {
       const registerAdapter = vi.fn(() => disposeAdapter)
       const runtime = {
         connection: { rpc: { handle: vi.fn(() => vi.fn()) } },
+        commands: { register: vi.fn(() => vi.fn()) },
         llm: { registerAdapter, listProviders: vi.fn(() => []) },
         provide: vi.fn((_name: string, service: AntigravityAuthService) => { provided = service; return vi.fn(async () => {}) }),
         get: vi.fn((service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined),
@@ -254,5 +258,115 @@ describe('bootstrap lifecycle boundary', () => {
     expect(() => applyImage()).not.toThrow()
     expect(() => applyVideo()).not.toThrow()
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('denies account operations through the slash command on a public Web bind', async () => {
+    let registered: CommandDefinition | undefined
+    const handle = vi.fn(() => vi.fn())
+    const warn = vi.fn()
+    const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
+      connection: { rpc: { handle } },
+      commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
+      get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
+      logger: { warn },
+    }))
+
+    applyAuth({ inject } as never)
+    expect(registered).toBeDefined()
+    expect(warn).toHaveBeenCalledOnce()
+
+    await expect(registered!.handler({ rawInput: 'logout' } as never)).resolves.toEqual({
+      kind: 'error',
+      text: 'Antigravity account commands require a local DSH Host (no WebServer or 127.0.0.1-bound)',
+    })
+  })
+
+  it('allows the slash command on an explicit loopback bind', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-loopback-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    try {
+      let registered: CommandDefinition | undefined
+      const handle = vi.fn(() => vi.fn())
+      const warn = vi.fn()
+      const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
+        connection: { rpc: { handle } },
+        commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
+        get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
+        logger: { warn },
+      }))
+
+      applyAuth({ inject } as never)
+      expect(registered).toBeDefined()
+      expect(warn).not.toHaveBeenCalled()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a local DSH Host')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('allows the slash command on a terminal composition without a WebServer service', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-terminal-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    const ctx = new Context()
+    try {
+      let registered: CommandDefinition | undefined
+      ctx.provide('connection', { rpc: { handle: vi.fn(() => vi.fn()) } })
+      ctx.provide('commands', {
+        register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} },
+      })
+      applyAuth(ctx)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(registered).toBeDefined()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a local DSH Host')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('allows the slash command on a terminal composition without WebServer or connection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-antigravity-terminal-'))
+    const previousDataHome = process.env.XDG_DATA_HOME
+    process.env.XDG_DATA_HOME = root
+    const ctx = new Context()
+    try {
+      let registered: CommandDefinition | undefined
+      ctx.provide('commands', {
+        register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} },
+      })
+      applyAuth(ctx)
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(registered).toBeDefined()
+
+      const result = await registered!.handler({ rawInput: 'status' } as never)
+      expect(result.kind).toBe('success')
+      if (result.kind === 'success') {
+        expect(result.text?.startsWith('Antigravity auth:')).toBe(true)
+        expect(result.text).not.toContain('require a local DSH Host')
+      }
+    } finally {
+      if (previousDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = previousDataHome
+      await ctx.fiber.dispose()
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })
