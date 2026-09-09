@@ -79,7 +79,7 @@ describe('Antigravity client apply', () => {
     const settings = b.slots[0]
     const props = (settings?.options.inject as (() => { rpc: { status: () => Promise<unknown> }; t: (key: AntigravityAuthKey) => string }) | undefined)?.()
     await props?.rpc.status()
-    expect(b.call).toHaveBeenCalledWith('/antigravity-auth', 'status', {}, undefined)
+    expect(b.call).toHaveBeenCalledWith('/api', 'antigravity-auth/status', {}, undefined)
     expect(props?.t('title')).toBe('Antigravity Auth')
 
     b.dispose()

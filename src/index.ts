@@ -10,7 +10,8 @@ import { createAntigravityAuthService } from './auth-service.ts'
 import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
-import { ANTIGRAVITY_AUTH_RPC_CHANNEL, handleAntigravityAuthRpc } from './rpc.ts'
+import { registerAccountRoutes } from './account-routes.ts'
+import { ANTIGRAVITY_AUTH_RPC_NAMESPACE, handleAntigravityAuthRpc } from './rpc.ts'
 import {
   commandAccountMode, createLoopbackRpcGuard, type LoopbackRpcMode,
 } from './loopback-rpc.ts'
@@ -54,7 +55,7 @@ export function apply(ctx: Context): void {
     if (guard.mode === 'blocked') {
       connectionCtx.logger.warn('antigravity-auth: account RPC is disabled because the WebServer is not loopback-bound')
     }
-    return connectionCtx.connection.rpc.handle(ANTIGRAVITY_AUTH_RPC_CHANNEL, guard.handler)
+    return registerAccountRoutes(connectionCtx.connection, ANTIGRAVITY_AUTH_RPC_NAMESPACE, ['status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke'], guard.handler)
   })
   mountCapabilityLifecycle({
     ctx,

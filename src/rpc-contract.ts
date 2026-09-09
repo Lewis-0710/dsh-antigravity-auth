@@ -24,7 +24,8 @@ import {
 import { isSafeRpcErrorCode, safeRpcErrorMessage } from './rpc-vocabulary.ts'
 import { isBoundedSafeText } from './safe-text.ts'
 
-export const ANTIGRAVITY_AUTH_RPC_CHANNEL = '/antigravity-auth' as const
+export const ANTIGRAVITY_AUTH_RPC_CHANNEL = '/api'
+export const ANTIGRAVITY_AUTH_RPC_NAMESPACE = 'antigravity-auth' as const
 
 export interface AntigravityAuthRpcClient {
   status(signal?: AbortSignal): Promise<RpcResult<{ status: AntigravityStatusView }>>
@@ -72,7 +73,7 @@ async function callValidated<T>(
 ): Promise<RpcResult<T>> {
   let result: RpcResult<unknown>
   try {
-    result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, endpoint, payload, signal)
+    result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, `${ANTIGRAVITY_AUTH_RPC_NAMESPACE}/${endpoint}`, payload, signal)
   } catch {
     return invalidResponse(endpoint)
   }

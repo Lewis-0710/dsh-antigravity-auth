@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import type { ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import type { CommandDefinition } from '@deepseek-ai/dsh-commands'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -31,9 +32,9 @@ function gateStatus(id: 'search' | 'image' | 'video', state: 'available' | 'poc-
 describe('bootstrap lifecycle boundary', () => {
   it('mounts the Host row without OAuth, private transport, timers, or listeners', () => {
     const dispose = vi.fn()
-    const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
+    const handle = vi.fn((_route: ConnectionFetchRoute) => dispose)
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
-      connection: { rpc: { handle } },
+      connection: { fetch: { register: handle } },
       commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
     }))
@@ -45,9 +46,9 @@ describe('bootstrap lifecycle boundary', () => {
 
     expect(fetch).not.toHaveBeenCalled()
     expect(setTimeout).not.toHaveBeenCalled()
-    expect(handle).toHaveBeenCalledOnce()
-    expect(handle.mock.calls[0]).toHaveLength(2)
-    expect(handle.mock.calls[0]?.[0]).toBe('/antigravity-auth')
+    expect(handle).toHaveBeenCalledTimes(9)
+    expect(handle.mock.calls[0]).toHaveLength(1)
+    expect(handle.mock.calls[0]?.[0].path).toBe('/api/antigravity-auth/status')
 
     const registration = handle.mock.results[0]?.value as (() => void) | undefined
     registration?.()
@@ -56,13 +57,13 @@ describe('bootstrap lifecycle boundary', () => {
 
   it('registers only a value-free denial handler on an all-interface Web bind', async () => {
     const dispose = vi.fn()
-    const handle = vi.fn((_channel: string, handler: unknown) => {
-      expect(typeof handler).toBe('function')
+    const handle = vi.fn((route: ConnectionFetchRoute) => {
+      expect(typeof route.fetch).toBe('function')
       return dispose
     })
     const warn = vi.fn()
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
-      connection: { rpc: { handle } },
+      connection: { fetch: { register: handle } },
       commands: { register: () => () => {} },
       get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
       logger: { warn },
@@ -70,9 +71,14 @@ describe('bootstrap lifecycle boundary', () => {
 
     applyAuth({ inject } as never)
 
-    expect(handle).toHaveBeenCalledOnce()
-    const handler = handle.mock.calls[0]?.[1] as ((endpoint: string, payload: unknown, signal: AbortSignal) => Promise<unknown>) | undefined
-    await expect(handler?.('status', { forbidden: 'value' }, new AbortController().signal)).resolves.toEqual({
+    expect(handle).toHaveBeenCalledTimes(9)
+    const route = handle.mock.calls[0]![0]
+    const response = await route.fetch(new Request('http://dsh.test' + route.path, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ type: 'client-request', rpcId: 'denied', method: 'antigravity-auth/status', payload: { forbidden: 'value' } }),
+    }))
+    const body = await response.json() as { result: unknown }
+    expect(body.result).toEqual({
       ok: false,
       error: {
         code: 'loopback-required',
@@ -85,18 +91,18 @@ describe('bootstrap lifecycle boundary', () => {
 
   it('releases the actual Host RPC registration when a Cordis context is disposed', async () => {
     const dispose = vi.fn()
-    const handle = vi.fn((_channel: string, _handler: unknown) => dispose)
+    const handle = vi.fn((_route: ConnectionFetchRoute) => dispose)
     const ctx = new Context()
-    const unprovide = ctx.provide('connection', { rpc: { handle } })
+    const unprovide = ctx.provide('connection', { fetch: { register: handle } })
     try {
       applyAuth(ctx)
       await new Promise<void>(resolve => setImmediate(resolve))
-      expect(handle).toHaveBeenCalledOnce()
+      expect(handle).toHaveBeenCalledTimes(9)
     } finally {
       await ctx.fiber.dispose()
       await unprovide()
     }
-    expect(dispose).toHaveBeenCalledOnce()
+    expect(dispose).toHaveBeenCalledTimes(9)
   })
 
   it('registers the public LLM adapter only while authenticated Gate 0/L evidence passes', async () => {
@@ -118,7 +124,7 @@ describe('bootstrap lifecycle boundary', () => {
       const disposeAdapter = vi.fn()
       const registerAdapter = vi.fn(() => disposeAdapter)
       const runtime = {
-        connection: { rpc: { handle: vi.fn(() => vi.fn()) } },
+        connection: { fetch: { register: vi.fn(() => vi.fn()) } },
         commands: { register: vi.fn(() => vi.fn()) },
         llm: { registerAdapter, listProviders: vi.fn(() => []) },
         provide: vi.fn((_name: string, service: AntigravityAuthService) => { provided = service; return vi.fn(async () => {}) }),
@@ -265,7 +271,7 @@ describe('bootstrap lifecycle boundary', () => {
     const handle = vi.fn(() => vi.fn())
     const warn = vi.fn()
     const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
-      connection: { rpc: { handle } },
+      connection: { fetch: { register: handle } },
       commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
       get: (service: string) => service === 'webServer' ? { host: '0.0.0.0' } : undefined,
       logger: { warn },
@@ -290,7 +296,7 @@ describe('bootstrap lifecycle boundary', () => {
       const handle = vi.fn(() => vi.fn())
       const warn = vi.fn()
       const inject = vi.fn((_dependencies: readonly string[], callback: (ctx: unknown) => unknown) => callback({
-        connection: { rpc: { handle } },
+        connection: { fetch: { register: handle } },
         commands: { register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} } },
         get: (service: string) => service === 'webServer' ? { host: '127.0.0.1' } : undefined,
         logger: { warn },
@@ -320,7 +326,7 @@ describe('bootstrap lifecycle boundary', () => {
     const ctx = new Context()
     try {
       let registered: CommandDefinition | undefined
-      ctx.provide('connection', { rpc: { handle: vi.fn(() => vi.fn()) } })
+      ctx.provide('connection', { fetch: { register: vi.fn(() => vi.fn()) } })
       ctx.provide('commands', {
         register: (definition: unknown) => { registered = definition as CommandDefinition; return () => {} },
       })

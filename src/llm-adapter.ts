@@ -780,9 +780,15 @@ function buildPayloadFromContents(
   const usesCapturedGemini38ThinkingBudget = /^gemini-3\.8-flash-(?:low|medium|high)$/u.test(wireModel)
   const requestContents = groupClaudeFunctionResponses(contents, options.model)
   const request: Record<string, unknown> = { contents: requestContents }
-  if (options.system !== undefined && options.system.trim().length > 0) {
-    request.systemInstruction = { parts: [{ text: options.system }] }
-  }
+  // V3 AgentLoop stores instructions in system messages. One-shot callers may
+  // still provide a separate preface; preserve both in their original order.
+  const systemParts = [
+    ...(options.system?.trim() ? [{ text: options.system }] : []),
+    ...options.messages.flatMap(message => message.role === 'system'
+      ? message.content.flatMap(block => block.type === 'text' && block.text.trim() ? [{ text: block.text }] : [])
+      : []),
+  ]
+  if (systemParts.length > 0) request.systemInstruction = { parts: systemParts }
   const generationConfig: Record<string, unknown> = {}
   if (options.maxTokens !== undefined) generationConfig.maxOutputTokens = boundedInteger(options.maxTokens, 1, 1_000_000, 'maxTokens')
   else if (usesCapturedGemini38ThinkingBudget) generationConfig.maxOutputTokens = 65536

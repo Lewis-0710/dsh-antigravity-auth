@@ -289,13 +289,13 @@ describe('Antigravity login RPC', () => {
 
     expect(client).not.toHaveProperty('completeCallback')
     expect(rpc.call.mock.calls.map(call => call.slice(0, 3))).toEqual([
-      ['/antigravity-auth', 'status', {}],
-      ['/antigravity-auth', 'acknowledge-risk', { acknowledge: true }],
-      ['/antigravity-auth', 'login', {}],
-      ['/antigravity-auth', 'cancel', {}],
-      ['/antigravity-auth', 'logout', {}],
-      ['/antigravity-auth', 'revoke', { confirmed: true }],
-      ['/antigravity-auth', 'models', { force: true }],
+      ['/api', 'antigravity-auth/status', {}],
+      ['/api', 'antigravity-auth/acknowledge-risk', { acknowledge: true }],
+      ['/api', 'antigravity-auth/login', {}],
+      ['/api', 'antigravity-auth/cancel', {}],
+      ['/api', 'antigravity-auth/logout', {}],
+      ['/api', 'antigravity-auth/revoke', { confirmed: true }],
+      ['/api', 'antigravity-auth/models', { force: true }],
     ])
   })
 

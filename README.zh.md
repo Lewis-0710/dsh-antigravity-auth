@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH 兼容性：** 已分别验证 `0.1.2-alpha.5` 与 `0.1.3-alpha.1` 两套依赖图。目标 DSH npm 包尚未发布，开发锁文件暂保留 alpha.5；新版本使用固定源码制品验证。见[源码验证说明](docs/dsh-source-verification.md)。
+> **DSH 兼容性（未发布的开发版本）：** 当前检出版本以 `0.1.5-alpha.1` 为开发与最低支持基线，依赖图必须保持一致。已发布的 alpha.6 不包含本次适配；旧 DSH 用户继续使用旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
 
 [![npm alpha version](https://img.shields.io/npm/v/dsh-antigravity-auth/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
-当前 alpha 版本：**v0.1.4-alpha.6**，支持 DSH `0.1.2-alpha.5` 与 `0.1.3-alpha.1`，使用 Cordis `4.0.2` 与 Schemastery `3.18.2`。
+最近已发布版本：**v0.1.4-alpha.6**（适用于旧 DSH；本次适配尚未发布）。
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -21,6 +21,10 @@
 
 > **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
 > 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
+
+## 未发布：DSH 0.1.5 适配
+
+开发基线升级到 DSH `0.1.5-alpha.1`。Gemini 与 Claude 将 V3 system message 文本保留到 `systemInstruction`；单次调用的 `options.system` 作为前置指令，后接按原顺序排列的系统消息。账号操作迁移到经过认证的 `/api/antigravity-auth/*`，保留原有静态 loopback 限制。终端命令名称不变。
 
 ## v0.1.4-alpha.5 重点更新
 
@@ -73,57 +77,30 @@
 
 ## 环境要求
 
-- DeepSeek Harness `0.1.2-alpha.5` 或 `0.1.3-alpha.1`（两套依赖图分别验证；直接 peer 接受这两条 prerelease 版本线）。
+- DeepSeek Harness `0.1.5-alpha.1`（两套依赖图分别验证；直接 peer 接受这两条 prerelease 版本线）。
 - Node.js `^22.19.0` 或 `>=24.0.0`。
 - `PATH` 中可用 `pnpm`（本项目测试版本为 `11.7.0`）。
 - 具有 Antigravity 权限的 Google 账号。
 
-## 从 npm 安装
+## 安装本次开发适配
 
-npm 包包含预构建的 Host 与浏览器 bundle。请显式安装支持上述两套 DSH 依赖图的版本：
+本次改动尚未发布到 npm，不能通过安装已发布的 `0.1.4-alpha.6` 获得。在本插件检出目录构建并打包：
 
 ```sh
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.6
+pnpm install --frozen-lockfile
+pnpm run check
+npm pack
 ```
 
-确认 Web Host 明确绑定 `127.0.0.1` 后，重启 `dsh web`，打开设置并选择 **Antigravity Auth**。
-
-## 安装 GitHub 预构建 Release
-
-以下 GitHub 示例固定到先前的 0.1.4-alpha.5；本次 0.1.4-alpha.6 请使用上面的 npm 安装命令。
+先停止 `dsh web`，将目标 Host 升级到 DSH `0.1.5-alpha.1`，再将上一步实际生成的本地制品安装到需要升级的 profile：
 
 ```sh
-dsh plugin --profile web add https://github.com/suntianc/dsh-antigravity-auth/releases/download/v0.1.4-alpha.5/dsh-antigravity-auth-0.1.4-alpha.5.tgz
-```
-
-## 从 GitHub tag 源码安装
-
-以下 GitHub 示例固定到先前的 0.1.4-alpha.5；本次 0.1.4-alpha.6 请使用上面的 npm 安装命令。
-
-```sh
-dsh plugin --profile web add github:suntianc/dsh-antigravity-auth#v0.1.4-alpha.5
-```
-
-Git 依赖会通过包内 `prepare` 脚本从源码构建。如遇 pnpm 提示，将输出的 `allowBuilds` 键添加到 dsh 输出的 `pnpm-workspace.yaml` 路径，再重新执行安装。只应在审查并信任源码后授权。
-
-## 从 tarball 安装
-
-```sh
-npm pack dsh-antigravity-auth@0.1.4-alpha.6
+dsh --version
 dsh plugin --profile web add ./dsh-antigravity-auth-0.1.4-alpha.6.tgz
-```
-
-## 升级
-
-先停止正在运行的 `dsh web`，确认 Host 本身已经是 DSH `0.1.2-alpha.5` 或 `0.1.3-alpha.1`；若不是，必须先升级 DSH。随后安装匹配的插件版本并核对 profile 条目：
-
-```sh
-dsh --version # 必须显示 0.1.2-alpha.5 或 0.1.3-alpha.1
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-alpha.6
 dsh plugin --profile web list
 ```
 
-重启 `dsh web` 并刷新浏览器。
+核对条目后重启 `dsh web` 并刷新浏览器。后续正式发布版本应使用其准确版本号；本次开发适配没有发布、修改现用 profile 或升级全局 DSH。旧 DSH 安装继续使用 [alpha.6 发布记录](https://github.com/suntianc/dsh-antigravity-auth/releases)。
 
 ## 终端登录命令
 
