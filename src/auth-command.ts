@@ -70,10 +70,12 @@ export function createAntigravityAuthCommand(
       }
       if (operation === 'login') {
         try {
-          const current = await service.status()
-          if (current.login.phase === 'pending') {
-            return { kind: 'error', text: 'an Antigravity authorization is already pending; finish it in the browser or run /antigravity-auth cancel' }
-          }
+          // A pending authorization never blocks a new one. `startLogin` cancels
+          // the previous flow (closing its loopback listener and dropping its
+          // verifier) before starting a fresh PKCE exchange, which is how the Web
+          // settings card already behaves; the replaced browser page can no
+          // longer complete.
+          const replaced = (await service.status()).login.phase === 'pending'
           await service.acknowledgeRisk()
           const started = await service.startLogin()
           // Terminal handoff: hand the authorization URL to the host browser.
@@ -88,7 +90,9 @@ export function createAntigravityAuthCommand(
           }
           return {
             kind: 'success',
-            text: 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',
+            text: replaced
+              ? 'Previous Antigravity authorization cancelled and a new one started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.'
+              : 'Antigravity authorization started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',
           }
         } catch (error) {
           return { kind: 'error', text: `starting Antigravity login failed: ${errorMessage(error)}` }

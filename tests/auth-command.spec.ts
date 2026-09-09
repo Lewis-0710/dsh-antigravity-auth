@@ -180,20 +180,34 @@ describe('Antigravity auth command', () => {
     expect(JSON.stringify(result)).not.toContain('code_challenge')
   })
 
-  it('does not launch a browser when login is already pending', async () => {
+  it('restarts login instead of refusing when an authorization is already pending', async () => {
     const service = {
       ...emptyService(),
+      acknowledgeRisk: vi.fn(async (): Promise<RiskAcknowledgementResult> => ({ acknowledged: true })),
+      startLogin: vi.fn(async (): Promise<LoginStartResult> => ({
+        started: true,
+        phase: 'pending',
+        authorizationUrl: AUTHORIZATION_URL,
+        expiresAt: '2026-09-07T09:00:00.000Z',
+      })),
       status: vi.fn(async (): Promise<AntigravityStatusView> => pendingStatus()),
     }
     const { command, openUrl } = makeHarness(service)
 
-    await expect(command.handler({ rawInput: 'login' } as never)).resolves.toEqual({
-      kind: 'error',
-      text: 'an Antigravity authorization is already pending; finish it in the browser or run /antigravity-auth cancel',
+    const result = await command.handler({ rawInput: 'login' } as never)
+
+    expect(result).toEqual({
+      kind: 'success',
+      text: 'Previous Antigravity authorization cancelled and a new one started (unofficial Antigravity channel, personal use); complete Google sign-in in the opened browser, then run /antigravity-auth status.',
     })
-    expect(service.startLogin).not.toHaveBeenCalled()
-    expect(service.acknowledgeRisk).not.toHaveBeenCalled()
-    expect(openUrl).not.toHaveBeenCalled()
+    // `startLogin` owns the cancel-then-start transition, matching the Web card.
+    expect(service.acknowledgeRisk).toHaveBeenCalledTimes(1)
+    expect(service.startLogin).toHaveBeenCalledTimes(1)
+    expect(service.cancelLogin).not.toHaveBeenCalled()
+    expect(openUrl).toHaveBeenCalledExactlyOnceWith(AUTHORIZATION_URL)
+    expect(JSON.stringify(result)).not.toContain(AUTHORIZATION_URL)
+    expect(JSON.stringify(result)).not.toContain('state=')
+    expect(JSON.stringify(result)).not.toContain('code_challenge')
   })
 
   it('cancels a pending authorization', async () => {
