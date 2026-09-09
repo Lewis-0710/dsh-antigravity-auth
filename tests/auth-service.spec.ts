@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createMemoryAuthStore } from '../src/auth-store.ts'
 import { createAntigravityAuthService } from '../src/auth-service.ts'
 import type { PrivateTransport, PrivateTransportRequest } from '../src/private-transport.ts'
+import type { LoopbackCallbackRequest } from '../src/oauth-flow.ts'
 import { createMemoryCapabilityGates, type CapabilityGateRegistry } from '../src/capability-gates.ts'
 
 function projectTransport(payload: unknown): PrivateTransport {
@@ -16,12 +17,15 @@ async function passAllLlmFamilies(gates: CapabilityGateRegistry, subject: string
 
 function listenerFixture() {
   const listeners: Array<{ close: ReturnType<typeof vi.fn> }> = []
+  const handlers: Array<(request: LoopbackCallbackRequest) => Promise<unknown>> = []
   return {
     listeners,
+    handlers,
     listenerFactory: {
-      listen: vi.fn(async () => {
+      listen: vi.fn(async (handler: (request: LoopbackCallbackRequest) => Promise<unknown>) => {
         const listener = { close: vi.fn(async () => {}) }
         listeners.push(listener)
+        handlers.push(handler)
         return listener
       }),
     },
@@ -119,6 +123,45 @@ describe('Antigravity auth service', () => {
         { id: 'video', state: 'available', reasonCode: 'capability-ready' },
       ],
     })
+    await service.dispose()
+  })
+
+  it('notifies status listeners when the loopback callback commits a credential', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 2_000 })
+    const gates = createMemoryCapabilityGates()
+    const fixture = listenerFixture()
+    const service = createAntigravityAuthService({
+      store,
+      gates,
+      autoActivateGates: true,
+      projectOptions: {
+        transport: projectTransport({ cloudaicompanionProject: { id: 'project-secret' } }),
+      },
+      flowOptions: {
+        randomBytes: size => Uint8Array.from({ length: size }, (_, index) => index + 1),
+        listenerFactory: fixture.listenerFactory,
+        exchangeCode: vi.fn(async () => ({
+          accessToken: 'access-secret',
+          refreshToken: 'refresh-secret',
+          expiresAt: 9_000,
+        })),
+      },
+    })
+
+    const observed = vi.fn()
+    const unwatch = service.watchStatus(observed)
+    await service.acknowledgeRisk()
+    const started = await service.startLogin()
+    const state = new URL(started.authorizationUrl).searchParams.get('state')
+    // The browser redirect is served by the loopback listener, which never
+    // passes through the public completeCallback wrapper.
+    observed.mockClear()
+    const handler = fixture.handlers[0]
+    if (handler === undefined) throw new Error('the loopback listener was not created')
+    await handler({ method: 'GET', host: 'localhost:51121', url: `/oauth-callback?state=${state}&code=code` })
+
+    await vi.waitFor(() => { expect(observed).toHaveBeenCalled() })
+    unwatch()
     await service.dispose()
   })
 
