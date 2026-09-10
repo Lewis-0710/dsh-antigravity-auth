@@ -3,7 +3,7 @@
 export const en = {
   nav: 'Antigravity',
   title: 'Antigravity Auth',
-  intro: '使用 Antigravity Auth 登录接入 Antigravity 的 LLM、文生图、Websearch、视频理解能力。',
+  intro: 'Sign in with Antigravity Auth to access language models, image generation, web search, and video understanding.',
   riskTitle: 'Before you continue',
   risk: 'Google does not support third-party Antigravity login tools. Your account may be suspended or terminated.',
   terms: 'Review the Google FAQ before continuing.',
@@ -58,6 +58,7 @@ export const en = {
   image: 'Image',
   video: 'Video',
   available: 'Available',
+  ready: 'Ready',
   disabled: 'Disabled',
   pocPending: 'POC pending',
   protocolDrift: 'Protocol drift',
@@ -101,7 +102,7 @@ export const en = {
   searchCardIntro: 'Google Antigravity Search Provider used by the stock web_search tool.',
   imageCardIntro: 'Durable image generation tools for image-capable models (gemini-3.1-flash-image).',
   videoCardIntro: 'Workspace MP4 video understanding tools for multimodal models (gemini-3.7-flash).',
-  privacyNotice: '共享Antigravity 登录态与Antigravity模型路由。',
+  privacyNotice: 'Share Antigravity login state and model routing.',
   relogin: 'Log in again with Google',
   authCardTitle: 'Login',
   authCardIntro: 'Share Antigravity session and Antigravity model routing.',
@@ -115,7 +116,8 @@ export const en = {
   quotaFooterNotice: 'No token value is ever sent to the Web client, settings, logs, events, or tool metadata.',
   refreshStatus: 'Refresh status',
   remaining: 'remaining',
-  refreshesIn: 'Refreshes in',
+  refreshesIn: 'Refreshes in {time}',
+  quotaDayUnit: 'd',
 } as const
 
 export type AntigravityAuthKey = keyof typeof en
@@ -123,7 +125,7 @@ export type AntigravityAuthKey = keyof typeof en
 export const zh: Record<AntigravityAuthKey, string> = {
   nav: 'Antigravity',
   title: 'Antigravity Auth',
-  intro: '使用 Antigravity Auth 登录接入 Antigravity 的 LLM、文生图、Websearch、视频理解能力。',
+  intro: '通过 Antigravity Auth 登录，使用语言模型、图片生成、网页搜索和视频理解能力。',
   riskTitle: '继续前请确认',
   risk: 'Google 不支持第三方 Antigravity 登录工具，账号可能被暂停或终止。',
   terms: '继续前请阅读 Google FAQ。',
@@ -178,6 +180,7 @@ export const zh: Record<AntigravityAuthKey, string> = {
   image: '图片',
   video: '视频',
   available: '可用',
+  ready: '就绪',
   disabled: '已禁用',
   pocPending: 'POC 待验证',
   protocolDrift: '协议漂移',
@@ -221,7 +224,7 @@ export const zh: Record<AntigravityAuthKey, string> = {
   searchCardIntro: '供内置 web_search 工具使用的 Google Antigravity 全局搜索能力。',
   imageCardIntro: '面向支持图片模型的持久化 generate_image 工具（gemini-3.1-flash-image）。',
   videoCardIntro: '面向本地 MP4 视频文件的多模态 analyze_video 理解工具。',
-  privacyNotice: '共享Antigravity 登录态与Antigravity模型路由。',
+  privacyNotice: '共享 Antigravity 登录态与模型路由。',
   relogin: '重新登录 Google',
   authCardTitle: '登录',
   authCardIntro: '共享 Antigravity 登录态与 Antigravity 模型路由。',
@@ -235,5 +238,6 @@ export const zh: Record<AntigravityAuthKey, string> = {
   quotaFooterNotice: '任何 Token 值都不会发送到 Web 客户端、设置、日志、事件或工具元数据。',
   refreshStatus: '刷新状态',
   remaining: '剩余',
-  refreshesIn: '后刷新',
+  refreshesIn: '{time} 后刷新',
+  quotaDayUnit: '天',
 }

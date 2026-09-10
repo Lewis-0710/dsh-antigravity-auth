@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH 兼容性（未发布的开发版本）：** 当前检出版本以 `0.1.5-alpha.1` 为开发与最低支持基线，依赖图必须保持一致。已发布的 alpha.6 不包含本次适配；旧 DSH 用户继续使用旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+> **DSH 兼容性：** `0.1.4-rc.1` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
 
-[![npm alpha version](https://img.shields.io/npm/v/dsh-antigravity-auth/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dsh-antigravity-auth)
+[![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
-最近已发布版本：**v0.1.4-alpha.6**（适用于旧 DSH；本次适配尚未发布）。
+发布版本：**v0.1.4-rc.1**（npm 标签：`rc`）。
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -19,12 +19,16 @@
 - 具备优雅动效的 5 小时与每周用量/配额可视化仪表盘；
 - 一个原生 **Antigravity Auth** 设置分区，内含「登录」「网页搜索」「图片创作」「视频理解」四张卡片。
 
+设置分区跟随 DSH 界面语言切换中英文，覆盖功能描述、状态标签、功能开关名称和配额刷新提示。
+
 > **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
 > 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
 
-## 未发布：DSH 0.1.5 适配
+## 0.1.4-rc.1：DSH 0.1.5-rc.1 适配
 
-开发基线升级到 DSH `0.1.5-alpha.1`。Gemini 与 Claude 将 V3 system message 文本保留到 `systemInstruction`；单次调用的 `options.system` 作为前置指令，后接按原顺序排列的系统消息。账号操作迁移到经过认证的 `/api/antigravity-auth/*`，保留原有静态 loopback 限制。终端命令名称不变。
+开发依赖、peer 范围、打包检查与对应源码验证目标统一升级至 DSH `0.1.5-rc.1`；离线测试继续覆盖认证、模型、搜索和媒体契约。
+
+开发基线升级到 DSH `0.1.5-rc.1`。Gemini 与 Claude 将 V3 system message 文本保留到 `systemInstruction`；单次调用的 `options.system` 作为前置指令，后接按原顺序排列的系统消息。账号操作迁移到经过认证的 `/api/antigravity-auth/*`，保留原有静态 loopback 限制。终端命令名称不变。
 
 ## v0.1.4-alpha.5 重点更新
 
@@ -72,35 +76,28 @@
 ### 用量与配额可视化仪表盘
 
 - 直观展示 5 小时窗口与每周窗口的剩余配额比例与刷新倒计时。
+- 剩余时间达到 24 小时后按天、小时、分钟显示，例如 `94h 43m` 显示为 `3天 22h 43m`（英文为 `3d 22h 43m`）；不足一天继续使用原有小时/分钟格式。
 - 状态三档配色：充足（>60%，翡翠绿）、预警（30%–60%，警示橙）、紧急（<30%，警示红）。
 - 配备 Shimmer 微光流动轨道、微型 Spinner 与平滑展开动画。
 
 ## 环境要求
 
-- DeepSeek Harness `0.1.5-alpha.1`（两套依赖图分别验证；直接 peer 接受这两条 prerelease 版本线）。
+- DeepSeek Harness `0.1.5-rc.1`（统一依赖图；npm 与对应源码制品分别验证）。
 - Node.js `^22.19.0` 或 `>=24.0.0`。
 - `PATH` 中可用 `pnpm`（本项目测试版本为 `11.7.0`）。
 - 具有 Antigravity 权限的 Google 账号。
 
-## 安装本次开发适配
+## 安装
 
-本次改动尚未发布到 npm，不能通过安装已发布的 `0.1.4-alpha.6` 获得。在本插件检出目录构建并打包：
-
-```sh
-pnpm install --frozen-lockfile
-pnpm run check
-npm pack
-```
-
-先停止 `dsh web`，将目标 Host 升级到 DSH `0.1.5-alpha.1`，再将上一步实际生成的本地制品安装到需要升级的 profile：
+先停止 `dsh web`，确认目标 Host 使用统一的 DSH `0.1.5-rc.1` 依赖图，再安装准确的预发布版本到目标 profile：
 
 ```sh
 dsh --version
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.4-alpha.6.tgz
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.1
 dsh plugin --profile web list
 ```
 
-核对条目后重启 `dsh web` 并刷新浏览器。后续正式发布版本应使用其准确版本号；本次开发适配没有发布、修改现用 profile 或升级全局 DSH。旧 DSH 安装继续使用 [alpha.6 发布记录](https://github.com/suntianc/dsh-antigravity-auth/releases)。
+核对条目后重启 `dsh web` 并刷新浏览器。此版本通过 npm 的 `rc` 标签发布；不指定版本或标签会使用 `latest`，它不包含本次 RC1 适配。旧 DSH Host 应保留兼容的旧插件版本。
 
 ## 终端登录命令
 

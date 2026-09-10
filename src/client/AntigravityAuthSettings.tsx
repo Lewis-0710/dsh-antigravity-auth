@@ -234,7 +234,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
           <div className="agy-title-line">
             <h1 id="antigravity-auth-title" className="agy-bundle-title">{t('title')}</h1>
             {isConfigured ? (
-              <span className="agy-status-dot" role="status" aria-label="Ready" />
+              <span className="agy-status-dot" role="status" aria-label={t('ready')} />
             ) : null}
           </div>
           <p className="agy-bundle-intro">{t('intro')}</p>
@@ -319,6 +319,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
             </div>
             <div className="agy-card-action">
               <Switch
+                label={t('toggleSearch')}
                 checked={searchSettings.value?.enabled ?? false}
                 disabled={!capabilityAvailable(status, 'search') || searchSettings.status !== 'ready' || !searchSettings.writable}
                 onChange={next => { void searchScope?.set('enabled', next) }}
@@ -336,6 +337,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
             </div>
             <div className="agy-card-action">
               <Switch
+                label={t('toggleImage')}
                 checked={imageSettings.value?.enabled ?? false}
                 disabled={!capabilityAvailable(status, 'image') || imageSettings.status !== 'ready' || !imageSettings.writable}
                 onChange={next => { void imageScope?.set('enabled', next) }}
@@ -353,6 +355,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
             </div>
             <div className="agy-card-action">
               <Switch
+                label={t('toggleVideo')}
                 checked={videoSettings.value?.enabled ?? false}
                 disabled={!capabilityAvailable(status, 'video') || videoSettings.status !== 'ready' || !videoSettings.writable}
                 onChange={next => { void videoScope?.set('enabled', next) }}
@@ -370,10 +373,12 @@ function capabilityAvailable(status: AntigravityStatusView | null, id: Capabilit
 }
 
 function Switch({
+  label,
   checked,
   disabled,
   onChange,
 }: {
+  readonly label: string
   readonly checked: boolean
   readonly disabled?: boolean
   readonly onChange: (checked: boolean) => void
@@ -382,6 +387,7 @@ function Switch({
     <label className="agy-switch">
       <input
         type="checkbox"
+        aria-label={label}
         checked={checked}
         disabled={disabled}
         onChange={e => { onChange(e.target.checked) }}
@@ -391,7 +397,7 @@ function Switch({
   )
 }
 
-function formatRefreshTime(resetTime: string, now = Date.now()): string {
+function formatRefreshTime(resetTime: string, dayUnit: string, now = Date.now()): string {
   const target = new Date(resetTime).getTime()
   if (Number.isNaN(target)) return resetTime
   const diffMs = target - now
@@ -401,7 +407,8 @@ function formatRefreshTime(resetTime: string, now = Date.now()): string {
   const remMinutes = diffMinutes % 60
 
   if (hours >= 24) {
-    return `${hours}h ${remMinutes}m`
+    const days = Math.floor(hours / 24)
+    return `${days}${dayUnit} ${hours % 24}h ${remMinutes}m`
   }
   if (hours > 0) {
     return `${hours}h ${remMinutes}m`
@@ -445,8 +452,8 @@ function QuotaVisualDashboard({
                     const windowName = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
                     const pctFormatted = (window.remainingFraction * 100).toFixed(2) + '%'
                     const pctRounded = Math.round(window.remainingFraction * 100)
-                    const refreshStr = formatRefreshTime(window.resetTime)
-                    const subtext = `${pctRounded}% ${t('remaining')} · ${t('refreshesIn')} ${refreshStr}`
+                    const refreshStr = formatRefreshTime(window.resetTime, t('quotaDayUnit'))
+                    const subtext = `${pctRounded}% ${t('remaining')} · ${t('refreshesIn').replace('{time}', refreshStr)}`
                     const widthPct = Math.max(0, Math.min(100, window.remainingFraction * 100))
                     const tone = quotaTone(window.remainingFraction)
 

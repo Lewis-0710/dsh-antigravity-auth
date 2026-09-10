@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH compatibility (unreleased development):** This checkout targets `0.1.5-alpha.1` as its development and minimum supported baseline, with a coherent dependency graph. Published alpha.6 packages do not include this adaptation; keep older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
+> **DSH compatibility:** `0.1.4-rc.1` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 
-[![npm alpha version](https://img.shields.io/npm/v/dsh-antigravity-auth/alpha.svg?label=npm%20alpha)](https://www.npmjs.com/package/dsh-antigravity-auth)
+[![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
 
-Latest published release: **v0.1.4-alpha.6** (for older DSH; this adaptation is not published).
+Release: **v0.1.4-rc.1** (npm tag: `rc`).
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -20,14 +20,18 @@ and Wire Identity for:
 - resilient five-hour and weekly usage/quota visualization dashboard;
 - one native **Antigravity Auth** Settings section with Login, Search, Image Creation, and Video cards.
 
+The settings section follows the DSH interface language (English or Chinese), including descriptions, status labels, capability control names, and quota reset text.
+
 > **⚠️ Unofficial channel — personal development only.** The private,
 > account-gated Antigravity backend surface is unsupported, revocable, and
 > may be rate-limited or changed without notice. Do not rely on it for
 > production workloads.
 
-## Unreleased: DSH 0.1.5 adaptation
+## 0.1.4-rc.1: DSH 0.1.5-rc.1 adaptation
 
-Moves the development baseline to DSH `0.1.5-alpha.1`. Gemini and Claude requests preserve V3 system-message text in `systemInstruction`; one-shot `options.system` remains a preface, followed by system messages in order. Account operations use authenticated `/api/antigravity-auth/*` routes with the existing static loopback guard. Terminal commands keep their existing names.
+Updates development dependencies, peer ranges, package checks, and the matching source verification target to DSH `0.1.5-rc.1`. Existing authentication, model, search, and media contracts remain covered by offline tests.
+
+Moves the development baseline to DSH `0.1.5-rc.1`. Gemini and Claude requests preserve V3 system-message text in `systemInstruction`; one-shot `options.system` remains a preface, followed by system messages in order. Account operations use authenticated `/api/antigravity-auth/*` routes with the existing static loopback guard. Terminal commands keep their existing names.
 
 ## v0.1.4-alpha.5 highlights
 
@@ -78,35 +82,28 @@ Multimodal `analyze_video` tool accepts workspace MP4 videos, performing bounded
 ### Usage & Quota Visual Dashboard
 
 - Renders real-time progress bars for 5-Hour and Weekly limit windows.
+- Reset countdowns of at least 24 hours show days, hours, and minutes (for example, `94h 43m` becomes `3d 22h 43m`; Chinese uses `3天 22h 43m`). Shorter countdowns retain the hour/minute format.
 - Clear status tiers: Normal (>60%, emerald green), Warning (30%–60%, amber), and Low (<30%, coral red).
 - Elegant loading shimmer tracks and querying spinner animations.
 
 ## Requirements
 
-- DeepSeek Harness `0.1.5-alpha.1` (tested coherent dependency graph).
+- DeepSeek Harness `0.1.5-rc.1` (tested coherent dependency graph).
 - Node.js `^22.19.0` or `>=24.0.0`.
 - `pnpm` available on `PATH` (`11.7.0` is the tested project package manager).
 - A Google account with Antigravity access.
 
-## Install this development adaptation
+## Install
 
-This change is not published to npm; installing the published `0.1.4-alpha.6` does not obtain it. Build and pack from this plugin checkout:
-
-```sh
-pnpm install --frozen-lockfile
-pnpm run check
-npm pack
-```
-
-Stop `dsh web`, upgrade the target Host to DSH `0.1.5-alpha.1`, then install the local artifact produced above into the profile you intend to upgrade:
+Stop `dsh web`, ensure the target Host uses a coherent DSH `0.1.5-rc.1` graph, then install the exact prerelease into the intended profile:
 
 ```sh
 dsh --version
-dsh plugin --profile web add ./dsh-antigravity-auth-0.1.4-alpha.6.tgz
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.1
 dsh plugin --profile web list
 ```
 
-Verify the entry, restart `dsh web`, and refresh the browser. Use the exact new version after a formal release. This development adaptation does not itself publish, edit a live profile, or upgrade global DSH. Older DSH installations can retain the [alpha.6 release](https://github.com/suntianc/dsh-antigravity-auth/releases).
+Verify the entry, restart `dsh web`, and refresh the browser. This version uses the npm `rc` tag. An install without a version or tag selects `latest`, which does not include this RC1 adaptation. Older DSH Hosts should retain a compatible older plugin release.
 
 ## Terminal login command
 
