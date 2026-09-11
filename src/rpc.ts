@@ -7,12 +7,13 @@ import type { BootstrapStatusService } from './status.ts'
 import type { QuotaStatusView } from './quota.ts'
 import { isSafeRpcErrorCode, safeRpcErrorMessage } from './rpc-vocabulary.ts'
 import type { AntigravityModelCatalogService } from './model-catalog.ts'
+import { isBoundedSafeText } from './safe-text.ts'
 
 export { ANTIGRAVITY_AUTH_RPC_CHANNEL, ANTIGRAVITY_AUTH_RPC_NAMESPACE } from './rpc-contract.ts'
 
 /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
 export async function handleAntigravityAuthRpc(
-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
+  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke' | 'switchAccount' | 'removeAccount'> & { usage?: (signal?: AbortSignal, force?: boolean, accountId?: string) => Promise<QuotaStatusView> },
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -36,9 +37,9 @@ export async function handleAntigravityAuthRpc(
         : modelCatalog.catalogSnapshot() }
     }
     if (endpoint === 'usage') {
-      if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force: boolean }')
+      if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force?: boolean, accountId?: string }')
       if (service.usage === undefined) return { ok: true, value: { state: 'protocol-drift' as const } }
-      return { ok: true, value: await service.usage(signal, payload.force) }
+      return { ok: true, value: await service.usage(signal, payload.force, payload.accountId) }
     }
     if (endpoint === 'acknowledge-risk') {
       if (!isAcknowledgement(payload)) return badRequest('acknowledge-risk expects { acknowledge: true }')
@@ -56,6 +57,16 @@ export async function handleAntigravityAuthRpc(
       if (!isEmptyRecord(payload)) return badRequest('logout expects an empty payload')
       return { ok: true, value: await service.logout() }
     }
+    if (endpoint === 'switch-account') {
+      if (!isAccountPayload(payload)) return badRequest('switch-account expects { accountId: string }')
+      if (typeof service.switchAccount !== 'function') return badRequest('switch-account is not supported')
+      return { ok: true, value: { status: await service.switchAccount(payload.accountId) } }
+    }
+    if (endpoint === 'remove-account') {
+      if (!isAccountPayload(payload)) return badRequest('remove-account expects { accountId: string }')
+      if (typeof service.removeAccount !== 'function') return badRequest('remove-account is not supported')
+      return { ok: true, value: { status: await service.removeAccount(payload.accountId) } }
+    }
     if (endpoint === 'revoke') {
       if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
       return { ok: true, value: await service.revoke(true, signal) }
@@ -64,6 +75,14 @@ export async function handleAntigravityAuthRpc(
   } catch (error) {
     return safeFailure(error)
   }
+}
+
+function isAccountPayload(value: unknown): value is { accountId: string } {
+  return isRecord(value)
+    && Object.keys(value).length === 1
+    && typeof value.accountId === 'string'
+    && value.accountId.length > 0
+    && value.accountId.length <= 4096
 }
 
 function badRequest(message: string): RpcResult<never> {
@@ -96,10 +115,11 @@ function isEmptyRecord(value: unknown): value is Record<string, never> {
   return isRecord(value) && Object.keys(value).length === 0
 }
 
-function isRefreshPayload(value: unknown): value is { force?: boolean } {
+function isRefreshPayload(value: unknown): value is { force?: boolean; accountId?: string } {
   return isRecord(value)
-    && Object.keys(value).every(key => key === 'force')
+    && Object.keys(value).every(key => key === 'force' || key === 'accountId')
     && (value.force === undefined || typeof value.force === 'boolean')
+    && (value.accountId === undefined || (typeof value.accountId === 'string' && isBoundedSafeText(value.accountId, 4096)))
 }
 
 function isAcknowledgement(value: unknown): value is { acknowledge: true } {

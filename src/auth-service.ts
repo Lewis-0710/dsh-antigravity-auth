@@ -2,7 +2,13 @@
 
 import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
 import { createAuthStore, defaultAuthStorePath } from './auth-store.ts'
-import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type HostCredential } from './credential-coordinator.ts'
+import {
+  createCredentialCoordinator,
+  createGoogleRefreshTransport,
+  type CredentialCoordinator,
+  type CredentialCoordinatorOptions,
+  type HostCredential,
+} from './credential-coordinator.ts'
 import { createOAuthFlow, OAuthFlowError } from './oauth-flow.ts'
 import type {
   OAuthFlow,
@@ -56,6 +62,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly quota: QuotaService
   private readonly gates: CapabilityGateRegistry
   private readonly autoActivate: boolean
+  private readonly credentialOptions?: Omit<CredentialCoordinatorOptions, 'store'> | undefined
+  private readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'> | undefined
+  private readonly perAccountQuotaServices = new Map<string, QuotaService>()
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
@@ -63,6 +72,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   constructor(options: AntigravityAuthServiceOptions = {}) {
     this.autoActivate = options.autoActivateGates ?? false
+    this.credentialOptions = options.credentialOptions
+    this.quotaOptions = options.quotaOptions
     const storePath = options.storePath ?? defaultAuthStorePath()
     this.store = options.store ?? createAuthStore(storePath)
     this.gates = options.gates ?? (options.gatePath !== undefined
@@ -93,6 +104,19 @@ export class AntigravityAuthService implements BootstrapStatusService {
     const maskedEmail = maskEmail(record?.email)
     const credentialStatus = await this.credentials.status()
     const gateEvidence = await this.gateEvidenceFor(record)
+    const storedAccounts = await this.store.listAccounts?.() ?? []
+    const activeId = await this.store.getActiveAccountId?.()
+    const accounts: import('./status.ts').AccountSummaryView[] = storedAccounts.map(acc => {
+      const masked = maskEmail(acc.email)
+      return {
+        id: acc.id,
+        projectAvailable: acc.projectId !== undefined && acc.projectId.length > 0,
+        active: acc.id === (activeId ?? storedAccounts[0]?.id),
+        ...(acc.email === undefined ? {} : { email: acc.email }),
+        ...(masked === undefined ? {} : { maskedEmail: masked }),
+        ...(acc.addedAt === undefined ? {} : { addedAt: acc.addedAt }),
+      }
+    })
     const login: LoginStatusView = {
       phase,
       configured: record !== undefined,
@@ -102,7 +126,15 @@ export class AntigravityAuthService implements BootstrapStatusService {
       ...(maskedEmail === undefined ? {} : { maskedEmail }),
       ...(flowStatus.errorCode === undefined ? {} : { errorCode: flowStatus.errorCode }),
     }
-    return createStatusView(this.riskAcknowledged, login, credentialStatus, this.credentials.revokeStatus(), gateEvidence)
+    return createStatusView(
+      this.riskAcknowledged,
+      login,
+      credentialStatus,
+      this.credentials.revokeStatus(),
+      gateEvidence,
+      accounts.length > 0 ? accounts : undefined,
+      activeId ?? storedAccounts[0]?.id,
+    )
   }
 
   async acknowledgeRisk(): Promise<RiskAcknowledgementResult> {
@@ -153,6 +185,41 @@ export class AntigravityAuthService implements BootstrapStatusService {
     return status.capabilities.some(capability => capability.id === id && capability.state === 'available')
   }
 
+  async switchAccount(accountId: string): Promise<AntigravityStatusView> {
+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+    const updatedRecord = await this.store.setActiveAccount(accountId)
+    if (updatedRecord === undefined) {
+      throw new OAuthFlowError('internal', 'Account not found')
+    }
+    const service = this.perAccountQuotaServices.get(accountId)
+    if (service) {
+      void service.dispose()
+      this.perAccountQuotaServices.delete(accountId)
+    }
+    if (this.autoActivate) {
+      await this.autoActivateGates(gateSubject(updatedRecord))
+    }
+    this.notifyStatus()
+    return await this.status()
+  }
+
+  async removeAccount(accountId: string): Promise<AntigravityStatusView> {
+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+    await this.store.removeAccount(accountId)
+    const service = this.perAccountQuotaServices.get(accountId)
+    if (service) {
+      void service.dispose()
+      this.perAccountQuotaServices.delete(accountId)
+    }
+    const remaining = await this.store.listAccounts()
+    if (remaining.length === 0) {
+      await this.credentials.logout()
+      await this.gates.clear()
+    }
+    this.notifyStatus()
+    return await this.status()
+  }
+
   async startLogin(): Promise<LoginStartResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     if (!this.riskAcknowledged) {
@@ -187,19 +254,83 @@ export class AntigravityAuthService implements BootstrapStatusService {
     return await this.credentials.credential(signal, options)
   }
 
-  async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {
-    return await this.quota.refresh(signal, force)
+  async usage(signal?: AbortSignal, force = false, accountId?: string): Promise<import('./quota.ts').QuotaStatusView> {
+    const activeId = await this.store.getActiveAccountId?.()
+    if (accountId === undefined || accountId === activeId) {
+      return await this.quota.refresh(signal, force)
+    }
+    const accounts = await this.store.listAccounts?.() ?? []
+    const target = accounts.find(a => a.id === accountId)
+    if (!target) return { state: 'unauthenticated' }
+
+    let service = this.perAccountQuotaServices.get(target.id)
+    if (!service) {
+      let cachedToken: { accessToken: string; expiresAt: number } | undefined
+      const refreshTransport = this.credentialOptions?.refreshToken ?? createGoogleRefreshTransport(this.credentialOptions?.fetchImpl)
+      service = createQuotaService({
+        ...this.quotaOptions,
+        auth: {
+          credential: async (credSignal?: AbortSignal) => {
+            const now = Date.now()
+            if (cachedToken && cachedToken.expiresAt > now + 60_000) {
+              return {
+                accessToken: cachedToken.accessToken,
+                refreshToken: target.refreshToken,
+                expiresAt: cachedToken.expiresAt,
+                projectId: target.projectId,
+              }
+            }
+            const token = await refreshTransport({
+              refreshToken: target.refreshToken,
+              signal: credSignal ?? new AbortController().signal,
+            })
+            cachedToken = { accessToken: token.accessToken, expiresAt: token.expiresAt }
+            return {
+              accessToken: token.accessToken,
+              refreshToken: token.refreshToken ?? target.refreshToken,
+              expiresAt: token.expiresAt,
+              projectId: target.projectId,
+            }
+          },
+        },
+      })
+      this.perAccountQuotaServices.set(target.id, service)
+    }
+    return await service.refresh(signal, force)
   }
 
-  async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
+  async logout(accountId?: string): Promise<import('./credential-coordinator.ts').LogoutResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     this.activeFlowGeneration = 0
     await this.flow.cancel()
     try {
-      const result = await this.credentials.logout()
-      await this.gates.clear()
+      if (accountId !== undefined) {
+        await this.store.removeAccount(accountId)
+        const s = this.perAccountQuotaServices.get(accountId)
+        if (s) {
+          void s.dispose()
+          this.perAccountQuotaServices.delete(accountId)
+        }
+      } else {
+        const activeId = await this.store.getActiveAccountId()
+        if (activeId !== undefined) {
+          await this.store.removeAccount(activeId)
+          const s = this.perAccountQuotaServices.get(activeId)
+          if (s) {
+            void s.dispose()
+            this.perAccountQuotaServices.delete(activeId)
+          }
+        } else {
+          await this.store.clear()
+        }
+      }
+      const remaining = await this.store.listAccounts()
+      if (remaining.length === 0) {
+        await this.credentials.logout()
+        await this.gates.clear()
+      }
       this.notifyStatus()
-      return result
+      return { state: 'logged-out' }
     } catch {
       throw new OAuthFlowError('persistence-failed', 'The local Antigravity credential could not be cleared')
     }
@@ -218,7 +349,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.disposed = true
     this.activeFlowGeneration = 0
     this.statusListeners.clear()
-    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose()])
+    const perAccount = Array.from(this.perAccountQuotaServices.values()).map(s => s.dispose())
+    this.perAccountQuotaServices.clear()
+    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose(), ...perAccount])
   }
 
   private async commitCredential(token: OAuthToken, project: ProjectValidation, signal: AbortSignal): Promise<void> {
@@ -230,11 +363,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
     if (this.disposed || flowGeneration !== this.activeFlowGeneration || signal.aborted) {
       throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
     }
-    const email = maskEmail(project.email ?? token.email)
+    const rawEmail = project.email ?? token.email
     const draft = {
       refreshToken: token.refreshToken,
       projectId: project.projectId,
-      ...(email === undefined ? {} : { email }),
+      ...(rawEmail === undefined ? {} : { email: rawEmail }),
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')

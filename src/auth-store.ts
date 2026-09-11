@@ -31,14 +31,30 @@ export interface AntigravityAuthRecord {
   readonly lineage?: string
 }
 
-export interface AuthStoreOptions {
-  readonly now?: () => number
-  /** Override process.platform only for deterministic cross-platform tests. */
-  readonly platform?: NodeJS.Platform
+export interface StoredAccount {
+  readonly id: string
+  readonly refreshToken: string
+  readonly projectId: string
+  readonly email?: string
+  readonly lineage?: string
+  readonly addedAt?: string
+  readonly updatedAt: string
+}
+
+export interface MultiAuthStorage {
+  readonly version: typeof AUTH_RECORD_VERSION
+  readonly revision: number
+  readonly activeAccountId?: string
+  readonly accounts: readonly StoredAccount[]
+  readonly updatedAt: string
 }
 
 export interface AntigravityAuthStore {
   read(): Promise<AntigravityAuthRecord | undefined>
+  listAccounts(): Promise<readonly StoredAccount[]>
+  getActiveAccountId(): Promise<string | undefined>
+  setActiveAccount(accountId: string): Promise<AntigravityAuthRecord | undefined>
+  removeAccount(accountId: string): Promise<boolean>
   commit(draft: AuthRecordDraft): Promise<AntigravityAuthRecord>
   compareAndCommit(
     expectedRevision: number,
@@ -48,6 +64,12 @@ export interface AntigravityAuthStore {
   /** Clear only when the observed record is still the same account lineage. */
   clearIfCurrent(expectedRevision: number, expectedLineage?: string): Promise<boolean>
   clear(): Promise<void>
+}
+
+export interface AuthStoreOptions {
+  readonly now?: () => number
+  /** Override process.platform only for deterministic cross-platform tests. */
+  readonly platform?: NodeJS.Platform
 }
 
 export type AuthStoreErrorCode =
@@ -92,29 +114,77 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
   const now = options.now ?? (() => Date.now())
   const platform = options.platform ?? process.platform
   const enqueue = createMutationQueue()
-  const read = () => readAuthRecordForPlatform(path, platform)
+  const readStorage = () => readAuthStorageForPlatform(path, platform)
+
+  const read = async (): Promise<AntigravityAuthRecord | undefined> => {
+    const storage = await readStorage()
+    if (!storage) return undefined
+    return getActiveRecord(storage)
+  }
 
   return {
     read,
+    listAccounts: async () => {
+      const storage = await readStorage()
+      return storage?.accounts ?? []
+    },
+    getActiveAccountId: async () => {
+      const storage = await readStorage()
+      return storage?.activeAccountId
+    },
+    setActiveAccount: accountId => enqueue(() => withStoreLock(path, async () => {
+      const storage = await readStorage()
+      if (!storage) return undefined
+      const account = storage.accounts.find(acc => acc.id === accountId)
+      if (!account) return undefined
+      const updatedStorage: MultiAuthStorage = {
+        ...storage,
+        revision: storage.revision + 1,
+        activeAccountId: account.id,
+        updatedAt: new Date(now()).toISOString(),
+      }
+      await writeAuthStorage(path, updatedStorage)
+      return accountToRecord(account, updatedStorage.revision)
+    })),
+    removeAccount: accountId => enqueue(() => withStoreLock(path, async () => {
+      const storage = await readStorage()
+      if (!storage) return false
+      const remaining = storage.accounts.filter(acc => acc.id !== accountId)
+      if (remaining.length === storage.accounts.length) return false
+      const newActiveId = storage.activeAccountId === accountId
+        ? remaining[0]?.id
+        : storage.activeAccountId
+      const updatedStorage: MultiAuthStorage = {
+        version: AUTH_RECORD_VERSION,
+        revision: storage.revision + 1,
+        accounts: remaining,
+        updatedAt: new Date(now()).toISOString(),
+        ...(newActiveId === undefined ? {} : { activeAccountId: newActiveId }),
+      }
+      await writeAuthStorage(path, updatedStorage)
+      return true
+    })),
     commit: draft => enqueue(() => withStoreLock(path, async () => {
-      const current = await read()
-      const record = makeRecord(draft, (current?.revision ?? 0) + 1, now())
-      await writeAuthRecord(path, record)
-      return record
+      const storage = await readStorage()
+      const { updatedStorage, activeRecord } = mutateStorageAddAccount(storage, draft, (storage?.revision ?? 0) + 1, now())
+      await writeAuthStorage(path, updatedStorage)
+      return activeRecord
     })),
     compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
-      const current = await read()
-      if ((current?.revision ?? 0) !== expectedRevision) return undefined
+      const storage = await readStorage()
+      const currentRecord = storage ? getActiveRecord(storage) : undefined
+      if ((storage?.revision ?? 0) !== expectedRevision) return undefined
       const lineage = expectedLineage ?? draft.lineage
-      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
-      const record = makeRecord(draft, expectedRevision + 1, now())
-      await writeAuthRecord(path, record)
-      return record
+      if (lineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== lineage) return undefined
+      const { updatedStorage, activeRecord } = mutateStorageAddAccount(storage, draft, expectedRevision + 1, now())
+      await writeAuthStorage(path, updatedStorage)
+      return activeRecord
     })),
     clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
-      const current = await read()
-      if ((current?.revision ?? 0) !== expectedRevision) return false
-      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
+      const storage = await readStorage()
+      const currentRecord = storage ? getActiveRecord(storage) : undefined
+      if ((storage?.revision ?? 0) !== expectedRevision) return false
+      if (expectedLineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== expectedLineage) return false
       try {
         await unlink(path)
       } catch (error) {
@@ -137,28 +207,80 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
 /** An offline store useful for tests and process-local bootstrap fixtures. */
 export function createMemoryAuthStore(initial?: AntigravityAuthRecord, options: AuthStoreOptions = {}): AntigravityAuthStore {
   const now = options.now ?? (() => Date.now())
-  let current = initial === undefined ? undefined : cloneRecord(initial)
+  const initId = initial ? (initial.email ?? initial.lineage ?? randomUUID()) : undefined
+  let currentStorage: MultiAuthStorage | undefined = initial === undefined ? undefined : {
+    version: AUTH_RECORD_VERSION,
+    revision: initial.revision,
+    accounts: [{
+      id: initId!,
+      refreshToken: initial.refreshToken,
+      projectId: initial.projectId,
+      addedAt: initial.updatedAt,
+      updatedAt: initial.updatedAt,
+      ...(initial.email === undefined ? {} : { email: initial.email }),
+      ...(initial.lineage === undefined ? {} : { lineage: initial.lineage }),
+    }],
+    updatedAt: initial.updatedAt,
+    ...(initId === undefined ? {} : { activeAccountId: initId }),
+  }
   const enqueue = createMutationQueue()
+
+  const read = async () => currentStorage === undefined ? undefined : getActiveRecord(currentStorage)
+
   return {
-    read: async () => current === undefined ? undefined : cloneRecord(current),
-    commit: draft => enqueue(async () => {
-      current = makeRecord(draft, (current?.revision ?? 0) + 1, now())
-      return cloneRecord(current)
+    read,
+    listAccounts: async () => currentStorage?.accounts ?? [],
+    getActiveAccountId: async () => currentStorage?.activeAccountId,
+    setActiveAccount: async accountId => enqueue(async () => {
+      if (!currentStorage) return undefined
+      const account = currentStorage.accounts.find(acc => acc.id === accountId)
+      if (!account) return undefined
+      currentStorage = {
+        ...currentStorage,
+        revision: currentStorage.revision + 1,
+        activeAccountId: account.id,
+        updatedAt: new Date(now()).toISOString(),
+      }
+      return accountToRecord(account, currentStorage.revision)
     }),
-    compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(async () => {
-      if ((current?.revision ?? 0) !== expectedRevision) return undefined
-      const lineage = expectedLineage ?? draft.lineage
-      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
-      current = makeRecord(draft, expectedRevision + 1, now())
-      return cloneRecord(current)
-    }),
-    clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(async () => {
-      if ((current?.revision ?? 0) !== expectedRevision) return false
-      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
-      current = undefined
+    removeAccount: async accountId => enqueue(async () => {
+      if (!currentStorage) return false
+      const remaining = currentStorage.accounts.filter(acc => acc.id !== accountId)
+      if (remaining.length === currentStorage.accounts.length) return false
+      const newActiveId = currentStorage.activeAccountId === accountId
+        ? remaining[0]?.id
+        : currentStorage.activeAccountId
+      currentStorage = {
+        version: AUTH_RECORD_VERSION,
+        revision: currentStorage.revision + 1,
+        accounts: remaining,
+        updatedAt: new Date(now()).toISOString(),
+        ...(newActiveId === undefined ? {} : { activeAccountId: newActiveId }),
+      }
       return true
     }),
-    clear: () => enqueue(async () => { current = undefined }),
+    commit: draft => enqueue(async () => {
+      const { updatedStorage, activeRecord } = mutateStorageAddAccount(currentStorage, draft, (currentStorage?.revision ?? 0) + 1, now())
+      currentStorage = updatedStorage
+      return activeRecord
+    }),
+    compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(async () => {
+      const currentRecord = currentStorage ? getActiveRecord(currentStorage) : undefined
+      if ((currentStorage?.revision ?? 0) !== expectedRevision) return undefined
+      const lineage = expectedLineage ?? draft.lineage
+      if (lineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== lineage) return undefined
+      const { updatedStorage, activeRecord } = mutateStorageAddAccount(currentStorage, draft, expectedRevision + 1, now())
+      currentStorage = updatedStorage
+      return activeRecord
+    }),
+    clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(async () => {
+      const currentRecord = currentStorage ? getActiveRecord(currentStorage) : undefined
+      if ((currentStorage?.revision ?? 0) !== expectedRevision) return false
+      if (expectedLineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== expectedLineage) return false
+      currentStorage = undefined
+      return true
+    }),
+    clear: () => enqueue(async () => { currentStorage = undefined }),
   }
 }
 
@@ -234,13 +356,19 @@ async function removeStaleLock(path: string): Promise<void> {
 }
 
 export async function readAuthRecord(path: string): Promise<AntigravityAuthRecord | undefined> {
-  return readAuthRecordForPlatform(path, process.platform)
+  const storage = await readAuthStorageForPlatform(path, process.platform)
+  if (!storage) return undefined
+  return getActiveRecord(storage)
 }
 
-async function readAuthRecordForPlatform(
+export async function readAuthStorage(path: string): Promise<MultiAuthStorage | undefined> {
+  return readAuthStorageForPlatform(path, process.platform)
+}
+
+async function readAuthStorageForPlatform(
   path: string,
   platform: NodeJS.Platform,
-): Promise<AntigravityAuthRecord | undefined> {
+): Promise<MultiAuthStorage | undefined> {
   let fileInfo
   try {
     fileInfo = await lstat(path)
@@ -263,11 +391,32 @@ async function readAuthRecordForPlatform(
   } catch {
     throw corruptError()
   }
-  return parseRecord(parsed)
+  return parseStorage(parsed)
 }
 
 export async function writeAuthRecord(path: string, record: AntigravityAuthRecord): Promise<void> {
-  const validated = parseRecord(record)
+  const accountId = record.email ?? record.lineage ?? randomUUID()
+  const account: StoredAccount = {
+    id: accountId,
+    refreshToken: record.refreshToken,
+    projectId: record.projectId,
+    addedAt: record.updatedAt,
+    updatedAt: record.updatedAt,
+    ...(record.email === undefined ? {} : { email: record.email }),
+    ...(record.lineage === undefined ? {} : { lineage: record.lineage }),
+  }
+  const storage: MultiAuthStorage = {
+    version: AUTH_RECORD_VERSION,
+    revision: record.revision,
+    activeAccountId: accountId,
+    accounts: [account],
+    updatedAt: record.updatedAt,
+  }
+  await writeAuthStorage(path, storage)
+}
+
+export async function writeAuthStorage(path: string, storage: MultiAuthStorage): Promise<void> {
+  const validated = parseStorage(storage)
   const parent = dirname(path)
   try {
     await prepareParent(parent)
@@ -298,6 +447,95 @@ export function makeAuthRecord(draft: AuthRecordDraft, revision: number, now = D
   return makeRecord(draft, revision, now)
 }
 
+function accountToRecord(account: StoredAccount, revision: number): AntigravityAuthRecord {
+  return {
+    version: AUTH_RECORD_VERSION,
+    refreshToken: account.refreshToken,
+    projectId: account.projectId,
+    revision,
+    updatedAt: account.updatedAt,
+    ...(account.email === undefined ? {} : { email: account.email }),
+    ...(account.lineage === undefined ? {} : { lineage: account.lineage }),
+  }
+}
+
+function getActiveRecord(storage: MultiAuthStorage): AntigravityAuthRecord | undefined {
+  if (storage.accounts.length === 0) return undefined
+  const active = (storage.activeAccountId !== undefined
+    ? storage.accounts.find(a => a.id === storage.activeAccountId)
+    : undefined) ?? storage.accounts[0]
+  if (!active) return undefined
+  return accountToRecord(active, storage.revision)
+}
+
+function mutateStorageAddAccount(
+  storage: MultiAuthStorage | undefined,
+  draft: AuthRecordDraft,
+  revision: number,
+  now: number,
+): { updatedStorage: MultiAuthStorage; activeRecord: AntigravityAuthRecord } {
+  if (!isRecord(draft)
+    || !isBoundedSafeText(draft.refreshToken, 4096)
+    || !isBoundedSafeText(draft.projectId, 4096)
+    || (draft.lineage !== undefined && !isBoundedSafeText(draft.lineage, 4096))
+    || !Number.isSafeInteger(revision)
+    || revision < 1
+    || !Number.isFinite(now)) {
+    throw corruptError()
+  }
+  const email = draft.email === undefined ? undefined : validateEmail(draft.email)
+  const nowIso = new Date(now).toISOString()
+  const lineage = draft.lineage ?? randomUUID()
+  const existingAccounts = storage?.accounts ?? []
+  const existingIndex = existingAccounts.findIndex(acc => (
+    (email !== undefined && acc.email === email)
+    || (draft.lineage !== undefined && acc.lineage === draft.lineage)
+  ))
+
+  let updatedAccount: StoredAccount
+  let updatedAccounts: StoredAccount[]
+  if (existingIndex >= 0) {
+    const existing = existingAccounts[existingIndex]!
+    const updatedEmail = email ?? existing.email
+    updatedAccount = {
+      id: existing.id,
+      refreshToken: draft.refreshToken,
+      projectId: draft.projectId,
+      lineage,
+      addedAt: existing.addedAt ?? nowIso,
+      updatedAt: nowIso,
+      ...(updatedEmail === undefined ? {} : { email: updatedEmail }),
+    }
+    updatedAccounts = [...existingAccounts]
+    updatedAccounts[existingIndex] = updatedAccount
+  } else {
+    const id = email ?? lineage
+    updatedAccount = {
+      id,
+      refreshToken: draft.refreshToken,
+      projectId: draft.projectId,
+      lineage,
+      addedAt: nowIso,
+      updatedAt: nowIso,
+      ...(email === undefined ? {} : { email }),
+    }
+    updatedAccounts = [...existingAccounts, updatedAccount]
+  }
+
+  const updatedStorage: MultiAuthStorage = {
+    version: AUTH_RECORD_VERSION,
+    revision,
+    activeAccountId: updatedAccount.id,
+    accounts: updatedAccounts,
+    updatedAt: nowIso,
+  }
+
+  return {
+    updatedStorage,
+    activeRecord: accountToRecord(updatedAccount, revision),
+  }
+}
+
 function makeRecord(draft: AuthRecordDraft, revision: number, now: number): AntigravityAuthRecord {
   if (!isRecord(draft)
     || !isBoundedSafeText(draft.refreshToken, 4096)
@@ -320,9 +558,85 @@ function makeRecord(draft: AuthRecordDraft, revision: number, now: number): Anti
   return record
 }
 
-function parseRecord(value: unknown): AntigravityAuthRecord {
+function parseStorage(value: unknown): MultiAuthStorage {
   if (!isRecord(value)) throw corruptError()
   if (value.version !== AUTH_RECORD_VERSION) throw unsupportedVersionError()
+
+  // Handle legacy single-record format
+  if (typeof value.refreshToken === 'string') {
+    const legacy = parseLegacyRecord(value)
+    const accountId = legacy.email ?? legacy.lineage ?? randomUUID()
+    const account: StoredAccount = {
+      id: accountId,
+      refreshToken: legacy.refreshToken,
+      projectId: legacy.projectId,
+      addedAt: legacy.updatedAt,
+      updatedAt: legacy.updatedAt,
+      ...(legacy.email === undefined ? {} : { email: legacy.email }),
+      ...(legacy.lineage === undefined ? {} : { lineage: legacy.lineage }),
+    }
+    return {
+      version: AUTH_RECORD_VERSION,
+      revision: legacy.revision,
+      activeAccountId: accountId,
+      accounts: [account],
+      updatedAt: legacy.updatedAt,
+    }
+  }
+
+  const revision = value.revision
+  const updatedAt = value.updatedAt
+  const activeAccountId = value.activeAccountId
+  const accountsRaw = value.accounts
+
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1
+    || typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt))
+    || (activeAccountId !== undefined && (typeof activeAccountId !== 'string' || !isBoundedSafeText(activeAccountId, 4096)))
+    || !Array.isArray(accountsRaw)) {
+    throw corruptError()
+  }
+
+  const accounts: StoredAccount[] = []
+  for (const raw of accountsRaw) {
+    if (!isRecord(raw)) throw corruptError()
+    const id = raw.id
+    const refreshToken = raw.refreshToken
+    const projectId = raw.projectId
+    const email = raw.email
+    const lineage = raw.lineage
+    const addedAt = raw.addedAt
+    const accountUpdatedAt = raw.updatedAt
+
+    if (typeof id !== 'string' || !isBoundedSafeText(id, 4096)
+      || !isBoundedSafeText(refreshToken, 4096)
+      || !isBoundedSafeText(projectId, 4096)
+      || typeof accountUpdatedAt !== 'string' || !Number.isFinite(Date.parse(accountUpdatedAt))
+      || (email !== undefined && (typeof email !== 'string' || !isBoundedSafeText(email, 4096)))
+      || (lineage !== undefined && (typeof lineage !== 'string' || !isBoundedSafeText(lineage, 4096)))
+      || (addedAt !== undefined && (typeof addedAt !== 'string' || !Number.isFinite(Date.parse(addedAt))))) {
+      throw corruptError()
+    }
+    accounts.push({
+      id,
+      refreshToken,
+      projectId,
+      updatedAt: accountUpdatedAt,
+      ...(email === undefined ? {} : { email }),
+      ...(lineage === undefined ? {} : { lineage }),
+      ...(addedAt === undefined ? {} : { addedAt }),
+    })
+  }
+
+  return {
+    version: AUTH_RECORD_VERSION,
+    revision,
+    accounts,
+    updatedAt,
+    ...(activeAccountId === undefined ? {} : { activeAccountId }),
+  }
+}
+
+function parseLegacyRecord(value: Record<string, unknown>): AntigravityAuthRecord {
   const keys = Object.keys(value).sort()
   const required = ['projectId', 'refreshToken', 'revision', 'updatedAt', 'version']
   const withEmail = [...required, 'email'].sort()

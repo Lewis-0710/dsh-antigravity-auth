@@ -83,7 +83,7 @@ describe('Antigravity bootstrap settings', () => {
 
     expect(await screen.findByRole('heading', { name: en.title })).toBeTruthy()
     expect(screen.queryByLabelText(/token|client secret|endpoint/i)).toBeNull()
-    expect(screen.queryByRole('button', { name: /add|switch|rotate/i })).toBeNull()
+    expect(screen.queryByRole('textbox')).toBeNull()
     expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', false)
 
     fireEvent.click(screen.getByRole('button', { name: en.login }))
@@ -169,7 +169,7 @@ describe('Antigravity bootstrap settings', () => {
   it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
     const cases = [
       ['pending', { phase: 'pending', configured: false, projectAvailable: false, authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`, expiresAt: '2026-08-21T00:00:00.000Z' }, en.openAuthorization],
-      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.relogin],
+      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.addAccount],
       ['cancelled', { phase: 'cancelled', configured: false, projectAvailable: false, errorCode: 'cancelled' }, en.login],
       ['expired', { phase: 'expired', configured: false, projectAvailable: false, errorCode: 'expired' }, en.loginExpired],
       ['port-conflict', { phase: 'port-conflict', configured: false, projectAvailable: false, errorCode: 'port-conflict' }, en.loginPortConflict],
@@ -223,7 +223,7 @@ describe('Antigravity bootstrap settings', () => {
     await vi.waitFor(() => expect(status).toHaveBeenCalledOnce())
     await vi.advanceTimersByTimeAsync(1_000)
     await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2))
-    expect(screen.getByText(en.relogin)).toBeTruthy()
+    expect(screen.getByText(en.addAccount)).toBeTruthy()
     unmount()
     vi.useRealTimers()
   })
@@ -266,5 +266,63 @@ describe('Antigravity bootstrap settings', () => {
 
     unmount()
     expect(actionSignal?.aborted).toBe(true)
+  })
+
+  it('renders multi-account list with radio selection and allows switching and removing accounts', async () => {
+    const statusWithAccounts = createStatusView(
+      true,
+      { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'u***1@example.com' },
+      { state: 'logged-in', configured: true },
+      undefined,
+      {},
+      [
+        { id: 'user1@example.com', email: 'user1@example.com', maskedEmail: 'u***1@example.com', projectAvailable: true, active: true },
+        { id: 'user2@example.com', email: 'user2@example.com', maskedEmail: 'u***2@example.com', projectAvailable: true, active: false },
+      ],
+      'user1@example.com',
+    )
+    const switchedStatus = createStatusView(
+      true,
+      { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'u***2@example.com' },
+      { state: 'logged-in', configured: true },
+      undefined,
+      {},
+      [
+        { id: 'user1@example.com', email: 'user1@example.com', maskedEmail: 'u***1@example.com', projectAvailable: true, active: false },
+        { id: 'user2@example.com', email: 'user2@example.com', maskedEmail: 'u***2@example.com', projectAvailable: true, active: true },
+      ],
+      'user2@example.com',
+    )
+    const rpc = rpcFixture()
+    rpc.status = vi.fn().mockResolvedValue({ ok: true, value: { status: statusWithAccounts } })
+    rpc.switchAccount = vi.fn().mockResolvedValue({ ok: true, value: { status: switchedStatus } })
+    rpc.removeAccount = vi.fn().mockResolvedValue({ ok: true, value: { status: switchedStatus } })
+
+    const { unmount } = render(
+      <AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />,
+    )
+
+    expect(await screen.findByText('user1@example.com')).toBeTruthy()
+    expect(screen.getByText('user2@example.com')).toBeTruthy()
+
+    // Check radio checked states
+    const account1Element = screen.getByText('user1@example.com').closest('.agy-account-item')
+    const account2Element = screen.getByText('user2@example.com').closest('.agy-account-item')
+    expect(account1Element?.getAttribute('aria-checked')).toBe('true')
+    expect(account2Element?.getAttribute('aria-checked')).toBe('false')
+
+    // Click account 2 to switch
+    expect(account2Element).toBeTruthy()
+    fireEvent.click(account2Element!)
+    await waitFor(() => expect(rpc.switchAccount).toHaveBeenCalledWith('user2@example.com', expect.any(AbortSignal)))
+
+    // Click logout button on account 1 (sorted after active account user2)
+    const account1Item = screen.getByText('user1@example.com').closest('.agy-account-item')!
+    const logoutBtn = account1Item.querySelector('.agy-btn-logout') as HTMLButtonElement
+    expect(logoutBtn).toBeTruthy()
+    fireEvent.click(logoutBtn)
+    await waitFor(() => expect(rpc.removeAccount).toHaveBeenCalledWith('user1@example.com', expect.any(AbortSignal)))
+
+    unmount()
   })
 })

@@ -478,13 +478,55 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
     const expiresIn = typeof payload.expires_in === 'number' && Number.isFinite(payload.expires_in) && payload.expires_in > 0
       ? payload.expires_in
       : 3_600
+    let email = extractEmailFromIdToken(payload.id_token)
+    if (email === undefined && typeof payload.email === 'string' && payload.email.includes('@')) {
+      email = payload.email
+    }
+    if (email === undefined) {
+      email = await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
+    }
     return {
       accessToken: payload.access_token,
       refreshToken: payload.refresh_token,
       expiresAt: clock.now() + expiresIn * 1000,
-      ...typeof payload.email === 'string' ? { email: payload.email } : {},
+      ...(email === undefined ? {} : { email }),
     }
   }
+}
+
+function extractEmailFromIdToken(idToken: unknown): string | undefined {
+  if (typeof idToken !== 'string') return undefined
+  const parts = idToken.split('.')
+  const payloadPart = parts[1]
+  if (payloadPart === undefined) return undefined
+  try {
+    const raw = Buffer.from(payloadPart, 'base64url').toString('utf8')
+    const parsed: unknown = JSON.parse(raw)
+    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
+      return parsed.email
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
+async function fetchUserInfoEmail(fetchImpl: typeof fetch, accessToken: string, signal: AbortSignal): Promise<string | undefined> {
+  try {
+    const res = await fetchImpl('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+      signal,
+    })
+    if (!res.ok) return undefined
+    const text = await res.text()
+    const parsed: unknown = JSON.parse(text)
+    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
+      return parsed.email
+    }
+  } catch {
+    return undefined
+  }
+  return undefined
 }
 
 function assertCallbackRequest(request: LoopbackCallbackRequest): void {

@@ -67,9 +67,8 @@ describe('Antigravity auth service', () => {
     })
 
     const record = await store.read()
-    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'a***@example.com' })
+    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'alice@example.com' })
     expect(JSON.stringify(record)).not.toContain('access-secret')
-    expect(JSON.stringify(record)).not.toContain('alice@example.com')
     expect(JSON.stringify(await service.status())).not.toContain('project-secret')
     expect(await service.status()).toMatchObject({
       riskAcknowledged: true,
@@ -342,6 +341,29 @@ describe('Antigravity auth service', () => {
     expect(await store.read()).toMatchObject({ refreshToken: 'old-refresh', projectId: 'old-project' })
     await expect(service.credential()).resolves.toMatchObject({ accessToken: 'old-access', projectId: 'old-project' })
     await expect(service.status()).resolves.toMatchObject({ login: { configured: true, projectAvailable: true } })
+    await service.dispose()
+  })
+
+  it('supports listing multiple accounts, switching active account, and removing account', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'refresh-1', projectId: 'project-1', email: 'user1@example.com' })
+    await store.commit({ refreshToken: 'refresh-2', projectId: 'project-2', email: 'user2@example.com' })
+
+    const service = createAntigravityAuthService({ store })
+    const status = await service.status()
+    expect(status.accounts).toHaveLength(2)
+    expect(status.activeAccountId).toBe('user2@example.com')
+    expect(status.login.maskedEmail).toBe('u***@example.com')
+
+    // Switch account to user1
+    const switchedStatus = await service.switchAccount('user1@example.com')
+    expect(switchedStatus.activeAccountId).toBe('user1@example.com')
+
+    // Remove user1
+    const remainingStatus = await service.removeAccount('user1@example.com')
+    expect(remainingStatus.accounts).toHaveLength(1)
+    expect(remainingStatus.activeAccountId).toBe('user2@example.com')
+
     await service.dispose()
   })
 })

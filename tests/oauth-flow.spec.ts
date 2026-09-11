@@ -331,4 +331,24 @@ describe('Antigravity OAuth flow', () => {
       expect(String(error)).not.toContain('private-token-response')
     }
   })
+
+  it('extracts email from id_token in token exchange or falls back to userinfo', async () => {
+    const fakePayload = Buffer.from(JSON.stringify({ email: 'bob@example.com' })).toString('base64url')
+    const idToken = `header.${fakePayload}.signature`
+    const fetchImpl = vi.fn(async () => {
+      return new Response(JSON.stringify({
+        access_token: 'access-secret',
+        refresh_token: 'refresh-secret',
+        expires_in: 60,
+        id_token: idToken,
+      }))
+    })
+    const exchange = createGoogleTokenExchanger(fetchImpl as typeof fetch, {
+      now: () => 1_000,
+      setTimeout,
+      clearTimeout,
+    })
+    const result = await exchange({ code: 'authorization-code', verifier: 'pkce-verifier', signal: new AbortController().signal })
+    expect(result.email).toBe('bob@example.com')
+  })
 })

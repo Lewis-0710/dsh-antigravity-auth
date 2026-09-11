@@ -33,9 +33,11 @@ export interface AntigravityAuthRpcClient {
   login(signal?: AbortSignal): Promise<RpcResult<LoginStartResult>>
   cancelLogin(signal?: AbortSignal): Promise<RpcResult<LoginActionResult>>
   logout(signal?: AbortSignal): Promise<RpcResult<{ state: 'logged-out' }>>
+  switchAccount?(accountId: string, signal?: AbortSignal): Promise<RpcResult<{ status: AntigravityStatusView }>>
+  removeAccount?(accountId: string, signal?: AbortSignal): Promise<RpcResult<{ status: AntigravityStatusView }>>
   revoke(signal?: AbortSignal): Promise<RpcResult<RevokeActionResult>>
   models(signal?: AbortSignal, force?: boolean): Promise<RpcResult<AntigravityModelCatalogView>>
-  usage?(signal?: AbortSignal, force?: boolean): Promise<RpcResult<QuotaStatusView>>
+  usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<RpcResult<QuotaStatusView>>
 }
 
 export interface AntigravityAuthConnectionRpc {
@@ -58,9 +60,17 @@ export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc
     login: signal => callValidated(rpc, 'login', {}, signal, parseLoginResult),
     cancelLogin: signal => callValidated(rpc, 'cancel', {}, signal, parseActionResult),
     logout: signal => callValidated(rpc, 'logout', {}, signal, parseLogoutResult),
+    switchAccount: (accountId, signal) => callValidated(rpc, 'switch-account', { accountId }, signal, value => {
+      const status = parseStatusResult(value)
+      return status === undefined ? undefined : { status }
+    }),
+    removeAccount: (accountId, signal) => callValidated(rpc, 'remove-account', { accountId }, signal, value => {
+      const status = parseStatusResult(value)
+      return status === undefined ? undefined : { status }
+    }),
     revoke: signal => callValidated(rpc, 'revoke', { confirmed: true }, signal, parseRevokeResult),
     models: (signal, force = false) => callValidated(rpc, 'models', { force }, signal, parseModelCatalogResult),
-    usage: (signal, force = false) => callValidated(rpc, 'usage', { force }, signal, parseUsageResult),
+    usage: (signal, force = false, accountId) => callValidated(rpc, 'usage', { force, ...(accountId === undefined ? {} : { accountId }) }, signal, parseUsageResult),
   }
 }
 
@@ -184,6 +194,8 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
       'credential',
       'revoke',
       'capabilities',
+      'accounts',
+      'activeAccountId',
     ])
     || value.pluginId !== 'dsh-antigravity-auth'
     || value.phase !== 'bootstrap'
@@ -209,6 +221,22 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
   }
   if (seen.size !== CAPABILITY_ROW_IDS.length || CAPABILITY_ROW_IDS.some(id => !seen.has(id))) return undefined
 
+  let accounts: import('./status.ts').AccountSummaryView[] | undefined
+  if (value.accounts !== undefined) {
+    if (!Array.isArray(value.accounts)) return undefined
+    accounts = []
+    for (const acc of value.accounts) {
+      const parsed = parseAccountSummary(acc)
+      if (parsed === undefined) return undefined
+      accounts.push(parsed)
+    }
+  }
+
+  const activeAccountId = value.activeAccountId
+  if (activeAccountId !== undefined && (typeof activeAccountId !== 'string' || !isBoundedSafeText(activeAccountId, 4096))) {
+    return undefined
+  }
+
   return {
     pluginId: 'dsh-antigravity-auth',
     phase: 'bootstrap',
@@ -220,6 +248,26 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
     ...(credential === undefined ? {} : { credential }),
     ...(revoke === undefined ? {} : { revoke }),
     capabilities,
+    ...(accounts === undefined ? {} : { accounts }),
+    ...(activeAccountId === undefined ? {} : { activeAccountId }),
+  }
+}
+
+function parseAccountSummary(value: unknown): import('./status.ts').AccountSummaryView | undefined {
+  if (!isRecord(value) || !hasAllowedKeys(value, ['id', 'email', 'maskedEmail', 'projectAvailable', 'active', 'addedAt'])) return undefined
+  if (typeof value.id !== 'string' || !isBoundedSafeText(value.id, 4096)
+    || typeof value.active !== 'boolean') return undefined
+  if (value.projectAvailable !== undefined && typeof value.projectAvailable !== 'boolean') return undefined
+  if (value.email !== undefined && (typeof value.email !== 'string' || !isBoundedSafeText(value.email, 4096))) return undefined
+  if (value.maskedEmail !== undefined && (typeof value.maskedEmail !== 'string' || !isBoundedSafeText(value.maskedEmail, 4096))) return undefined
+  if (value.addedAt !== undefined && (typeof value.addedAt !== 'string' || !isIsoTime(value.addedAt))) return undefined
+  return {
+    id: value.id,
+    active: value.active,
+    ...(value.projectAvailable === undefined ? {} : { projectAvailable: value.projectAvailable }),
+    ...(value.email === undefined ? {} : { email: value.email }),
+    ...(value.maskedEmail === undefined ? {} : { maskedEmail: value.maskedEmail }),
+    ...(value.addedAt === undefined ? {} : { addedAt: value.addedAt }),
   }
 }
 
