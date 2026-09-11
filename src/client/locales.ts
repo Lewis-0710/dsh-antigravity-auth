@@ -3,7 +3,7 @@
 export const en = {
   nav: 'Antigravity',
   title: 'Antigravity Auth',
-  intro: '使用 Antigravity Auth 登录接入 Antigravity 的 LLM、文生图、Websearch、视频理解能力。',
+  intro: 'Sign in with Antigravity Auth to access language models, image generation, web search, and video understanding.',
   riskTitle: 'Before you continue',
   risk: 'Google does not support third-party Antigravity login tools. Your account may be suspended or terminated.',
   terms: 'Review the Google FAQ before continuing.',
@@ -58,6 +58,7 @@ export const en = {
   image: 'Image',
   video: 'Video',
   available: 'Available',
+  ready: 'Ready',
   disabled: 'Disabled',
   pocPending: 'POC pending',
   protocolDrift: 'Protocol drift',
@@ -130,7 +131,7 @@ export type AntigravityAuthKey = keyof typeof en
 export const zh: Record<AntigravityAuthKey, string> = {
   nav: 'Antigravity',
   title: 'Antigravity Auth',
-  intro: '使用 Antigravity Auth 登录接入 Antigravity 的 LLM、文生图、Websearch、视频理解能力。',
+  intro: '通过 Antigravity Auth 登录，使用语言模型、图片生成、网页搜索和视频理解能力。',
   riskTitle: '继续前请确认',
   risk: 'Google 不支持第三方 Antigravity 登录工具，账号可能被暂停或终止。',
   terms: '继续前请阅读 Google FAQ。',
@@ -185,6 +186,7 @@ export const zh: Record<AntigravityAuthKey, string> = {
   image: '图片',
   video: '视频',
   available: '可用',
+  ready: '就绪',
   disabled: '已禁用',
   pocPending: 'POC 待验证',
   protocolDrift: '协议漂移',
