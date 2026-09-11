@@ -17,8 +17,8 @@ The repository and issue tracker are public, while the integrated Antigravity ba
 
 ## DSH compatibility baseline
 
-- The minimum and tested DSH package baseline is `dsh-v0.1.5-alpha.1` (`0.1.5-alpha.1` on npm). The upgrade impact source is `docs/research/dsh-v0.1.5-alpha.1-cross-plugin-impact.md`; the prior rc.2 assessment remains historical evidence only.
-- DSH peer dependencies use `^0.1.5-alpha.1`; development dependencies and the lockfile resolve the exact `0.1.5-alpha.1` line with Cordis `4.0.2` and Schemastery `3.18.2`. Do not reintroduce older or mixed DSH prerelease families.
+- The minimum and tested DSH package baseline is `dsh-v0.1.5-rc.1` (`0.1.5-rc.1` on npm). The upgrade impact source is `docs/dsh-source-verification.md`; the prior rc.2 assessment remains historical evidence only.
+- DSH peer dependencies use `^0.1.5-rc.1`; development dependencies and the lockfile resolve the exact `0.1.5-rc.1` line with Cordis `4.0.2` and Schemastery `3.18.2`. Do not reintroduce older or mixed DSH prerelease families.
 - A clean install must pass `pnpm peers check`, followed by the full offline `pnpm run check` gate. Treat peer-resolution warnings as failures rather than suppressing them.
 - alpha.5 keeps the public `LlmAdapter`, `ctx.llm`, client injection, Cordis patch, and `attributionHeaders()` seams used here, while using `ToolCallId`, `ctx.settings.installSection()`, Session snapshot accessors, and the current Connection/client package topology. Account RPC must stay behind the plugin-owned static loopback guard: only an explicit `127.0.0.1` Web bind reaches the real dispatcher; an absent, all-interface, or unknown Web bind receives only the inert `loopback-required` handler because alpha.5 has no public per-method or carrier authority tier.
 - Every future DSH prerelease-line bump requires a new plugin impact assessment before changing package ranges. Upgrade the development baseline as one coherent graph; do not mix prerelease families.
@@ -84,4 +84,4 @@ Every handoff must state:
 
 ## Matching source verification
 
-DSH `0.1.5-alpha.1` at `5dda764ed3aa172535a7967b06ff95d9cbfe536a` is the matching source target for the published npm baseline. Use the isolated workflow in `docs/dsh-source-verification.md`; run both `pnpm run check` and the source check when changing compatibility-sensitive behavior. Keep the complete dependency graph coherent. Older release graphs are historical evidence, not the current development baseline.
+DSH `0.1.5-rc.1` at `183f08e9c6dde7e36cd2318eaee70b0da08fb35e` is the matching source target for the published npm baseline. Use the isolated workflow in `docs/dsh-source-verification.md`; run both `pnpm run check` and the source check when changing compatibility-sensitive behavior. Keep the complete dependency graph coherent. Older release graphs are historical evidence, not the current development baseline.

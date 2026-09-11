@@ -159,11 +159,96 @@ describe('Antigravity bootstrap settings', () => {
     expect(screen.getByText('85.00%')).toBeTruthy()
   })
 
+  describe.each([
+    { language: 'English', copy: en, dayUnit: 'd', resetPrefix: 'Refreshes in ', resetSuffix: '' },
+    { language: 'Chinese', copy: zh, dayUnit: '天', resetPrefix: '', resetSuffix: ' 后刷新' },
+  ])('$language quota reset countdown', ({ copy, dayUnit, resetPrefix, resetSuffix }) => {
+    it.each([
+      { minutes: 94 * 60 + 43, expected: `3${dayUnit} 22h 43m` },
+      { minutes: 48 * 60, expected: `2${dayUnit} 0h 0m` },
+      { minutes: 24 * 60, expected: `1${dayUnit} 0h 0m` },
+      { minutes: 24 * 60 - 1, expected: '23h 59m' },
+      { minutes: 60, expected: '1h 0m' },
+      { minutes: 43, expected: '43m' },
+      { minutes: 0.5, expected: '0m' },
+      { minutes: 0, expected: '0m' },
+      { minutes: -1, expected: '0m' },
+    ])('renders $minutes remaining minutes as $expected', async ({ minutes, expected }) => {
+      const now = Date.parse('2026-09-10T00:00:00.000Z')
+      vi.spyOn(Date, 'now').mockReturnValue(now)
+      const rpc = rpcFixture(
+        { phase: 'success', configured: true, projectAvailable: true },
+        true,
+        { state: 'logged-in', configured: true },
+      )
+      vi.mocked(rpc.usage!).mockResolvedValue({
+        ok: true,
+        value: {
+          state: 'available',
+          groups: [{
+            group: 'gemini',
+            modelCount: 2,
+            windows: [
+              { window: 'weekly', remainingFraction: 0.22, resetTime: new Date(now + minutes * 60_000).toISOString() },
+              { window: '5h', remainingFraction: 0.85, resetTime: new Date(now + 5 * 60 * 60_000).toISOString() },
+            ],
+          }],
+        },
+      })
+
+      render(<AntigravityAuthSettings rpc={rpc} t={key => copy[key]} subscribe={() => () => {}} />)
+
+      expect(await screen.findByText(`22% ${copy.remaining} · ${resetPrefix}${expected}${resetSuffix}`)).toBeTruthy()
+      expect(screen.getByText(`85% ${copy.remaining} · ${resetPrefix}5h 0m${resetSuffix}`)).toBeTruthy()
+    })
+  })
+
   it('renders the same status shell with Chinese copy', async () => {
     const rpc = rpcFixture()
     render(<AntigravityAuthSettings rpc={rpc} t={key => zh[key]} subscribe={() => () => {}} />)
 
     expect(await screen.findByRole('heading', { name: zh.title })).toBeTruthy()
+  })
+
+  it('translates descriptions, status, and capability controls when the language changes', async () => {
+    const rpc = rpcFixture(
+      { phase: 'success', configured: true, projectAvailable: true },
+      true,
+      { state: 'logged-in', configured: true },
+    )
+    const subscribe = () => () => {}
+    const { container, rerender } = render(
+      <AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={subscribe} />,
+    )
+
+    expect(await screen.findByRole('status', { name: 'Ready' })).toBeTruthy()
+    expect(screen.getByText(en.intro)).toBeTruthy()
+    for (const key of ['authCardIntro', 'searchCardIntro', 'imageCardIntro', 'videoCardIntro'] as const) {
+      expect(screen.getByText(en[key])).toBeTruthy()
+    }
+    for (const key of ['toggleSearch', 'toggleImage', 'toggleVideo'] as const) {
+      expect(screen.getByRole('checkbox', { name: en[key] })).toBeTruthy()
+    }
+    expect(container.textContent).not.toMatch(/\p{Script=Han}/u)
+
+    rerender(<AntigravityAuthSettings rpc={rpc} t={key => zh[key]} subscribe={subscribe} />)
+
+    expect(await screen.findByRole('status', { name: '就绪' })).toBeTruthy()
+    expect(screen.queryByRole('status', { name: 'Ready' })).toBeNull()
+    expect(screen.queryByText(en.intro)).toBeNull()
+    expect(screen.getByText(zh.intro)).toBeTruthy()
+    for (const key of ['authCardIntro', 'searchCardIntro', 'imageCardIntro', 'videoCardIntro'] as const) {
+      expect(screen.getByText(zh[key])).toBeTruthy()
+    }
+    for (const key of ['toggleSearch', 'toggleImage', 'toggleVideo'] as const) {
+      expect(screen.getByRole('checkbox', { name: zh[key] })).toBeTruthy()
+    }
+  })
+
+  it('keeps complete bilingual dictionaries without Chinese text in English copy', () => {
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort())
+    expect(Object.entries(en).filter(([, value]) => /\p{Script=Han}/u.test(value))).toEqual([])
+    expect([...Object.values(en), ...Object.values(zh)].every(value => value.trim().length > 0)).toBe(true)
   })
 
   it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
