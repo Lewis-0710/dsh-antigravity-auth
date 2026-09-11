@@ -388,4 +388,21 @@ describe('Antigravity login RPC', () => {
     })
     expect(JSON.stringify([malformed, sanitized, rejected])).not.toMatch(/secret|callbackUrl|access-token/i)
   })
+
+  it('handles switch-account and remove-account RPC endpoints', async () => {
+    const service = createBootstrapStatusService()
+    service.switchAccount = vi.fn().mockResolvedValue(createStatusView(true, { phase: 'success', configured: true, projectAvailable: true }))
+    service.removeAccount = vi.fn().mockResolvedValue(createStatusView(true, { phase: 'idle', configured: false, projectAvailable: false }))
+
+    const switchResult = await handleAntigravityAuthRpc(service, 'switch-account', { accountId: 'acc-1' }, signal)
+    expect(switchResult).toMatchObject({ ok: true })
+    expect(service.switchAccount).toHaveBeenCalledWith('acc-1')
+
+    const removeResult = await handleAntigravityAuthRpc(service, 'remove-account', { accountId: 'acc-1' }, signal)
+    expect(removeResult).toMatchObject({ ok: true })
+    expect(service.removeAccount).toHaveBeenCalledWith('acc-1')
+
+    const badSwitch = await handleAntigravityAuthRpc(service, 'switch-account', {}, signal)
+    expect(badSwitch).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+  })
 })

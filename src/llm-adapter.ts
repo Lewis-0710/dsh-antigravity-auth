@@ -149,7 +149,7 @@ export class AntigravityAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     if (provider !== ANTIGRAVITY_PROVIDER) throw new LlmError('Unknown Antigravity provider route', 'NO_ADAPTER')
-    return { id: ANTIGRAVITY_PROVIDER, name: 'Google Antigravity' }
+    return { id: ANTIGRAVITY_PROVIDER, name: 'Antigravity' }
   }
 
   override providerRetryPolicy(): ReturnType<typeof resolveRetryPolicy> {

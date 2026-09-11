@@ -25,9 +25,38 @@ export const SETTINGS_CSS = `
 
 .agy-bundle-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 20px;
+}
+
+.agy-bundle-header > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.agy-header-add-btn {
+  background: transparent;
+  border: none;
+  color: var(--dsw-alias-label-primary, #ffffff);
+  font-size: 17px;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 8px;
+  transition: background-color 0.15s ease, opacity 0.15s ease;
+  white-space: nowrap;
+  flex: none;
+  line-height: 24px;
+}
+
+.agy-header-add-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.agy-header-add-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .agy-title-line {
@@ -474,7 +503,36 @@ export const SETTINGS_CSS = `
 }
 
 .agy-refresh-btn {
-  margin-left: auto;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  height: 32px !important;
+  margin: 0 !important;
+  padding: 0 10px !important;
+  font-size: 13px !important;
+  line-height: 20px !important;
+  border-radius: 6px !important;
+  color: var(--dsw-alias-label-secondary, #a1a1aa) !important;
+  background: transparent !important;
+  border: 1px solid transparent !important;
+  flex-shrink: 0 !important;
+}
+
+.agy-refresh-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+}
+
+.agy-refresh-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
 }
 
 .agy-footer-notice {
@@ -628,7 +686,7 @@ export const SETTINGS_CSS = `
   width: 14px;
   left: 3px;
   bottom: 3px;
-  background-color: #ffffff;
+  background-color: var(--dsw-alias-bg-body, #1a1a1a);
   border-radius: 50%;
   transition: 0.2s ease;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
@@ -647,9 +705,163 @@ export const SETTINGS_CSS = `
   cursor: not-allowed;
 }
 
+/* Multi-Account Card & Radio UI */
+.agy-account-card {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 22px;
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.03));
+  border: 2px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.08));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: border-color 0.2s ease, background-color 0.2s ease;
+  user-select: none;
+}
+
+.agy-account-card:not(.agy-account-active) {
+  cursor: pointer;
+}
+
+.agy-account-card:not(.agy-account-active):hover {
+  border-color: rgba(255, 255, 255, 0.24);
+  background: var(--dsw-alias-bg-layer-3, rgba(255, 255, 255, 0.05));
+}
+
+.agy-account-card.agy-account-active {
+  border-color: #ffffff;
+}
+
+.agy-account-card-title {
+  margin: 0;
+  font-size: 19px;
+  line-height: 26px;
+  font-weight: 700;
+  color: var(--dsw-alias-label-primary, #ffffff);
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agy-radio-circle {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2.5px solid rgba(255, 255, 255, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  transition: border-color 0.15s ease;
+}
+
+.agy-account-card:hover .agy-radio-circle {
+  border-color: #ffffff;
+}
+
+.agy-radio-circle.agy-radio-checked {
+  border-color: #ffffff;
+}
+
+.agy-radio-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  transition: transform 0.15s ease;
+}
+
+.agy-account-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: -6px;
+  flex-wrap: nowrap;
+}
+
+.agy-account-left-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.agy-btn-relogin {
+  background: #ffffff !important;
+  color: #18181b !important;
+  font-weight: 600 !important;
+  border: none !important;
+  height: 34px !important;
+  padding: 0 18px !important;
+  border-radius: 999px !important;
+  font-size: 13px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12) !important;
+  transition: background-color 0.15s ease, opacity 0.15s ease !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-decoration: none !important;
+  cursor: pointer !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+.agy-header-relogin-btn {
+  white-space: nowrap !important;
+  flex: none !important;
+  flex-shrink: 0 !important;
+  min-width: max-content !important;
+}
+
+.agy-btn-relogin:hover:not(:disabled) {
+  background: #f4f4f5 !important;
+}
+
+.agy-btn-relogin:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+
+.agy-btn-logout {
+  background: #27272a !important;
+  color: #f4f4f5 !important;
+  font-weight: 500 !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  height: 32px !important;
+  padding: 0 16px !important;
+  border-radius: 999px !important;
+  font-size: 13px !important;
+  line-height: 20px !important;
+  transition: background-color 0.15s ease, border-color 0.15s ease !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  margin: 0 !important;
+  flex-shrink: 0 !important;
+}
+
+.agy-btn-logout:hover:not(:disabled) {
+  background: #3f3f46 !important;
+  border-color: rgba(255, 255, 255, 0.2) !important;
+}
+
+.agy-btn-logout:disabled {
+  opacity: 0.4 !important;
+  cursor: not-allowed !important;
+}
+
+.agy-pending-banner {
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
 .agy-spin-icon {
   display: inline-flex;
   animation: agy-spin 1s linear infinite;
+  transform-origin: center center;
 }
 
 @keyframes agy-spin {

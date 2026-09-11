@@ -56,6 +56,15 @@ export interface CapabilityGateStatus {
   readonly reasonCode: CapabilityGateReasonCode
 }
 
+export interface AccountSummaryView {
+  readonly id: string
+  readonly email?: string
+  readonly maskedEmail?: string
+  readonly projectAvailable?: boolean
+  readonly active: boolean
+  readonly addedAt?: string
+}
+
 export interface AntigravityStatusView {
   readonly pluginId: typeof ANTIGRAVITY_PLUGIN_ID
   readonly phase: 'bootstrap'
@@ -68,6 +77,8 @@ export interface AntigravityStatusView {
   readonly credential?: CredentialStatusView
   readonly revoke?: RevokeStatusView
   readonly capabilities: readonly CapabilityGateStatus[]
+  readonly accounts?: readonly AccountSummaryView[]
+  readonly activeAccountId?: string
 }
 
 export interface RiskAcknowledgementResult {
@@ -80,9 +91,11 @@ export interface BootstrapStatusService {
   startLogin(): Promise<LoginStartResult>
   completeCallback(callbackUrl: string): Promise<LoginCompletionResult>
   cancelLogin(): Promise<{ readonly phase: LoginPhase; readonly errorCode?: LoginErrorCode }>
-  logout(): Promise<LogoutResult>
+  logout(accountId?: string): Promise<LogoutResult>
+  switchAccount?(accountId: string): Promise<AntigravityStatusView>
+  removeAccount?(accountId: string): Promise<AntigravityStatusView>
   revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
-  usage?(signal?: AbortSignal, force?: boolean): Promise<QuotaStatusView>
+  usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<QuotaStatusView>
   dispose(): Promise<void>
 }
 
@@ -106,6 +119,8 @@ export function createStatusView(
   credential?: CredentialStatusView,
   revoke?: RevokeStatusView,
   gates: CapabilityGateEvidence = {},
+  accounts?: readonly AccountSummaryView[],
+  activeAccountId?: string,
 ): AntigravityStatusView {
   return Object.freeze({
     pluginId: ANTIGRAVITY_PLUGIN_ID,
@@ -118,6 +133,8 @@ export function createStatusView(
     ...(credential === undefined ? {} : { credential: Object.freeze({ ...credential }) }),
     ...(revoke === undefined ? {} : { revoke: Object.freeze({ ...revoke }) }),
     capabilities: Object.freeze(capabilitiesFor(login, gates).map(capability => Object.freeze({ ...capability }))),
+    ...(accounts === undefined ? {} : { accounts: Object.freeze(accounts.map(a => Object.freeze({ ...a }))) }),
+    ...(activeAccountId === undefined ? {} : { activeAccountId }),
   })
 }
 

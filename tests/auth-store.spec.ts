@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -113,5 +113,59 @@ describe('single-account Antigravity auth store', () => {
       expect(String(error)).not.toContain('secret-value')
       expect(String(error)).not.toContain(path)
     }
+  })
+
+  it('supports multiple accounts, switching active account, and removing accounts', async () => {
+    const { path } = await storeFixture()
+    const store = createAuthStore(path)
+
+    const account1 = await store.commit({ refreshToken: 'refresh-1', projectId: 'proj-1', email: 'account1@example.com' })
+    expect(account1.email).toBe('account1@example.com')
+    expect(await store.listAccounts()).toHaveLength(1)
+
+    const account2 = await store.commit({ refreshToken: 'refresh-2', projectId: 'proj-2', email: 'account2@example.com' })
+    expect(account2.email).toBe('account2@example.com')
+    expect(await store.listAccounts()).toHaveLength(2)
+    expect((await store.read())?.email).toBe('account2@example.com')
+
+    // Switch back to account 1
+    const switched = await store.setActiveAccount('account1@example.com')
+    expect(switched?.email).toBe('account1@example.com')
+    expect((await store.read())?.email).toBe('account1@example.com')
+
+    // Remove account 1 -> active should fallback to account 2
+    expect(await store.removeAccount('account1@example.com')).toBe(true)
+    expect(await store.listAccounts()).toHaveLength(1)
+    expect((await store.read())?.email).toBe('account2@example.com')
+  })
+
+  it('seamlessly reads legacy single-account auth.json format', async () => {
+    const { directory, path } = await storeFixture()
+    const store = createAuthStore(path)
+
+    // Write a legacy single-account file
+    await chmod(directory, 0o700)
+    await mkdir(join(directory, 'nested'), { recursive: true, mode: 0o700 })
+    await writeFile(path, JSON.stringify({
+      version: 1,
+      refreshToken: 'legacy-refresh-token',
+      projectId: 'legacy-project',
+      email: 'legacy@example.com',
+      revision: 3,
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      lineage: 'legacy-lineage',
+    }), { mode: 0o600 })
+
+    const read = await store.read()
+    expect(read).toMatchObject({
+      version: 1,
+      refreshToken: 'legacy-refresh-token',
+      projectId: 'legacy-project',
+      email: 'legacy@example.com',
+      revision: 3,
+    })
+    const accounts = await store.listAccounts()
+    expect(accounts).toHaveLength(1)
+    expect(accounts[0]?.email).toBe('legacy@example.com')
   })
 })

@@ -1,6 +1,6 @@
 /** Settings shell for value-safe Antigravity login status. */
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
@@ -56,6 +56,9 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
   const [quota, setQuota] = useState<QuotaStatusView | null>(null)
   const [quotaBusy, setQuotaBusy] = useState(false)
   const [quotaError, setQuotaError] = useState<string | null>(null)
+  const [accountQuotas, setAccountQuotas] = useState<Record<string, QuotaStatusView>>({})
+  const [accountQuotaBusy, setAccountQuotaBusy] = useState<Record<string, boolean>>({})
+  const [accountQuotaErrors, setAccountQuotaErrors] = useState<Record<string, string | null>>({})
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [_error, setError] = useState<string | null>(null)
   const [loginBusy, setLoginBusy] = useState(false)
@@ -94,36 +97,74 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
     }
   }, [rpc, t])
 
-  const loadQuota = useCallback(async (force = false, signal?: AbortSignal) => {
+  const loadQuotaForAccount = useCallback(async (accountId: string, force = false, signal?: AbortSignal) => {
     if (rpc.usage === undefined) return
-    const generation = ++quotaGeneration.current
-    setQuotaBusy(true)
-    setQuotaError(null)
+    setAccountQuotaBusy(prev => ({ ...prev, [accountId]: true }))
+    setAccountQuotaErrors(prev => ({ ...prev, [accountId]: null }))
     try {
-      const result = await rpc.usage(signal, force)
-      if (signal?.aborted === true || generation !== quotaGeneration.current) return
+      const result = await rpc.usage(signal, force, accountId)
+      if (signal?.aborted === true) return
       if (!result.ok) {
-        setQuotaError(result.error.message || t('quotaFailed'))
+        setAccountQuotaErrors(prev => ({ ...prev, [accountId]: result.error.message || t('quotaFailed') }))
         return
       }
-      setQuota(result.value)
+      setAccountQuotas(prev => ({ ...prev, [accountId]: result.value }))
+      if (status?.activeAccountId === accountId) {
+        setQuota(result.value)
+      }
     } catch (cause) {
-      if (signal?.aborted === true || generation !== quotaGeneration.current) return
-      setQuotaError(messageOf(cause, t('quotaFailed')))
+      if (signal?.aborted === true) return
+      setAccountQuotaErrors(prev => ({ ...prev, [accountId]: messageOf(cause, t('quotaFailed')) }))
     } finally {
-      if (signal?.aborted !== true && generation === quotaGeneration.current) setQuotaBusy(false)
+      if (signal?.aborted !== true) {
+        setAccountQuotaBusy(prev => ({ ...prev, [accountId]: false }))
+      }
     }
-  }, [rpc, t])
+  }, [rpc, status?.activeAccountId, t])
+
+  const loadQuota = useCallback(async (force = false, signal?: AbortSignal) => {
+    if (rpc.usage === undefined) return
+    const activeId = status?.activeAccountId
+    if (activeId) {
+      await loadQuotaForAccount(activeId, force, signal)
+    } else {
+      const generation = ++quotaGeneration.current
+      setQuotaBusy(true)
+      setQuotaError(null)
+      try {
+        const result = await rpc.usage(signal, force)
+        if (signal?.aborted === true || generation !== quotaGeneration.current) return
+        if (!result.ok) {
+          setQuotaError(result.error.message || t('quotaFailed'))
+          return
+        }
+        setQuota(result.value)
+      } catch (cause) {
+        if (signal?.aborted === true || generation !== quotaGeneration.current) return
+        setQuotaError(messageOf(cause, t('quotaFailed')))
+      } finally {
+        if (signal?.aborted !== true && generation === quotaGeneration.current) setQuotaBusy(false)
+      }
+    }
+  }, [loadQuotaForAccount, rpc, status?.activeAccountId, t])
 
   useEffect(() => {
-    if (status?.login.projectAvailable !== true || rpc.usage === undefined) {
-      setQuota(null)
-      return
+    if (rpc.usage === undefined) return
+    const accounts = status?.accounts
+    if (accounts && accounts.length > 0) {
+      const controller = new AbortController()
+      for (const acc of accounts) {
+        void loadQuotaForAccount(acc.id, false, controller.signal)
+      }
+      return () => controller.abort()
     }
-    const controller = new AbortController()
-    void loadQuota(false, controller.signal)
-    return () => controller.abort()
-  }, [loadQuota, rpc.usage, status?.login.projectAvailable, resetTick])
+    if (status?.login.projectAvailable === true) {
+      const controller = new AbortController()
+      void loadQuota(false, controller.signal)
+      return () => controller.abort()
+    }
+    setQuota(null)
+  }, [loadQuota, loadQuotaForAccount, rpc.usage, status?.accounts, status?.login.projectAvailable, resetTick])
 
   useEffect(() => {
     const controller = new AbortController()
@@ -224,8 +265,73 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
     }
   }, [load, rpc, t, unmountSignal])
 
+  const switchAccount = useCallback(async (accountId: string) => {
+    if (rpc.switchAccount === undefined) return
+    const signal = unmountSignal()
+    setActionBusy(true)
+    setError(null)
+    try {
+      const result = await rpc.switchAccount(accountId, signal)
+      if (signal.aborted) return
+      if (!result.ok) {
+        setError(result.error.message || t('switchAccountFailed'))
+        return
+      }
+      setStatus(result.value.status)
+      void loadQuotaForAccount(accountId, true, signal)
+    } catch (cause) {
+      if (!signal.aborted) setError(messageOf(cause, t('switchAccountFailed')))
+    } finally {
+      if (!signal.aborted) setActionBusy(false)
+    }
+  }, [loadQuotaForAccount, rpc, t, unmountSignal])
+
+  const removeAccount = useCallback(async (accountId: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
+    const signal = unmountSignal()
+    setActionBusy(true)
+    setError(null)
+    try {
+      if (rpc.removeAccount !== undefined) {
+        const result = await rpc.removeAccount(accountId, signal)
+        if (signal.aborted) return
+        if (!result.ok) {
+          setError(result.error.message || t('removeAccountFailed'))
+          return
+        }
+        setStatus(result.value.status)
+        setAccountQuotas(prev => {
+          const next = { ...prev }
+          delete next[accountId]
+          return next
+        })
+        const newActive = result.value.status.activeAccountId
+        if (newActive) {
+          void loadQuotaForAccount(newActive, true, signal)
+        }
+      } else {
+        const result = await rpc.logout(signal)
+        if (signal.aborted) return
+        if (!result.ok) {
+          setError(result.error.message || t('logoutFailed'))
+          return
+        }
+        await load(signal)
+      }
+    } catch (cause) {
+      if (!signal.aborted) setError(messageOf(cause, t('removeAccountFailed')))
+    } finally {
+      if (!signal.aborted) setActionBusy(false)
+    }
+  }, [load, loadQuotaForAccount, rpc, t, unmountSignal])
+
   const projectError = projectErrorText(status?.login.errorCode, t)
   const isConfigured = status?.login.configured === true
+
+  const sortedAccounts = useMemo(() => {
+    if (!status?.accounts || status.accounts.length <= 1) return status?.accounts ?? []
+    return [...status.accounts].sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0))
+  }, [status?.accounts])
 
   return (
     <section className="agy-settings" data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
@@ -233,82 +339,203 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
         <div>
           <div className="agy-title-line">
             <h1 id="antigravity-auth-title" className="agy-bundle-title">{t('title')}</h1>
-            {isConfigured ? (
-              <span className="agy-status-dot" role="status" aria-label="Ready" />
-            ) : null}
           </div>
           <p className="agy-bundle-intro">{t('intro')}</p>
         </div>
+        {isConfigured ? (
+          <button
+            type="button"
+            className="agy-btn agy-btn-relogin agy-header-relogin-btn"
+            disabled={loginBusy || actionBusy}
+            onClick={() => { void startLogin() }}
+          >
+            {t('addAccount')}
+          </button>
+        ) : null}
       </header>
 
       <div className="agy-cards">
-        {/* Card 1: Auth & Quota */}
-        <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
-          <div className="agy-card-header">
-            <div className="agy-card-identity">
-              <h2 id="antigravity-auth-card-title" className="agy-card-title">{t('authCardTitle')}</h2>
-              <p className="agy-card-intro">{t('authCardIntro')}</p>
+        {/* Pending Authorization Banner when adding an account while accounts already exist */}
+        {status?.accounts && status.accounts.length > 0 && status.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+          <article className="agy-card agy-pending-banner">
+            <div className="agy-card-header">
+              <div className="agy-card-identity">
+                <h2 className="agy-card-title">{t('loginPending')}</h2>
+                <p className="agy-card-intro">{t('terms')}</p>
+              </div>
             </div>
-          </div>
-
-          <QuotaVisualDashboard
-            quota={quota}
-            busy={quotaBusy}
-            error={quotaError}
-            onRefresh={() => { void loadQuota(true, unmountSignal()) }}
-            t={t}
-          />
-
-          <div className="agy-action-row">
-            {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
-              <>
-                <a className="agy-btn agy-btn-primary" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+            <div className="agy-account-actions-row">
+              <div className="agy-account-left-actions">
+                <a className="agy-btn agy-btn-relogin" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
                   {t('openAuthorization')}
                 </a>
-                <button className="agy-btn agy-btn-outline" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+                <button className="agy-btn agy-btn-logout" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
                   {t('cancelLogin')}
                 </button>
-              </>
-            ) : (
-              <button className="agy-btn agy-btn-primary" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
-                {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
-              </button>
-            )}
-
-            {status?.credential?.configured ? (
-              <button className="agy-btn agy-btn-outline" type="button" disabled={actionBusy} onClick={() => { void logout() }}>
-                {t('logout')}
-              </button>
+              </div>
+            </div>
+            {status.login.expiresAt !== undefined ? (
+              <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
             ) : null}
+          </article>
+        ) : null}
 
-            <button
-              className="agy-btn agy-btn-ghost agy-refresh-btn"
-              type="button"
-              disabled={loadState === 'loading' || quotaBusy}
-              onClick={() => {
-                const minDelay = new Promise(resolve => setTimeout(resolve, 500))
-                void Promise.all([load(unmountSignal()), loadQuota(true, unmountSignal()), minDelay])
-              }}
-            >
-              <span className={quotaBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}>
-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
-              </span>
-              {quotaBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}
-            </button>
-          </div>
-          <p className="agy-footer-notice">{t('quotaFooterNotice')}</p>
+        {/* Multi-Account Cards matching reference design */}
+        {status !== null && sortedAccounts.length > 0 ? (
+          sortedAccounts.map(account => {
+            const isSelected = account.active
+            const accountQuota = accountQuotas[account.id] ?? (isSelected ? quota : null)
+            const isAccountBusy = accountQuotaBusy[account.id] ?? (isSelected ? quotaBusy : false)
+            const accountError = accountQuotaErrors[account.id] ?? (isSelected ? quotaError : null)
+            return (
+              <article
+                key={account.id}
+                className={`agy-card agy-account-card agy-account-item ${isSelected ? 'agy-account-active' : ''}`}
+                role="radio"
+                aria-checked={isSelected}
+                tabIndex={0}
+                onClick={() => {
+                  if (!isSelected && !actionBusy) {
+                    void switchAccount(account.id)
+                  }
+                }}
+                onKeyDown={e => {
+                  if ((e.key === 'Enter' || e.key === ' ') && !isSelected && !actionBusy) {
+                    e.preventDefault()
+                    void switchAccount(account.id)
+                  }
+                }}
+              >
+                <div className="agy-card-header">
+                  <div className="agy-card-identity">
+                    <h2 className="agy-account-card-title">
+                      <span>{account.email ?? account.maskedEmail ?? account.id}</span>
+                      {isSelected ? (
+                        <span className="agy-status-dot" role="status" aria-label="Active" />
+                      ) : null}
+                    </h2>
+                    <p className="agy-card-intro">{t('authCardIntro')}</p>
+                  </div>
+                </div>
 
-          {status?.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
-          {status?.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
-          {status?.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
-          {projectError === undefined ? null : <p className="agy-alert" role="alert">{projectError}</p>}
-          {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
-            <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
-          ) : null}
-          {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
-            <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
-          )}
-        </article>
+                <QuotaVisualDashboard
+                  quota={accountQuota}
+                  busy={isAccountBusy}
+                  error={accountError}
+                  onRefresh={() => { void loadQuotaForAccount(account.id, true, unmountSignal()) }}
+                  t={t}
+                />
+
+                <div className="agy-account-actions-row">
+                  <button
+                    className="agy-btn agy-btn-ghost agy-refresh-btn"
+                    type="button"
+                    disabled={loadState === 'loading' || isAccountBusy}
+                    onClick={e => {
+                      e.stopPropagation()
+                      const minDelay = new Promise(resolve => setTimeout(resolve, 500))
+                      void Promise.all([load(unmountSignal()), loadQuotaForAccount(account.id, true, unmountSignal()), minDelay])
+                    }}
+                  >
+                    <span className={`agy-refresh-icon ${isAccountBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}`}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                    </span>
+                    <span>{isAccountBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}</span>
+                  </button>
+
+                  <button
+                    className="agy-btn agy-btn-logout"
+                    type="button"
+                    disabled={actionBusy}
+                    onClick={e => {
+                      e.stopPropagation()
+                      void removeAccount(account.id, e)
+                    }}
+                  >
+                    {t('logout')}
+                  </button>
+                </div>
+
+                {isSelected && status.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
+                {isSelected && status.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
+                {isSelected && status.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
+                {isSelected && projectError !== undefined ? <p className="agy-alert" role="alert">{projectError}</p> : null}
+                {isSelected && status.revoke !== undefined && status.revoke.state !== 'idle' ? (
+                  <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
+                ) : null}
+              </article>
+            )
+          })
+        ) : (
+          /* Single Fallback Card (unauthenticated state) */
+          <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
+            <div className="agy-card-header">
+              <div className="agy-card-identity">
+                <h2 id="antigravity-auth-card-title" className="agy-card-title">{t('authCardTitle')}</h2>
+                <p className="agy-card-intro">{t('authCardIntro')}</p>
+              </div>
+            </div>
+
+            <QuotaVisualDashboard
+              quota={quota}
+              busy={quotaBusy}
+              error={quotaError}
+              onRefresh={() => { void loadQuota(true, unmountSignal()) }}
+              t={t}
+            />
+
+            <div className="agy-account-actions-row">
+              <div className="agy-account-left-actions">
+                {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+                  <>
+                    <a className="agy-btn agy-btn-relogin" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+                      {t('openAuthorization')}
+                    </a>
+                    <button className="agy-btn agy-btn-logout" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+                      {t('cancelLogin')}
+                    </button>
+                  </>
+                ) : (
+                  <button className="agy-btn agy-btn-relogin" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
+                    {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
+                  </button>
+                )}
+
+                <button
+                  className="agy-btn agy-btn-ghost agy-refresh-btn"
+                  type="button"
+                  disabled={loadState === 'loading' || quotaBusy}
+                  onClick={() => {
+                    const minDelay = new Promise(resolve => setTimeout(resolve, 500))
+                    void Promise.all([load(unmountSignal()), loadQuota(true, unmountSignal()), minDelay])
+                  }}
+                >
+                  <span className={`agy-refresh-icon ${quotaBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}`}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+                  </span>
+                  {quotaBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}
+                </button>
+              </div>
+
+              {status?.credential?.configured ? (
+                <button className="agy-btn agy-btn-logout" type="button" disabled={actionBusy} onClick={() => { void logout() }}>
+                  {t('logout')}
+                </button>
+              ) : null}
+            </div>
+
+            {status?.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
+            {status?.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
+            {status?.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
+            {projectError === undefined ? null : <p className="agy-alert" role="alert">{projectError}</p>}
+            {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
+              <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
+            ) : null}
+            {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
+              <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
+            )}
+          </article>
+        )}
 
         {/* Card 2: Web Search */}
         <article className="agy-card">
@@ -409,6 +636,23 @@ function formatRefreshTime(resetTime: string, now = Date.now()): string {
   return `${remMinutes}m`
 }
 
+function formatRefreshLabel(resetTime: string, template: string, now = Date.now()): string {
+  const target = new Date(resetTime).getTime()
+  if (Number.isNaN(target)) return template
+  const diffMs = Math.max(0, target - now)
+  const totalSeconds = Math.floor(diffMs / 1000)
+  const days = Math.floor(totalSeconds / 86400)
+  const hours = Math.floor((totalSeconds % 86400) / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+
+  return template
+    .replace('{days}', String(days))
+    .replace('{hours}', String(hours))
+    .replace('{minutes}', String(minutes))
+    .replace('{seconds}', String(seconds))
+}
+
 function quotaTone(fraction: number): 'normal' | 'warning' | 'error' {
   if (fraction < 0.3) return 'error'
   if (fraction <= 0.6) return 'warning'
@@ -419,11 +663,13 @@ function QuotaVisualDashboard({
   quota,
   busy,
   error,
+  isInactive,
   t,
 }: {
   readonly quota: QuotaStatusView | null
   readonly busy?: boolean
   readonly error: string | null
+  readonly isInactive?: boolean
   readonly onRefresh?: () => void
   readonly t: AntigravityAuthSettingsProps['t']
 }): ReactNode {
@@ -441,19 +687,18 @@ function QuotaVisualDashboard({
                   <span className="agy-quota-group-desc">{groupDesc}</span>
                 </div>
                 <div className="agy-quota-buckets">
-                  {group.windows.map(window => {
-                    const windowName = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
+                   {group.windows.map(window => {
+                    const windowLabel = window.window === '5h' ? t('quotaFiveHour') : t('quotaWeekly')
+                    const windowTemplate = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
                     const pctFormatted = (window.remainingFraction * 100).toFixed(2) + '%'
-                    const pctRounded = Math.round(window.remainingFraction * 100)
-                    const refreshStr = formatRefreshTime(window.resetTime)
-                    const subtext = `${pctRounded}% ${t('remaining')} · ${t('refreshesIn')} ${refreshStr}`
+                    const refreshLabel = formatRefreshLabel(window.resetTime, windowTemplate)
                     const widthPct = Math.max(0, Math.min(100, window.remainingFraction * 100))
                     const tone = quotaTone(window.remainingFraction)
 
                     return (
                       <div key={window.window} className="agy-quota-bucket">
                         <div className="agy-quota-bucket-head">
-                          <span className="agy-quota-bucket-name">{windowName}</span>
+                          <span className="agy-quota-bucket-name">{windowLabel}</span>
                           {busy ? (
                             <span className="agy-quota-querying">
                               <span className="agy-querying-spinner" aria-hidden="true" />
@@ -470,7 +715,7 @@ function QuotaVisualDashboard({
                             <div className="agy-progress-bar" data-tone={tone} style={{ width: `${widthPct}%` }} />
                           )}
                         </div>
-                        <span className="agy-quota-subtext">{subtext}</span>
+                        <span className="agy-quota-subtext">{refreshLabel}</span>
                       </div>
                     )
                   })}
@@ -478,6 +723,13 @@ function QuotaVisualDashboard({
               </div>
             )
           })}
+        </div>
+      ) : busy ? (
+        <div className="agy-quota-loading-state" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px', gap: '8px', color: 'var(--dsw-alias-label-tertiary, #71717a)', fontSize: '13px' }}>
+          <span className="agy-spin-icon">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+          </span>
+          <span>{t('queryingQuota')}</span>
         </div>
       ) : null}
       {error === null ? null : <p className="agy-alert" role="alert">{error}</p>}
