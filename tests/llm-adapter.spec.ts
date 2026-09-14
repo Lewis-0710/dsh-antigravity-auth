@@ -875,4 +875,23 @@ describe('Antigravity LLM adapter', () => {
     expect(encoded).not.toContain('access-secret')
     expect(encoded).toContain('functionDeclarations')
   })
+
+  it('drops trailing empty text part when tool call is emitted for Gemini', async () => {
+    const request = vi.fn(async () => new Response(
+      'data: {"response":{"parts":[{"text":"thinking...\\n\\n","thought":true}]}}\n\n'
+      + 'data: {"response":{"parts":[{"functionCall":{"id":"call-1","name":"pwsh","args":{"command":"ls"}}}]}}\n\n'
+      + 'data: {"response":{"parts":[{"text":""}],"finishReason":"STOP"}}\n\n'
+    ))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access-secret')) },
+      transport: { request },
+    })
+    const chunks = await collect(adapter.stream(options({ model: 'antigravity-gemini-3.8-flash' })))
+
+    expect(chunks.some(chunk => chunk.type === 'block-start' && chunk.blockType === 'text')).toBe(false)
+    const reasoningEnd = chunks.find(chunk => chunk.type === 'block-end' && 'block' in chunk && chunk.block.type === 'reasoning')
+    expect(reasoningEnd).toMatchObject({ block: { type: 'reasoning', text: 'thinking...' } })
+    const toolCallEnd = chunks.find(chunk => chunk.type === 'block-end' && 'block' in chunk && chunk.block.type === 'tool-call')
+    expect(toolCallEnd).toBeDefined()
+  })
 })

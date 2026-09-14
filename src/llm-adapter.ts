@@ -364,7 +364,13 @@ export class AntigravityAdapter extends LlmAdapter {
         }
       }
     }
-    if (current !== undefined) yield endBlock(current)
+    if (current !== undefined) {
+      if (current.kind === 'text' && current.text.length === 0) {
+        states.pop()
+      } else {
+        yield endBlock(current)
+      }
+    }
     if (usage !== undefined) yield { type: 'usage', usage }
     if (eventError !== undefined) {
       yield finishChunk(
@@ -683,7 +689,7 @@ function assembleFunctionName(current: string | undefined, fragment: string): st
 
 function endBlock(state: BlockState): StreamChunk {
   if (state.kind === 'text') return { type: 'block-end', index: state.index, block: { type: 'text', text: state.text } }
-  if (state.kind === 'reasoning') return { type: 'block-end', index: state.index, block: { type: 'reasoning', text: state.text } }
+  if (state.kind === 'reasoning') return { type: 'block-end', index: state.index, block: { type: 'reasoning', text: state.text.trimEnd() } }
   let parsed: unknown
   try {
     parsed = JSON.parse(state.text) as unknown
@@ -1135,6 +1141,9 @@ function parsePart(value: unknown): ProviderPart | undefined {
     const kind = value.thought === true || value.reasoning === true || value.thinking === true ? 'reasoning' as const : 'text' as const
     const signature = signatureOf(value)
     const text = typeof value.text === 'string' ? value.text : ''
+    if (kind === 'text' && text.length === 0 && signature === undefined) {
+      return undefined
+    }
     return { kind, text, ...(signature === undefined ? {} : { signature }) }
   }
   if (value.inlineData !== undefined || value.inline_data !== undefined) {
