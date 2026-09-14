@@ -356,6 +356,7 @@ export class AntigravityAdapter extends LlmAdapter {
         } else if (part.kind === 'reasoning') {
           current.text += part.text
           hasEmitted.value ||= part.text.length > 0
+          if (part.signature !== undefined) current.signature = part.signature
           if (part.text.length > 0) yield { type: 'reasoning-delta', index: current.index, text: part.text }
         } else {
           current.text += part.text
@@ -387,6 +388,16 @@ export class AntigravityAdapter extends LlmAdapter {
     if (states.length === 0) {
       yield finishChunk('error', 'EMPTY_RESPONSE')
       return
+    }
+    let lastReasoningSignature: string | undefined
+    for (const state of states) {
+      if (state.kind === 'reasoning' && state.signature !== undefined) {
+        lastReasoningSignature = state.signature
+      } else if (state.kind === 'tool-call') {
+        if (state.signature === undefined && lastReasoningSignature !== undefined) {
+          state.signature = lastReasoningSignature
+        }
+      }
     }
     const replayBlocks: AntigravityReplayBlock[] = states.map(state => ({
       kind: state.kind,
@@ -906,10 +917,27 @@ function claudeToolTypeHint(value: unknown): string {
   return type
 }
 
+function findMessageReasoningSignature(
+  message: Message,
+  replayBlocks: readonly AntigravityReplayBlock[],
+): string | undefined {
+  const fromReplay = replayBlocks.find(b => b.kind === 'reasoning' && b.signature !== undefined)?.signature
+  if (fromReplay !== undefined) return fromReplay
+  for (const block of message.content) {
+    if (block.type === 'reasoning') {
+      const sig = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
+        ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
+      if (typeof sig === 'string' && sig.length > 0) return sig
+    }
+  }
+  return undefined
+}
+
 function mapMessage(message: Message, model: string, toolNames: Map<string, string>): Record<string, unknown> {
   const parts: Record<string, unknown>[] = []
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
+  const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const isClaude = antigravityModelFamily(model) === 'claude'
   let replayIndex = 0
   let sawClaudeFunctionCall = false
@@ -930,7 +958,7 @@ function mapMessage(message: Message, model: string, toolNames: Map<string, stri
       const callId = rememberToolName(toolNames, block.id, block.name)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
-        : blockSignature
+        : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
       sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
@@ -970,6 +998,7 @@ async function mapMessageWithAttachments(
   if (attachments === undefined) throw new LlmError('Antigravity image input requires the Host AttachmentStore', 'UNSUPPORTED_MODALITY')
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
+  const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const parts: Record<string, unknown>[] = []
   const isClaude = antigravityModelFamily(model) === 'claude'
   let replayIndex = 0
@@ -994,7 +1023,7 @@ async function mapMessageWithAttachments(
       const callId = rememberToolName(toolNames, block.id, block.name)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
-        : blockSignature
+        : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
       sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
@@ -1080,10 +1109,20 @@ function parseProviderEvent(data: string): ProviderEvent {
   const root = isRecord(value.response) ? value.response : value
   if (isRecord(root.error)) return { parts: [], error: errorDetails(root.error) }
   const partsValue = findParts(root)
+  // Gemini attaches the thinking signature to the response or candidate rather
+  // than to each part. Capture it once here and hand it to the parts that need
+  // validation, otherwise a replayed functionCall reaches the endpoint unsigned
+  // and the provider rejects the whole request with HTTP 400.
+  const responseSignature = responseLevelSignature(root, value, partsValue)
   const parts: ProviderPart[] = []
   for (const part of partsValue) {
     const parsed = parsePart(part)
-    if (parsed !== undefined) parts.push(parsed)
+    if (parsed === undefined) continue
+    if (parsed.kind === 'tool-call' && parsed.signature === undefined && responseSignature !== undefined) {
+      parts.push({ ...parsed, signature: responseSignature })
+      continue
+    }
+    parts.push(parsed)
   }
   const usage = parseUsage(root.usageMetadata ?? value.usageMetadata)
   const finish = findFinish(root)
@@ -1092,6 +1131,35 @@ function parseProviderEvent(data: string): ProviderEvent {
     ...(usage === undefined ? {} : { usage }),
     ...(finish === undefined ? {} : { finish }),
   }
+}
+
+/** First provider-issued signature carried by the response envelope itself. */
+function responseLevelSignature(
+  root: Record<string, unknown>,
+  envelope: Record<string, unknown>,
+  parts: readonly unknown[],
+): string | undefined {
+  const direct = signatureOf(root) ?? signatureOf(envelope)
+  if (direct !== undefined) return direct
+  if (Array.isArray(root.candidates)) {
+    for (const candidate of root.candidates) {
+      if (!isRecord(candidate)) continue
+      const candidateSignature = signatureOf(candidate)
+        ?? (isRecord(candidate.content) ? signatureOf(candidate.content) : undefined)
+        ?? (isRecord(candidate.metadata) && isRecord(candidate.metadata.google) ? signatureOf(candidate.metadata.google) : undefined)
+      if (candidateSignature !== undefined) return candidateSignature
+    }
+  }
+  if (isRecord(root.metadata) && isRecord(root.metadata.google)) {
+    const nested = signatureOf(root.metadata.google)
+    if (nested !== undefined) return nested
+  }
+  for (const part of parts) {
+    if (!isRecord(part)) continue
+    const partSignature = signatureOf(part) ?? (isRecord(part.metadata) && isRecord(part.metadata.google) ? signatureOf(part.metadata.google) : undefined)
+    if (partSignature !== undefined) return partSignature
+  }
+  return undefined
 }
 
 function findParts(value: Record<string, unknown>): unknown[] {
@@ -1281,17 +1349,75 @@ function findFinish(value: Record<string, unknown>): string | undefined {
 }
 
 function signatureOf(value: Record<string, unknown>): string | undefined {
-  return stringValue(value.thoughtSignature ?? value.thought_signature ?? value.signature)
+  const direct = stringValue(value.thoughtSignature ?? value.thought_signature ?? value.signature)
+  if (direct !== undefined) return direct
+  const metadata = isRecord(value.metadata) ? value.metadata : undefined
+  const google = metadata !== undefined && isRecord(metadata.google) ? metadata.google : undefined
+  return google === undefined ? undefined : stringValue(google.thoughtSignature ?? google.thought_signature ?? google.signature)
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
   try {
     const parsed = JSON.parse(value) as unknown
     if (isRecord(parsed)) return parsed
   } catch {
-    // The provider must never receive silently rewritten historical tool calls.
+    // A turn interrupted mid-stream can persist a truncated arguments fragment.
+    // Repair the common missing-brace case before falling back, because one
+    // malformed historical call must not make the whole session unusable: the
+    // fragment is replayed on every later request, so throwing here locks the
+    // session permanently.
+    const repaired = repairTruncatedJsonObject(value)
+    if (repaired !== undefined) return repaired
   }
-  throw new LlmError('The Antigravity tool-call history is malformed', 'PROTOCOL_DRIFT')
+  return {}
+}
+
+/** Recover a truncated JSON object body; undefined when it is not safely repairable. */
+function repairTruncatedJsonObject(value: string): Record<string, unknown> | undefined {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{')) return undefined
+  let inString = false
+  let escaped = false
+  for (const character of trimmed) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+  }
+  // An unterminated string cannot be closed without guessing its content.
+  if (inString || escaped) return undefined
+  const suffix = closingSuffix(trimmed)
+  if (suffix.length === 0) return undefined
+  try {
+    const parsed = JSON.parse(`${trimmed}${suffix}`) as unknown
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Structural closing characters needed to balance a truncated JSON object body. */
+function closingSuffix(value: string): string {
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+  for (const character of value) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{') stack.push('}')
+    else if (character === '[') stack.push(']')
+    else if (character === '}' || character === ']') stack.pop()
+  }
+  return stack.reverse().join('')
 }
 
 function blocksToText(blocks: readonly { type: string; text?: string }[]): string {
