@@ -68,6 +68,14 @@ echo "=== 同步 $REPO_NAME (Patch-First, Merge-Fallback) ==="
 echo "[1/4] 拉取上游最新代码..."
 git fetch upstream
 
+# Step 1.5: 暂存本地未提交的修改（避免切分支时报错）
+echo "[1.5] 暂存本地未提交修改..."
+STASHED=false
+if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    git stash push -m "sync.sh auto-stash" -- sync.patch sync.sh 2>/dev/null || true
+    STASHED=true
+fi
+
 # Step 2: 重置 main 到上游最新
 echo "[2/4] 重置 main 到 upstream/main..."
 git checkout main
