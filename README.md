@@ -2,11 +2,11 @@
 > **Fork 维护版本** | 本仓库是 [suntianc/dsh-antigravity-auth](https://github.com/suntianc/dsh-antigravity-auth) 的维护分支。
 > 
 > **与上游差异**：
-> 1. 新增 antigravity-auth-wrapper.sh 与 ls-wrapper.sh 用于 DSH OAuth 凭证注入
-2. 扩展认证服务（auth-service）与存储层（auth-store），支持持久化会话与多账号管理
-3. 重写 AntigravityAuthSettings 客户端组件，增加 OAuth 流程引导与状态指示
-4. 适配 Cordis 4.0.2 与 DSH 0.1.5-rc.1 客户端包拆分
-5. 添加自定义样式（styles.ts）与本地化文案（locales.ts）
+> 1. **多账号登录与切换**：将 auth-store 从单账号重构为多账号存储（accounts 数组 + activeAccountId），提供 listAccounts / setActiveAccount / removeAccount 等完整账号管理 API，支持添加多个 Google 账号并随时切换
+> 2. **多账号管理 UI**：重写 AntigravityAuthSettings 客户端组件，新增账号列表面板、添加/删除账号按钮、切换活跃账号下拉器、OAuth 流程引导与状态指示
+> 3. **DSH OAuth 凭证注入**：新增 antigravity-auth-wrapper.sh 与 ls-wrapper.sh，通过 DSH auth-core 获取 OAuth 凭据并注入 Antigravity 桌面端，绕过地区限制
+> 4. **自定义样式与本地化**：添加玻璃拟态风格样式（styles.ts）与完整中文本地化文案（locales.ts）
+> 5. **适配 Cordis 4.0.2 与 DSH 0.1.5-rc.1 客户端包拆分**
 > 
 > 详见 [sync.patch](./sync.patch)。
 
