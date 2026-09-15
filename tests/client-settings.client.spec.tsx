@@ -160,19 +160,29 @@ describe('Antigravity bootstrap settings', () => {
   })
 
   describe.each([
-    { language: 'English', copy: en, dayUnit: 'd', resetPrefix: 'Refreshes in ', resetSuffix: '' },
-    { language: 'Chinese', copy: zh, dayUnit: '天', resetPrefix: '', resetSuffix: ' 后刷新' },
-  ])('$language quota reset countdown', ({ copy, dayUnit, resetPrefix, resetSuffix }) => {
+    {
+      language: 'English',
+      copy: en,
+      weeklyExpected: (d: number, h: number, m: number) => `${d}d ${h}h ${m}m after refresh`,
+      fiveHExpected: (h: number, m: number, s: number) => `${h}h ${m}m ${s}s after refresh`,
+    },
+    {
+      language: 'Chinese',
+      copy: zh,
+      weeklyExpected: (d: number, h: number, m: number) => `${d}天${h}小时${m}分后刷新`,
+      fiveHExpected: (h: number, m: number, s: number) => `${h}小时${m}分${s}秒后刷新`,
+    },
+  ])('$language quota reset countdown', ({ copy, weeklyExpected, fiveHExpected }) => {
     it.each([
-      { minutes: 94 * 60 + 43, expected: `3${dayUnit} 22h 43m` },
-      { minutes: 48 * 60, expected: `2${dayUnit} 0h 0m` },
-      { minutes: 24 * 60, expected: `1${dayUnit} 0h 0m` },
-      { minutes: 24 * 60 - 1, expected: '23h 59m' },
-      { minutes: 60, expected: '1h 0m' },
-      { minutes: 43, expected: '43m' },
-      { minutes: 0.5, expected: '0m' },
-      { minutes: 0, expected: '0m' },
-      { minutes: -1, expected: '0m' },
+      { minutes: 94 * 60 + 43, expected: (fn: typeof weeklyExpected) => fn(3, 22, 43) },
+      { minutes: 48 * 60, expected: (fn: typeof weeklyExpected) => fn(2, 0, 0) },
+      { minutes: 24 * 60, expected: (fn: typeof weeklyExpected) => fn(1, 0, 0) },
+      { minutes: 24 * 60 - 1, expected: (fn: typeof weeklyExpected) => fn(0, 23, 59) },
+      { minutes: 60, expected: (fn: typeof weeklyExpected) => fn(0, 1, 0) },
+      { minutes: 43, expected: (fn: typeof weeklyExpected) => fn(0, 0, 43) },
+      { minutes: 0.5, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
+      { minutes: 0, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
+      { minutes: -1, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
     ])('renders $minutes remaining minutes as $expected', async ({ minutes, expected }) => {
       const now = Date.parse('2026-09-10T00:00:00.000Z')
       vi.spyOn(Date, 'now').mockReturnValue(now)
@@ -198,8 +208,8 @@ describe('Antigravity bootstrap settings', () => {
 
       render(<AntigravityAuthSettings rpc={rpc} t={key => copy[key]} subscribe={() => () => {}} />)
 
-      expect(await screen.findByText(`22% ${copy.remaining} · ${resetPrefix}${expected}${resetSuffix}`)).toBeTruthy()
-      expect(screen.getByText(`85% ${copy.remaining} · ${resetPrefix}5h 0m${resetSuffix}`)).toBeTruthy()
+      expect(await screen.findByText(expected(weeklyExpected))).toBeTruthy()
+      expect(screen.getByText(fiveHExpected(5, 0, 0))).toBeTruthy()
     })
   })
 

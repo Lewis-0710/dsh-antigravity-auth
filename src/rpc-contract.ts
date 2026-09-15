@@ -84,11 +84,15 @@ async function callValidated<T>(
   let result: RpcResult<unknown>
   try {
     result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, `${ANTIGRAVITY_AUTH_RPC_NAMESPACE}/${endpoint}`, payload, signal)
-  } catch {
+  } catch (cause) {
+    console.warn(`antigravity-auth: rpc.call ${endpoint} failed:`, cause)
     return invalidResponse(endpoint)
   }
   if (!result.ok) return sanitizeFailure(result, endpoint)
   const value = parse(result.value)
+  if (value === undefined) {
+    console.warn(`antigravity-auth: parse ${endpoint} result validation failed:`, result.value)
+  }
   return value === undefined ? invalidResponse(endpoint) : { ok: true, value }
 }
 
@@ -152,7 +156,7 @@ export function parseUsageResult(value: unknown): QuotaStatusView | undefined {
   if (value.checkedAt !== undefined && !isIsoTime(value.checkedAt)) return undefined
   if (value.state === 'available' && value.groups === undefined) return undefined
   if (value.groups !== undefined) {
-    if (!Array.isArray(value.groups) || value.groups.length === 0 || value.groups.length > 2) return undefined
+    if (!Array.isArray(value.groups) || value.groups.length > 2) return undefined
     const groups: QuotaGroupView[] = []
     const groupNames = new Set<string>()
     for (const rawGroup of value.groups) {

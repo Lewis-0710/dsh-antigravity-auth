@@ -411,7 +411,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
                     <h2 className="agy-account-card-title">
                       <span>{account.email ?? account.maskedEmail ?? account.id}</span>
                       {isSelected ? (
-                        <span className="agy-status-dot" role="status" aria-label="Active" />
+                        <span className="agy-status-dot" role="status" aria-label={t('ready')} />
                       ) : null}
                     </h2>
                     <p className="agy-card-intro">{t('authCardIntro')}</p>
@@ -471,7 +471,12 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
           <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
             <div className="agy-card-header">
               <div className="agy-card-identity">
-                <h2 id="antigravity-auth-card-title" className="agy-card-title">{t('authCardTitle')}</h2>
+                <h2 id="antigravity-auth-card-title" className="agy-card-title">
+                  <span>{status?.login.maskedEmail ?? t('authCardTitle')}</span>
+                  {isConfigured ? (
+                    <span className="agy-status-dot" role="status" aria-label={t('ready')} />
+                  ) : null}
+                </h2>
                 <p className="agy-card-intro">{t('authCardIntro')}</p>
               </div>
             </div>
