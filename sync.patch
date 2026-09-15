@@ -1,3 +1,23 @@
+diff --git a/README.md b/README.md
+index 669b24d..44d7812 100644
+--- a/README.md
++++ b/README.md
+@@ -1,3 +1,15 @@
++> [!NOTE]
++> **Fork 维护版本** | 本仓库是 [suntianc/dsh-antigravity-auth](https://github.com/suntianc/dsh-antigravity-auth) 的维护分支。
++> 
++> **与上游差异**：
++> 1. **多账号登录与切换**：将 auth-store 从单账号重构为多账号存储（accounts 数组 + activeAccountId），提供 listAccounts / setActiveAccount / removeAccount 等完整账号管理 API，支持添加多个 Google 账号并随时切换
++> 2. **多账号管理 UI**：重写 AntigravityAuthSettings 客户端组件，新增账号列表面板、添加/删除账号按钮、切换活跃账号下拉器、OAuth 流程引导与状态指示
++> 3. **DSH OAuth 凭证注入**：新增 antigravity-auth-wrapper.sh 与 ls-wrapper.sh，通过 DSH auth-core 获取 OAuth 凭据并注入 Antigravity 桌面端，绕过地区限制
++> 4. **自定义样式与本地化**：添加玻璃拟态风格样式（styles.ts）与完整中文本地化文案（locales.ts）
++> 5. **适配 Cordis 4.0.2 与 DSH 0.1.5-rc.1 客户端包拆分**
++> 
++> 详见 [sync.patch](./sync.patch)。
++
+ # dsh-antigravity-auth
+ 
+ > **DSH compatibility:** `0.1.4-rc.1` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 diff --git a/README.zh.md b/README.zh.md
 index ba168e1..c4b4542 100644
 --- a/README.zh.md
@@ -2113,6 +2133,2540 @@ index 74b521c..9eee5f4 100644
    })
  }
  
+diff --git a/sync.patch b/sync.patch
+new file mode 100644
+index 0000000..7a19dc8
+--- /dev/null
++++ b/sync.patch
+@@ -0,0 +1,2429 @@
++diff --git a/README.zh.md b/README.zh.md
++index ba168e1..c4b4542 100644
++--- a/README.zh.md
+++++ b/README.zh.md
++@@ -75,8 +75,7 @@
++ 
++ ### 用量与配额可视化仪表盘
++ 
++-- 直观展示 5 小时窗口与每周窗口的剩余配额比例与刷新倒计时。
++-- 剩余时间达到 24 小时后按天、小时、分钟显示，例如 `94h 43m` 显示为 `3天 22h 43m`（英文为 `3d 22h 43m`）；不足一天继续使用原有小时/分钟格式。
+++- 直观展示 5 小时限额与每周限额的剩余配额比例与重置倒计时。
++ - 状态三档配色：充足（>60%，翡翠绿）、预警（30%–60%，警示橙）、紧急（<30%，警示红）。
++ - 配备 Shimmer 微光流动轨道、微型 Spinner 与平滑展开动画。
++ 
++diff --git a/antigravity-auth-wrapper.sh b/antigravity-auth-wrapper.sh
++new file mode 100755
++index 0000000..3883686
++--- /dev/null
+++++ b/antigravity-auth-wrapper.sh
++@@ -0,0 +1,77 @@
+++#!/bin/bash
+++# DSH Antigravity OAuth Token Injector (Variant A1: Override OAuth Client Only)
+++# 用 DSH 的 OAuth 客户端凭据覆盖语言服务器的默认凭据
+++# 语言服务器会启动自己的 OAuth 流程，用户在浏览器中 completing 授权
+++
+++set -e
+++
+++DSH_AUTH_DIR="$HOME/.local/share/dsh-antigravity-auth"
+++ANTIGRAVITY_BIN="/Applications/Antigravity.app/Contents/Resources/bin/language_server"
+++OAUTH_CONFIG_DIR="$HOME/.gemini/antigravity-cli"
+++
+++# 从 DSH auth-core 获取 OAuth 凭据
+++DSH_CLIENT_ID=$(node -e "console.log(require('@cortexkit/antigravity-auth-core').ANTIGRAVITY_CLIENT_ID)" 2>/dev/null)
+++DSH_CLIENT_SECRET=*** -e "console.log(require('@cortexkit/antigravity-auth-core').ANTIGRAVITY_CLIENT_SECRET)" 2>/dev/null)
+++
+++if [ -z "$DSH_CLIENT_ID" ] || [ -z "$DSH_CLIENT_SECRET" ]; then
+++    echo "ERROR: 无法从 DSH auth-core 获取 OAuth 凭据"
+++    exit 1
+++fi
+++
+++echo "=== DSH OAuth 客户端凭据 ==="
+++echo "Client ID: $DSH_CLIENT_ID"
+++echo "Client Secret: $DSH_CLIENT_SECRET"
+++echo ""
+++
+++if [ ! -f "$ANTIGRAVITY_BIN" ]; then
+++    echo "ERROR: 语言服务器二进制文件不存在: $ANTIGRAVITY_BIN"
+++    exit 1
+++fi
+++
+++# 确保 OAuth 配置目录存在
+++mkdir -p "$OAUTH_CONFIG_DIR"
+++
+++# 如果有 DSH 的 refresh token，保存到 Antigravity 可能读取的位置
+++if [ -f "$DSH_AUTH_DIR/auth.json" ]; then
+++    REFRESH_TOKEN=$(node -e "
+++        const fs = require('fs');
+++        const data = JSON.parse(fs.readFileSync('$DSH_AUTH_DIR/auth.json', 'utf8'));
+++        const account = data.accounts.find(a => a.id === data.activeAccountId) || data.accounts[0];
+++        console.log(account.refreshToken);
+++    " 2>/dev/null)
+++    
+++    if [ -n "$REFRESH_TOKEN" ]; then
+++        echo "=== DSH Refresh Token (可选) ==="
+++        echo "账号: $(node -e "const d=JSON.parse(require('fs').readFileSync('$DSH_AUTH_DIR/auth.json','utf8')); console.log(d.activeAccountId || d.accounts[0].id)")"
+++        
+++        # 保存 refresh token + OAuth 凭据供语言服务器可能使用
+++        cat > "$OAUTH_CONFIG_DIR/oauth_config.json" << EOF
+++{
+++  "refresh_token": "$REFRESH_TOKEN",
+++  "client_id": "$DSH_CLIENT_ID",
+++  "client_secret": "$DSH_CLIENT_SECRET"
+++}
+++EOF
+++        echo "OAuth 配置已保存: $OAUTH_CONFIG_DIR/oauth_config.json"
+++        echo ""
+++    fi
+++fi
+++
+++echo "=== 启动 Antigravity (覆盖 OAuth 客户端) ==="
+++echo "Language Server 将使用以下覆盖参数启动:"
+++echo "  --override_oauth_client_id=$DSH_CLIENT_ID"
+++echo "  --override_oauth_client_secret=***"
+++echo ""
+++
+++# 设置环境变量，让 Antigravity 主进程知道使用自定义语言服务器
+++export CODEIUM_LANGUAGE_SERVER_BIN="$(pwd)/ls-wrapper.sh"
+++export DSH_OAUTH_CLIENT_ID="$DSH_CLIENT_ID"
+++export DSH_OAUTH_CLIENT_SECRET="$DSH_CLIENT_SECRET"
+++export ANTIGRAVITY_OAUTH_CONFIG_DIR="$OAUTH_CONFIG_DIR"
+++
+++# 启动 Antigravity
+++open /Applications/Antigravity.app
+++
+++echo "Antigravity 已启动。"
+++echo "语言服务器会使用 DSH 的 OAuth 客户端凭据启动 OAuth 流程。"
+++echo "请在浏览器弹窗中 completing 授权。"
++diff --git a/ls-wrapper.sh b/ls-wrapper.sh
++new file mode 100755
++index 0000000..4a99813
++--- /dev/null
+++++ b/ls-wrapper.sh
++@@ -0,0 +1,63 @@
+++#!/bin/bash
+++# DSH OAuth Wrapper for Antigravity Language Server
+++# 拦截语言服务器的启动，注入 DSH 的 OAuth 客户端凭据
+++#
+++# 此脚本由 antigravity-auth-wrapper.sh 调用（通过 CODEIUM_LANGUAGE_SERVER_BIN）
+++# 它接收原始语言服务器的所有参数，并添加 OAuth 覆盖参数
+++
+++set -e
+++
+++# 获取 DSH OAuth 凭据
+++DSH_CLIENT_ID="${DSH_OAUTH_CLIENT_ID:-}"
+++DSH_CLIENT_SECRET="${DSH_OAUTH_CLIENT_SECRET:-}"
+++ANTIGRAVITY_OAUTH_CONFIG_DIR="${ANTIGRAVITY_OAUTH_CONFIG_DIR:-$HOME/.gemini/antigravity-cli}"
+++
+++# 如果环境变量未设置，尝试从 DSH auth-core 获取
+++if [ -z "$DSH_CLIENT_ID" ] || [ -z "$DSH_CLIENT_SECRET" ]; then
+++    DSH_CLIENT_ID=$(node -e "console.log(require('@cortexkit/antigravity-auth-core').ANTIGRAVITY_CLIENT_ID)" 2>/dev/null)
+++    DSH_CLIENT_SECRET=*** -e "console.log(require('@cortexkit/antigravity-auth-core').ANTIGRAVITY_CLIENT_SECRET)" 2>/dev/null)
+++fi
+++
+++if [ -z "$DSH_CLIENT_ID" ] || [ -z "$DSH_CLIENT_SECRET" ]; then
+++    echo "ERROR: 无法获取 DSH OAuth 凭据" >&2
+++    exit 1
+++fi
+++
+++# 原始语言服务器路径
+++ORIGINAL_LS="/Applications/Antigravity.app/Contents/Resources/bin/language_server"
+++
+++if [ ! -f "$ORIGINAL_LS" ]; then
+++    echo "ERROR: 原始语言服务器不存在: $ORIGINAL_LS" >&2
+++    exit 1
+++fi
+++
+++echo "=== LS Wrapper: 注入 DSH OAuth 凭据 ===" >&2
+++echo "  Client ID: $DSH_CLIENT_ID" >&2
+++echo "  Client Secret: ***" >&2
+++echo "" >&2
+++
+++# 收集所有传入的参数
+++ARGS=()
+++while [[ $# -gt 0 ]]; do
+++    ARGS+=("$1")
+++    shift
+++done
+++
+++# 注入 OAuth 覆盖参数（如果用户没有显式提供）
+++if [[ ! " ${ARGS[@]} " =~ --override_oauth_client_id ]]; then
+++    ARGS+=(--override_oauth_client_id="$DSH_CLIENT_ID")
+++fi
+++if [[ ! " ${ARGS[@]} " =~ --override_oauth_client_secret ]]; then
+++    ARGS+=(--override_oauth_client_secret="$DSH_CLIENT_SECRET")
+++fi
+++
+++# 如果存在 DSH 的 refresh token，传递给语言服务器（如果它接受的话）
+++if [ -f "$ANTIGRAVITY_OAUTH_CONFIG_DIR/oauth_config.json" ]; then
+++    echo "  使用保存的 OAuth 配置: $ANTIGRAVITY_OAUTH_CONFIG_DIR/oauth_config.json" >&2
+++fi
+++
+++echo "  启动参数: ${ARGS[*]}" >&2
+++echo "" >&2
+++
+++# 执行原始语言服务器
+++exec "$ORIGINAL_LS" "${ARGS[@]}"
++diff --git a/src/auth-service.ts b/src/auth-service.ts
++index 792aa12..23a4f57 100644
++--- a/src/auth-service.ts
+++++ b/src/auth-service.ts
++@@ -2,7 +2,13 @@
++ 
++ import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
++ import { createAuthStore, defaultAuthStorePath } from './auth-store.ts'
++-import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type HostCredential } from './credential-coordinator.ts'
+++import {
+++  createCredentialCoordinator,
+++  createGoogleRefreshTransport,
+++  type CredentialCoordinator,
+++  type CredentialCoordinatorOptions,
+++  type HostCredential,
+++} from './credential-coordinator.ts'
++ import { createOAuthFlow, OAuthFlowError } from './oauth-flow.ts'
++ import type {
++   OAuthFlow,
++@@ -56,6 +62,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
++   private readonly quota: QuotaService
++   private readonly gates: CapabilityGateRegistry
++   private readonly autoActivate: boolean
+++  private readonly credentialOptions?: Omit<CredentialCoordinatorOptions, 'store'> | undefined
+++  private readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'> | undefined
+++  private readonly perAccountQuotaServices = new Map<string, QuotaService>()
++   private riskAcknowledged = false
++   private activeFlowGeneration = 0
++   private disposed = false
++@@ -63,6 +72,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
++ 
++   constructor(options: AntigravityAuthServiceOptions = {}) {
++     this.autoActivate = options.autoActivateGates ?? false
+++    this.credentialOptions = options.credentialOptions
+++    this.quotaOptions = options.quotaOptions
++     const storePath = options.storePath ?? defaultAuthStorePath()
++     this.store = options.store ?? createAuthStore(storePath)
++     this.gates = options.gates ?? (options.gatePath !== undefined
++@@ -93,6 +104,19 @@ export class AntigravityAuthService implements BootstrapStatusService {
++     const maskedEmail = maskEmail(record?.email)
++     const credentialStatus = await this.credentials.status()
++     const gateEvidence = await this.gateEvidenceFor(record)
+++    const storedAccounts = await this.store.listAccounts?.() ?? []
+++    const activeId = await this.store.getActiveAccountId?.()
+++    const accounts: import('./status.ts').AccountSummaryView[] = storedAccounts.map(acc => {
+++      const masked = maskEmail(acc.email)
+++      return {
+++        id: acc.id,
+++        projectAvailable: acc.projectId !== undefined && acc.projectId.length > 0,
+++        active: acc.id === (activeId ?? storedAccounts[0]?.id),
+++        ...(acc.email === undefined ? {} : { email: acc.email }),
+++        ...(masked === undefined ? {} : { maskedEmail: masked }),
+++        ...(acc.addedAt === undefined ? {} : { addedAt: acc.addedAt }),
+++      }
+++    })
++     const login: LoginStatusView = {
++       phase,
++       configured: record !== undefined,
++@@ -102,7 +126,15 @@ export class AntigravityAuthService implements BootstrapStatusService {
++       ...(maskedEmail === undefined ? {} : { maskedEmail }),
++       ...(flowStatus.errorCode === undefined ? {} : { errorCode: flowStatus.errorCode }),
++     }
++-    return createStatusView(this.riskAcknowledged, login, credentialStatus, this.credentials.revokeStatus(), gateEvidence)
+++    return createStatusView(
+++      this.riskAcknowledged,
+++      login,
+++      credentialStatus,
+++      this.credentials.revokeStatus(),
+++      gateEvidence,
+++      accounts.length > 0 ? accounts : undefined,
+++      activeId ?? storedAccounts[0]?.id,
+++    )
++   }
++ 
++   async acknowledgeRisk(): Promise<RiskAcknowledgementResult> {
++@@ -153,6 +185,41 @@ export class AntigravityAuthService implements BootstrapStatusService {
++     return status.capabilities.some(capability => capability.id === id && capability.state === 'available')
++   }
++ 
+++  async switchAccount(accountId: string): Promise<AntigravityStatusView> {
+++    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+++    const updatedRecord = await this.store.setActiveAccount(accountId)
+++    if (updatedRecord === undefined) {
+++      throw new OAuthFlowError('internal', 'Account not found')
+++    }
+++    const service = this.perAccountQuotaServices.get(accountId)
+++    if (service) {
+++      void service.dispose()
+++      this.perAccountQuotaServices.delete(accountId)
+++    }
+++    if (this.autoActivate) {
+++      await this.autoActivateGates(gateSubject(updatedRecord))
+++    }
+++    this.notifyStatus()
+++    return await this.status()
+++  }
+++
+++  async removeAccount(accountId: string): Promise<AntigravityStatusView> {
+++    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+++    await this.store.removeAccount(accountId)
+++    const service = this.perAccountQuotaServices.get(accountId)
+++    if (service) {
+++      void service.dispose()
+++      this.perAccountQuotaServices.delete(accountId)
+++    }
+++    const remaining = await this.store.listAccounts()
+++    if (remaining.length === 0) {
+++      await this.credentials.logout()
+++      await this.gates.clear()
+++    }
+++    this.notifyStatus()
+++    return await this.status()
+++  }
+++
++   async startLogin(): Promise<LoginStartResult> {
++     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
++     if (!this.riskAcknowledged) {
++@@ -187,19 +254,83 @@ export class AntigravityAuthService implements BootstrapStatusService {
++     return await this.credentials.credential(signal, options)
++   }
++ 
++-  async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {
++-    return await this.quota.refresh(signal, force)
+++  async usage(signal?: AbortSignal, force = false, accountId?: string): Promise<import('./quota.ts').QuotaStatusView> {
+++    const activeId = await this.store.getActiveAccountId?.()
+++    if (accountId === undefined || accountId === activeId) {
+++      return await this.quota.refresh(signal, force)
+++    }
+++    const accounts = await this.store.listAccounts?.() ?? []
+++    const target = accounts.find(a => a.id === accountId)
+++    if (!target) return { state: 'unauthenticated' }
+++
+++    let service = this.perAccountQuotaServices.get(target.id)
+++    if (!service) {
+++      let cachedToken: { accessToken: string; expiresAt: number } | undefined
+++      const refreshTransport = this.credentialOptions?.refreshToken ?? createGoogleRefreshTransport(this.credentialOptions?.fetchImpl)
+++      service = createQuotaService({
+++        ...this.quotaOptions,
+++        auth: {
+++          credential: async (credSignal?: AbortSignal) => {
+++            const now = Date.now()
+++            if (cachedToken && cachedToken.expiresAt > now + 60_000) {
+++              return {
+++                accessToken: cachedToken.accessToken,
+++                refreshToken: target.refreshToken,
+++                expiresAt: cachedToken.expiresAt,
+++                projectId: target.projectId,
+++              }
+++            }
+++            const token = await refreshTransport({
+++              refreshToken: target.refreshToken,
+++              signal: credSignal ?? new AbortController().signal,
+++            })
+++            cachedToken = { accessToken: token.accessToken, expiresAt: token.expiresAt }
+++            return {
+++              accessToken: token.accessToken,
+++              refreshToken: token.refreshToken ?? target.refreshToken,
+++              expiresAt: token.expiresAt,
+++              projectId: target.projectId,
+++            }
+++          },
+++        },
+++      })
+++      this.perAccountQuotaServices.set(target.id, service)
+++    }
+++    return await service.refresh(signal, force)
++   }
++ 
++-  async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
+++  async logout(accountId?: string): Promise<import('./credential-coordinator.ts').LogoutResult> {
++     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
++     this.activeFlowGeneration = 0
++     await this.flow.cancel()
++     try {
++-      const result = await this.credentials.logout()
++-      await this.gates.clear()
+++      if (accountId !== undefined) {
+++        await this.store.removeAccount(accountId)
+++        const s = this.perAccountQuotaServices.get(accountId)
+++        if (s) {
+++          void s.dispose()
+++          this.perAccountQuotaServices.delete(accountId)
+++        }
+++      } else {
+++        const activeId = await this.store.getActiveAccountId()
+++        if (activeId !== undefined) {
+++          await this.store.removeAccount(activeId)
+++          const s = this.perAccountQuotaServices.get(activeId)
+++          if (s) {
+++            void s.dispose()
+++            this.perAccountQuotaServices.delete(activeId)
+++          }
+++        } else {
+++          await this.store.clear()
+++        }
+++      }
+++      const remaining = await this.store.listAccounts()
+++      if (remaining.length === 0) {
+++        await this.credentials.logout()
+++        await this.gates.clear()
+++      }
++       this.notifyStatus()
++-      return result
+++      return { state: 'logged-out' }
++     } catch {
++       throw new OAuthFlowError('persistence-failed', 'The local Antigravity credential could not be cleared')
++     }
++@@ -218,7 +349,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
++     this.disposed = true
++     this.activeFlowGeneration = 0
++     this.statusListeners.clear()
++-    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose()])
+++    const perAccount = Array.from(this.perAccountQuotaServices.values()).map(s => s.dispose())
+++    this.perAccountQuotaServices.clear()
+++    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose(), ...perAccount])
++   }
++ 
++   private async commitCredential(token: OAuthToken, project: ProjectValidation, signal: AbortSignal): Promise<void> {
++@@ -230,11 +363,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
++     if (this.disposed || flowGeneration !== this.activeFlowGeneration || signal.aborted) {
++       throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
++     }
++-    const email = maskEmail(project.email ?? token.email)
+++    const rawEmail = project.email ?? token.email
++     const draft = {
++       refreshToken: token.refreshToken,
++       projectId: project.projectId,
++-      ...(email === undefined ? {} : { email }),
+++      ...(rawEmail === undefined ? {} : { email: rawEmail }),
++     }
++     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
++     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
++diff --git a/src/auth-store.ts b/src/auth-store.ts
++index 14cffec..9cf515d 100644
++--- a/src/auth-store.ts
+++++ b/src/auth-store.ts
++@@ -31,14 +31,30 @@ export interface AntigravityAuthRecord {
++   readonly lineage?: string
++ }
++ 
++-export interface AuthStoreOptions {
++-  readonly now?: () => number
++-  /** Override process.platform only for deterministic cross-platform tests. */
++-  readonly platform?: NodeJS.Platform
+++export interface StoredAccount {
+++  readonly id: string
+++  readonly refreshToken: string
+++  readonly projectId: string
+++  readonly email?: string
+++  readonly lineage?: string
+++  readonly addedAt?: string
+++  readonly updatedAt: string
+++}
+++
+++export interface MultiAuthStorage {
+++  readonly version: typeof AUTH_RECORD_VERSION
+++  readonly revision: number
+++  readonly activeAccountId?: string
+++  readonly accounts: readonly StoredAccount[]
+++  readonly updatedAt: string
++ }
++ 
++ export interface AntigravityAuthStore {
++   read(): Promise<AntigravityAuthRecord | undefined>
+++  listAccounts(): Promise<readonly StoredAccount[]>
+++  getActiveAccountId(): Promise<string | undefined>
+++  setActiveAccount(accountId: string): Promise<AntigravityAuthRecord | undefined>
+++  removeAccount(accountId: string): Promise<boolean>
++   commit(draft: AuthRecordDraft): Promise<AntigravityAuthRecord>
++   compareAndCommit(
++     expectedRevision: number,
++@@ -50,6 +66,12 @@ export interface AntigravityAuthStore {
++   clear(): Promise<void>
++ }
++ 
+++export interface AuthStoreOptions {
+++  readonly now?: () => number
+++  /** Override process.platform only for deterministic cross-platform tests. */
+++  readonly platform?: NodeJS.Platform
+++}
+++
++ export type AuthStoreErrorCode =
++   | 'AUTH_STORE_CORRUPT'
++   | 'AUTH_STORE_UNSUPPORTED_VERSION'
++@@ -92,29 +114,77 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
++   const now = options.now ?? (() => Date.now())
++   const platform = options.platform ?? process.platform
++   const enqueue = createMutationQueue()
++-  const read = () => readAuthRecordForPlatform(path, platform)
+++  const readStorage = () => readAuthStorageForPlatform(path, platform)
+++
+++  const read = async (): Promise<AntigravityAuthRecord | undefined> => {
+++    const storage = await readStorage()
+++    if (!storage) return undefined
+++    return getActiveRecord(storage)
+++  }
++ 
++   return {
++     read,
+++    listAccounts: async () => {
+++      const storage = await readStorage()
+++      return storage?.accounts ?? []
+++    },
+++    getActiveAccountId: async () => {
+++      const storage = await readStorage()
+++      return storage?.activeAccountId
+++    },
+++    setActiveAccount: accountId => enqueue(() => withStoreLock(path, async () => {
+++      const storage = await readStorage()
+++      if (!storage) return undefined
+++      const account = storage.accounts.find(acc => acc.id === accountId)
+++      if (!account) return undefined
+++      const updatedStorage: MultiAuthStorage = {
+++        ...storage,
+++        revision: storage.revision + 1,
+++        activeAccountId: account.id,
+++        updatedAt: new Date(now()).toISOString(),
+++      }
+++      await writeAuthStorage(path, updatedStorage)
+++      return accountToRecord(account, updatedStorage.revision)
+++    })),
+++    removeAccount: accountId => enqueue(() => withStoreLock(path, async () => {
+++      const storage = await readStorage()
+++      if (!storage) return false
+++      const remaining = storage.accounts.filter(acc => acc.id !== accountId)
+++      if (remaining.length === storage.accounts.length) return false
+++      const newActiveId = storage.activeAccountId === accountId
+++        ? remaining[0]?.id
+++        : storage.activeAccountId
+++      const updatedStorage: MultiAuthStorage = {
+++        version: AUTH_RECORD_VERSION,
+++        revision: storage.revision + 1,
+++        accounts: remaining,
+++        updatedAt: new Date(now()).toISOString(),
+++        ...(newActiveId === undefined ? {} : { activeAccountId: newActiveId }),
+++      }
+++      await writeAuthStorage(path, updatedStorage)
+++      return true
+++    })),
++     commit: draft => enqueue(() => withStoreLock(path, async () => {
++-      const current = await read()
++-      const record = makeRecord(draft, (current?.revision ?? 0) + 1, now())
++-      await writeAuthRecord(path, record)
++-      return record
+++      const storage = await readStorage()
+++      const { updatedStorage, activeRecord } = mutateStorageAddAccount(storage, draft, (storage?.revision ?? 0) + 1, now())
+++      await writeAuthStorage(path, updatedStorage)
+++      return activeRecord
++     })),
++     compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
++-      const current = await read()
++-      if ((current?.revision ?? 0) !== expectedRevision) return undefined
+++      const storage = await readStorage()
+++      const currentRecord = storage ? getActiveRecord(storage) : undefined
+++      if ((storage?.revision ?? 0) !== expectedRevision) return undefined
++       const lineage = expectedLineage ?? draft.lineage
++-      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
++-      const record = makeRecord(draft, expectedRevision + 1, now())
++-      await writeAuthRecord(path, record)
++-      return record
+++      if (lineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== lineage) return undefined
+++      const { updatedStorage, activeRecord } = mutateStorageAddAccount(storage, draft, expectedRevision + 1, now())
+++      await writeAuthStorage(path, updatedStorage)
+++      return activeRecord
++     })),
++     clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(() => withStoreLock(path, async () => {
++-      const current = await read()
++-      if ((current?.revision ?? 0) !== expectedRevision) return false
++-      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
+++      const storage = await readStorage()
+++      const currentRecord = storage ? getActiveRecord(storage) : undefined
+++      if ((storage?.revision ?? 0) !== expectedRevision) return false
+++      if (expectedLineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== expectedLineage) return false
++       try {
++         await unlink(path)
++       } catch (error) {
++@@ -137,28 +207,80 @@ export function createAuthStore(path: string, options: AuthStoreOptions = {}): A
++ /** An offline store useful for tests and process-local bootstrap fixtures. */
++ export function createMemoryAuthStore(initial?: AntigravityAuthRecord, options: AuthStoreOptions = {}): AntigravityAuthStore {
++   const now = options.now ?? (() => Date.now())
++-  let current = initial === undefined ? undefined : cloneRecord(initial)
+++  const initId = initial ? (initial.email ?? initial.lineage ?? randomUUID()) : undefined
+++  let currentStorage: MultiAuthStorage | undefined = initial === undefined ? undefined : {
+++    version: AUTH_RECORD_VERSION,
+++    revision: initial.revision,
+++    accounts: [{
+++      id: initId!,
+++      refreshToken: initial.refreshToken,
+++      projectId: initial.projectId,
+++      addedAt: initial.updatedAt,
+++      updatedAt: initial.updatedAt,
+++      ...(initial.email === undefined ? {} : { email: initial.email }),
+++      ...(initial.lineage === undefined ? {} : { lineage: initial.lineage }),
+++    }],
+++    updatedAt: initial.updatedAt,
+++    ...(initId === undefined ? {} : { activeAccountId: initId }),
+++  }
++   const enqueue = createMutationQueue()
+++
+++  const read = async () => currentStorage === undefined ? undefined : getActiveRecord(currentStorage)
+++
++   return {
++-    read: async () => current === undefined ? undefined : cloneRecord(current),
+++    read,
+++    listAccounts: async () => currentStorage?.accounts ?? [],
+++    getActiveAccountId: async () => currentStorage?.activeAccountId,
+++    setActiveAccount: async accountId => enqueue(async () => {
+++      if (!currentStorage) return undefined
+++      const account = currentStorage.accounts.find(acc => acc.id === accountId)
+++      if (!account) return undefined
+++      currentStorage = {
+++        ...currentStorage,
+++        revision: currentStorage.revision + 1,
+++        activeAccountId: account.id,
+++        updatedAt: new Date(now()).toISOString(),
+++      }
+++      return accountToRecord(account, currentStorage.revision)
+++    }),
+++    removeAccount: async accountId => enqueue(async () => {
+++      if (!currentStorage) return false
+++      const remaining = currentStorage.accounts.filter(acc => acc.id !== accountId)
+++      if (remaining.length === currentStorage.accounts.length) return false
+++      const newActiveId = currentStorage.activeAccountId === accountId
+++        ? remaining[0]?.id
+++        : currentStorage.activeAccountId
+++      currentStorage = {
+++        version: AUTH_RECORD_VERSION,
+++        revision: currentStorage.revision + 1,
+++        accounts: remaining,
+++        updatedAt: new Date(now()).toISOString(),
+++        ...(newActiveId === undefined ? {} : { activeAccountId: newActiveId }),
+++      }
+++      return true
+++    }),
++     commit: draft => enqueue(async () => {
++-      current = makeRecord(draft, (current?.revision ?? 0) + 1, now())
++-      return cloneRecord(current)
+++      const { updatedStorage, activeRecord } = mutateStorageAddAccount(currentStorage, draft, (currentStorage?.revision ?? 0) + 1, now())
+++      currentStorage = updatedStorage
+++      return activeRecord
++     }),
++     compareAndCommit: (expectedRevision, draft, expectedLineage) => enqueue(async () => {
++-      if ((current?.revision ?? 0) !== expectedRevision) return undefined
+++      const currentRecord = currentStorage ? getActiveRecord(currentStorage) : undefined
+++      if ((currentStorage?.revision ?? 0) !== expectedRevision) return undefined
++       const lineage = expectedLineage ?? draft.lineage
++-      if (lineage === undefined ? current?.lineage !== undefined : current?.lineage !== lineage) return undefined
++-      current = makeRecord(draft, expectedRevision + 1, now())
++-      return cloneRecord(current)
+++      if (lineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== lineage) return undefined
+++      const { updatedStorage, activeRecord } = mutateStorageAddAccount(currentStorage, draft, expectedRevision + 1, now())
+++      currentStorage = updatedStorage
+++      return activeRecord
++     }),
++     clearIfCurrent: (expectedRevision, expectedLineage) => enqueue(async () => {
++-      if ((current?.revision ?? 0) !== expectedRevision) return false
++-      if (expectedLineage === undefined ? current?.lineage !== undefined : current?.lineage !== expectedLineage) return false
++-      current = undefined
+++      const currentRecord = currentStorage ? getActiveRecord(currentStorage) : undefined
+++      if ((currentStorage?.revision ?? 0) !== expectedRevision) return false
+++      if (expectedLineage === undefined ? currentRecord?.lineage !== undefined : currentRecord?.lineage !== expectedLineage) return false
+++      currentStorage = undefined
++       return true
++     }),
++-    clear: () => enqueue(async () => { current = undefined }),
+++    clear: () => enqueue(async () => { currentStorage = undefined }),
++   }
++ }
++ 
++@@ -234,13 +356,19 @@ async function removeStaleLock(path: string): Promise<void> {
++ }
++ 
++ export async function readAuthRecord(path: string): Promise<AntigravityAuthRecord | undefined> {
++-  return readAuthRecordForPlatform(path, process.platform)
+++  const storage = await readAuthStorageForPlatform(path, process.platform)
+++  if (!storage) return undefined
+++  return getActiveRecord(storage)
+++}
+++
+++export async function readAuthStorage(path: string): Promise<MultiAuthStorage | undefined> {
+++  return readAuthStorageForPlatform(path, process.platform)
++ }
++ 
++-async function readAuthRecordForPlatform(
+++async function readAuthStorageForPlatform(
++   path: string,
++   platform: NodeJS.Platform,
++-): Promise<AntigravityAuthRecord | undefined> {
+++): Promise<MultiAuthStorage | undefined> {
++   let fileInfo
++   try {
++     fileInfo = await lstat(path)
++@@ -263,11 +391,32 @@ async function readAuthRecordForPlatform(
++   } catch {
++     throw corruptError()
++   }
++-  return parseRecord(parsed)
+++  return parseStorage(parsed)
++ }
++ 
++ export async function writeAuthRecord(path: string, record: AntigravityAuthRecord): Promise<void> {
++-  const validated = parseRecord(record)
+++  const accountId = record.email ?? record.lineage ?? randomUUID()
+++  const account: StoredAccount = {
+++    id: accountId,
+++    refreshToken: record.refreshToken,
+++    projectId: record.projectId,
+++    addedAt: record.updatedAt,
+++    updatedAt: record.updatedAt,
+++    ...(record.email === undefined ? {} : { email: record.email }),
+++    ...(record.lineage === undefined ? {} : { lineage: record.lineage }),
+++  }
+++  const storage: MultiAuthStorage = {
+++    version: AUTH_RECORD_VERSION,
+++    revision: record.revision,
+++    activeAccountId: accountId,
+++    accounts: [account],
+++    updatedAt: record.updatedAt,
+++  }
+++  await writeAuthStorage(path, storage)
+++}
+++
+++export async function writeAuthStorage(path: string, storage: MultiAuthStorage): Promise<void> {
+++  const validated = parseStorage(storage)
++   const parent = dirname(path)
++   try {
++     await prepareParent(parent)
++@@ -298,6 +447,95 @@ export function makeAuthRecord(draft: AuthRecordDraft, revision: number, now = D
++   return makeRecord(draft, revision, now)
++ }
++ 
+++function accountToRecord(account: StoredAccount, revision: number): AntigravityAuthRecord {
+++  return {
+++    version: AUTH_RECORD_VERSION,
+++    refreshToken: account.refreshToken,
+++    projectId: account.projectId,
+++    revision,
+++    updatedAt: account.updatedAt,
+++    ...(account.email === undefined ? {} : { email: account.email }),
+++    ...(account.lineage === undefined ? {} : { lineage: account.lineage }),
+++  }
+++}
+++
+++function getActiveRecord(storage: MultiAuthStorage): AntigravityAuthRecord | undefined {
+++  if (storage.accounts.length === 0) return undefined
+++  const active = (storage.activeAccountId !== undefined
+++    ? storage.accounts.find(a => a.id === storage.activeAccountId)
+++    : undefined) ?? storage.accounts[0]
+++  if (!active) return undefined
+++  return accountToRecord(active, storage.revision)
+++}
+++
+++function mutateStorageAddAccount(
+++  storage: MultiAuthStorage | undefined,
+++  draft: AuthRecordDraft,
+++  revision: number,
+++  now: number,
+++): { updatedStorage: MultiAuthStorage; activeRecord: AntigravityAuthRecord } {
+++  if (!isRecord(draft)
+++    || !isBoundedSafeText(draft.refreshToken, 4096)
+++    || !isBoundedSafeText(draft.projectId, 4096)
+++    || (draft.lineage !== undefined && !isBoundedSafeText(draft.lineage, 4096))
+++    || !Number.isSafeInteger(revision)
+++    || revision < 1
+++    || !Number.isFinite(now)) {
+++    throw corruptError()
+++  }
+++  const email = draft.email === undefined ? undefined : validateEmail(draft.email)
+++  const nowIso = new Date(now).toISOString()
+++  const lineage = draft.lineage ?? randomUUID()
+++  const existingAccounts = storage?.accounts ?? []
+++  const existingIndex = existingAccounts.findIndex(acc => (
+++    (email !== undefined && acc.email === email)
+++    || (draft.lineage !== undefined && acc.lineage === draft.lineage)
+++  ))
+++
+++  let updatedAccount: StoredAccount
+++  let updatedAccounts: StoredAccount[]
+++  if (existingIndex >= 0) {
+++    const existing = existingAccounts[existingIndex]!
+++    const updatedEmail = email ?? existing.email
+++    updatedAccount = {
+++      id: existing.id,
+++      refreshToken: draft.refreshToken,
+++      projectId: draft.projectId,
+++      lineage,
+++      addedAt: existing.addedAt ?? nowIso,
+++      updatedAt: nowIso,
+++      ...(updatedEmail === undefined ? {} : { email: updatedEmail }),
+++    }
+++    updatedAccounts = [...existingAccounts]
+++    updatedAccounts[existingIndex] = updatedAccount
+++  } else {
+++    const id = email ?? lineage
+++    updatedAccount = {
+++      id,
+++      refreshToken: draft.refreshToken,
+++      projectId: draft.projectId,
+++      lineage,
+++      addedAt: nowIso,
+++      updatedAt: nowIso,
+++      ...(email === undefined ? {} : { email }),
+++    }
+++    updatedAccounts = [...existingAccounts, updatedAccount]
+++  }
+++
+++  const updatedStorage: MultiAuthStorage = {
+++    version: AUTH_RECORD_VERSION,
+++    revision,
+++    activeAccountId: updatedAccount.id,
+++    accounts: updatedAccounts,
+++    updatedAt: nowIso,
+++  }
+++
+++  return {
+++    updatedStorage,
+++    activeRecord: accountToRecord(updatedAccount, revision),
+++  }
+++}
+++
++ function makeRecord(draft: AuthRecordDraft, revision: number, now: number): AntigravityAuthRecord {
++   if (!isRecord(draft)
++     || !isBoundedSafeText(draft.refreshToken, 4096)
++@@ -320,9 +558,85 @@ function makeRecord(draft: AuthRecordDraft, revision: number, now: number): Anti
++   return record
++ }
++ 
++-function parseRecord(value: unknown): AntigravityAuthRecord {
+++function parseStorage(value: unknown): MultiAuthStorage {
++   if (!isRecord(value)) throw corruptError()
++   if (value.version !== AUTH_RECORD_VERSION) throw unsupportedVersionError()
+++
+++  // Handle legacy single-record format
+++  if (typeof value.refreshToken === 'string') {
+++    const legacy = parseLegacyRecord(value)
+++    const accountId = legacy.email ?? legacy.lineage ?? randomUUID()
+++    const account: StoredAccount = {
+++      id: accountId,
+++      refreshToken: legacy.refreshToken,
+++      projectId: legacy.projectId,
+++      addedAt: legacy.updatedAt,
+++      updatedAt: legacy.updatedAt,
+++      ...(legacy.email === undefined ? {} : { email: legacy.email }),
+++      ...(legacy.lineage === undefined ? {} : { lineage: legacy.lineage }),
+++    }
+++    return {
+++      version: AUTH_RECORD_VERSION,
+++      revision: legacy.revision,
+++      activeAccountId: accountId,
+++      accounts: [account],
+++      updatedAt: legacy.updatedAt,
+++    }
+++  }
+++
+++  const revision = value.revision
+++  const updatedAt = value.updatedAt
+++  const activeAccountId = value.activeAccountId
+++  const accountsRaw = value.accounts
+++
+++  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 1
+++    || typeof updatedAt !== 'string' || !Number.isFinite(Date.parse(updatedAt))
+++    || (activeAccountId !== undefined && (typeof activeAccountId !== 'string' || !isBoundedSafeText(activeAccountId, 4096)))
+++    || !Array.isArray(accountsRaw)) {
+++    throw corruptError()
+++  }
+++
+++  const accounts: StoredAccount[] = []
+++  for (const raw of accountsRaw) {
+++    if (!isRecord(raw)) throw corruptError()
+++    const id = raw.id
+++    const refreshToken = raw.refreshToken
+++    const projectId = raw.projectId
+++    const email = raw.email
+++    const lineage = raw.lineage
+++    const addedAt = raw.addedAt
+++    const accountUpdatedAt = raw.updatedAt
+++
+++    if (typeof id !== 'string' || !isBoundedSafeText(id, 4096)
+++      || !isBoundedSafeText(refreshToken, 4096)
+++      || !isBoundedSafeText(projectId, 4096)
+++      || typeof accountUpdatedAt !== 'string' || !Number.isFinite(Date.parse(accountUpdatedAt))
+++      || (email !== undefined && (typeof email !== 'string' || !isBoundedSafeText(email, 4096)))
+++      || (lineage !== undefined && (typeof lineage !== 'string' || !isBoundedSafeText(lineage, 4096)))
+++      || (addedAt !== undefined && (typeof addedAt !== 'string' || !Number.isFinite(Date.parse(addedAt))))) {
+++      throw corruptError()
+++    }
+++    accounts.push({
+++      id,
+++      refreshToken,
+++      projectId,
+++      updatedAt: accountUpdatedAt,
+++      ...(email === undefined ? {} : { email }),
+++      ...(lineage === undefined ? {} : { lineage }),
+++      ...(addedAt === undefined ? {} : { addedAt }),
+++    })
+++  }
+++
+++  return {
+++    version: AUTH_RECORD_VERSION,
+++    revision,
+++    accounts,
+++    updatedAt,
+++    ...(activeAccountId === undefined ? {} : { activeAccountId }),
+++  }
+++}
+++
+++function parseLegacyRecord(value: Record<string, unknown>): AntigravityAuthRecord {
++   const keys = Object.keys(value).sort()
++   const required = ['projectId', 'refreshToken', 'revision', 'updatedAt', 'version']
++   const withEmail = [...required, 'email'].sort()
++diff --git a/src/client/AntigravityAuthSettings.tsx b/src/client/AntigravityAuthSettings.tsx
++index ba85a4a..91edece 100644
++--- a/src/client/AntigravityAuthSettings.tsx
+++++ b/src/client/AntigravityAuthSettings.tsx
++@@ -1,6 +1,6 @@
++ /** Settings shell for value-safe Antigravity login status. */
++ 
++-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+++import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
++ import type { ReactNode } from 'react'
++ import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
++ import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
++@@ -56,6 +56,9 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
++   const [quota, setQuota] = useState<QuotaStatusView | null>(null)
++   const [quotaBusy, setQuotaBusy] = useState(false)
++   const [quotaError, setQuotaError] = useState<string | null>(null)
+++  const [accountQuotas, setAccountQuotas] = useState<Record<string, QuotaStatusView>>({})
+++  const [accountQuotaBusy, setAccountQuotaBusy] = useState<Record<string, boolean>>({})
+++  const [accountQuotaErrors, setAccountQuotaErrors] = useState<Record<string, string | null>>({})
++   const [loadState, setLoadState] = useState<LoadState>('loading')
++   const [_error, setError] = useState<string | null>(null)
++   const [loginBusy, setLoginBusy] = useState(false)
++@@ -94,36 +97,74 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
++     }
++   }, [rpc, t])
++ 
++-  const loadQuota = useCallback(async (force = false, signal?: AbortSignal) => {
+++  const loadQuotaForAccount = useCallback(async (accountId: string, force = false, signal?: AbortSignal) => {
++     if (rpc.usage === undefined) return
++-    const generation = ++quotaGeneration.current
++-    setQuotaBusy(true)
++-    setQuotaError(null)
+++    setAccountQuotaBusy(prev => ({ ...prev, [accountId]: true }))
+++    setAccountQuotaErrors(prev => ({ ...prev, [accountId]: null }))
++     try {
++-      const result = await rpc.usage(signal, force)
++-      if (signal?.aborted === true || generation !== quotaGeneration.current) return
+++      const result = await rpc.usage(signal, force, accountId)
+++      if (signal?.aborted === true) return
++       if (!result.ok) {
++-        setQuotaError(result.error.message || t('quotaFailed'))
+++        setAccountQuotaErrors(prev => ({ ...prev, [accountId]: result.error.message || t('quotaFailed') }))
++         return
++       }
++-      setQuota(result.value)
+++      setAccountQuotas(prev => ({ ...prev, [accountId]: result.value }))
+++      if (status?.activeAccountId === accountId) {
+++        setQuota(result.value)
+++      }
++     } catch (cause) {
++-      if (signal?.aborted === true || generation !== quotaGeneration.current) return
++-      setQuotaError(messageOf(cause, t('quotaFailed')))
+++      if (signal?.aborted === true) return
+++      setAccountQuotaErrors(prev => ({ ...prev, [accountId]: messageOf(cause, t('quotaFailed')) }))
++     } finally {
++-      if (signal?.aborted !== true && generation === quotaGeneration.current) setQuotaBusy(false)
+++      if (signal?.aborted !== true) {
+++        setAccountQuotaBusy(prev => ({ ...prev, [accountId]: false }))
+++      }
++     }
++-  }, [rpc, t])
+++  }, [rpc, status?.activeAccountId, t])
+++
+++  const loadQuota = useCallback(async (force = false, signal?: AbortSignal) => {
+++    if (rpc.usage === undefined) return
+++    const activeId = status?.activeAccountId
+++    if (activeId) {
+++      await loadQuotaForAccount(activeId, force, signal)
+++    } else {
+++      const generation = ++quotaGeneration.current
+++      setQuotaBusy(true)
+++      setQuotaError(null)
+++      try {
+++        const result = await rpc.usage(signal, force)
+++        if (signal?.aborted === true || generation !== quotaGeneration.current) return
+++        if (!result.ok) {
+++          setQuotaError(result.error.message || t('quotaFailed'))
+++          return
+++        }
+++        setQuota(result.value)
+++      } catch (cause) {
+++        if (signal?.aborted === true || generation !== quotaGeneration.current) return
+++        setQuotaError(messageOf(cause, t('quotaFailed')))
+++      } finally {
+++        if (signal?.aborted !== true && generation === quotaGeneration.current) setQuotaBusy(false)
+++      }
+++    }
+++  }, [loadQuotaForAccount, rpc, status?.activeAccountId, t])
++ 
++   useEffect(() => {
++-    if (status?.login.projectAvailable !== true || rpc.usage === undefined) {
++-      setQuota(null)
++-      return
+++    if (rpc.usage === undefined) return
+++    const accounts = status?.accounts
+++    if (accounts && accounts.length > 0) {
+++      const controller = new AbortController()
+++      for (const acc of accounts) {
+++        void loadQuotaForAccount(acc.id, false, controller.signal)
+++      }
+++      return () => controller.abort()
++     }
++-    const controller = new AbortController()
++-    void loadQuota(false, controller.signal)
++-    return () => controller.abort()
++-  }, [loadQuota, rpc.usage, status?.login.projectAvailable, resetTick])
+++    if (status?.login.projectAvailable === true) {
+++      const controller = new AbortController()
+++      void loadQuota(false, controller.signal)
+++      return () => controller.abort()
+++    }
+++    setQuota(null)
+++  }, [loadQuota, loadQuotaForAccount, rpc.usage, status?.accounts, status?.login.projectAvailable, resetTick])
++ 
++   useEffect(() => {
++     const controller = new AbortController()
++@@ -224,91 +265,282 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
++     }
++   }, [load, rpc, t, unmountSignal])
++ 
+++  const switchAccount = useCallback(async (accountId: string) => {
+++    if (rpc.switchAccount === undefined) return
+++    const signal = unmountSignal()
+++    setActionBusy(true)
+++    setError(null)
+++    try {
+++      const result = await rpc.switchAccount(accountId, signal)
+++      if (signal.aborted) return
+++      if (!result.ok) {
+++        setError(result.error.message || t('switchAccountFailed'))
+++        return
+++      }
+++      setStatus(result.value.status)
+++      void loadQuotaForAccount(accountId, true, signal)
+++    } catch (cause) {
+++      if (!signal.aborted) setError(messageOf(cause, t('switchAccountFailed')))
+++    } finally {
+++      if (!signal.aborted) setActionBusy(false)
+++    }
+++  }, [loadQuotaForAccount, rpc, t, unmountSignal])
+++
+++  const removeAccount = useCallback(async (accountId: string, e?: React.MouseEvent) => {
+++    e?.stopPropagation()
+++    const signal = unmountSignal()
+++    setActionBusy(true)
+++    setError(null)
+++    try {
+++      if (rpc.removeAccount !== undefined) {
+++        const result = await rpc.removeAccount(accountId, signal)
+++        if (signal.aborted) return
+++        if (!result.ok) {
+++          setError(result.error.message || t('removeAccountFailed'))
+++          return
+++        }
+++        setStatus(result.value.status)
+++        setAccountQuotas(prev => {
+++          const next = { ...prev }
+++          delete next[accountId]
+++          return next
+++        })
+++        const newActive = result.value.status.activeAccountId
+++        if (newActive) {
+++          void loadQuotaForAccount(newActive, true, signal)
+++        }
+++      } else {
+++        const result = await rpc.logout(signal)
+++        if (signal.aborted) return
+++        if (!result.ok) {
+++          setError(result.error.message || t('logoutFailed'))
+++          return
+++        }
+++        await load(signal)
+++      }
+++    } catch (cause) {
+++      if (!signal.aborted) setError(messageOf(cause, t('removeAccountFailed')))
+++    } finally {
+++      if (!signal.aborted) setActionBusy(false)
+++    }
+++  }, [load, loadQuotaForAccount, rpc, t, unmountSignal])
+++
++   const projectError = projectErrorText(status?.login.errorCode, t)
++   const isConfigured = status?.login.configured === true
++ 
+++  const sortedAccounts = useMemo(() => {
+++    if (!status?.accounts || status.accounts.length <= 1) return status?.accounts ?? []
+++    return [...status.accounts].sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0))
+++  }, [status?.accounts])
+++
++   return (
++     <section className="agy-settings" data-plugin="dsh-antigravity-auth" aria-labelledby="antigravity-auth-title">
++       <header className="agy-bundle-header">
++         <div>
++           <div className="agy-title-line">
++             <h1 id="antigravity-auth-title" className="agy-bundle-title">{t('title')}</h1>
++-            {isConfigured ? (
++-              <span className="agy-status-dot" role="status" aria-label={t('ready')} />
++-            ) : null}
++           </div>
++           <p className="agy-bundle-intro">{t('intro')}</p>
++         </div>
+++        {isConfigured ? (
+++          <button
+++            type="button"
+++            className="agy-btn agy-btn-relogin agy-header-relogin-btn"
+++            disabled={loginBusy || actionBusy}
+++            onClick={() => { void startLogin() }}
+++          >
+++            {t('addAccount')}
+++          </button>
+++        ) : null}
++       </header>
++ 
++       <div className="agy-cards">
++-        {/* Card 1: Auth & Quota */}
++-        <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
++-          <div className="agy-card-header">
++-            <div className="agy-card-identity">
++-              <h2 id="antigravity-auth-card-title" className="agy-card-title">{t('authCardTitle')}</h2>
++-              <p className="agy-card-intro">{t('authCardIntro')}</p>
+++        {/* Pending Authorization Banner when adding an account while accounts already exist */}
+++        {status?.accounts && status.accounts.length > 0 && status.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+++          <article className="agy-card agy-pending-banner">
+++            <div className="agy-card-header">
+++              <div className="agy-card-identity">
+++                <h2 className="agy-card-title">{t('loginPending')}</h2>
+++                <p className="agy-card-intro">{t('terms')}</p>
+++              </div>
++             </div>
++-          </div>
++-
++-          <QuotaVisualDashboard
++-            quota={quota}
++-            busy={quotaBusy}
++-            error={quotaError}
++-            onRefresh={() => { void loadQuota(true, unmountSignal()) }}
++-            t={t}
++-          />
++-
++-          <div className="agy-action-row">
++-            {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
++-              <>
++-                <a className="agy-btn agy-btn-primary" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+++            <div className="agy-account-actions-row">
+++              <div className="agy-account-left-actions">
+++                <a className="agy-btn agy-btn-relogin" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
++                   {t('openAuthorization')}
++                 </a>
++-                <button className="agy-btn agy-btn-outline" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+++                <button className="agy-btn agy-btn-logout" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
++                   {t('cancelLogin')}
++                 </button>
++-              </>
++-            ) : (
++-              <button className="agy-btn agy-btn-primary" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
++-                {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
++-              </button>
++-            )}
++-
++-            {status?.credential?.configured ? (
++-              <button className="agy-btn agy-btn-outline" type="button" disabled={actionBusy} onClick={() => { void logout() }}>
++-                {t('logout')}
++-              </button>
+++              </div>
+++            </div>
+++            {status.login.expiresAt !== undefined ? (
+++              <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
++             ) : null}
+++          </article>
+++        ) : null}
+++
+++        {/* Multi-Account Cards matching reference design */}
+++        {status !== null && sortedAccounts.length > 0 ? (
+++          sortedAccounts.map(account => {
+++            const isSelected = account.active
+++            const accountQuota = accountQuotas[account.id] ?? (isSelected ? quota : null)
+++            const isAccountBusy = accountQuotaBusy[account.id] ?? (isSelected ? quotaBusy : false)
+++            const accountError = accountQuotaErrors[account.id] ?? (isSelected ? quotaError : null)
+++            return (
+++              <article
+++                key={account.id}
+++                className={`agy-card agy-account-card agy-account-item ${isSelected ? 'agy-account-active' : ''}`}
+++                role="radio"
+++                aria-checked={isSelected}
+++                tabIndex={0}
+++                onClick={() => {
+++                  if (!isSelected && !actionBusy) {
+++                    void switchAccount(account.id)
+++                  }
+++                }}
+++                onKeyDown={e => {
+++                  if ((e.key === 'Enter' || e.key === ' ') && !isSelected && !actionBusy) {
+++                    e.preventDefault()
+++                    void switchAccount(account.id)
+++                  }
+++                }}
+++              >
+++                <div className="agy-card-header">
+++                  <div className="agy-card-identity">
+++                    <h2 className="agy-account-card-title">
+++                      <span>{account.email ?? account.maskedEmail ?? account.id}</span>
+++                      {isSelected ? (
+++                        <span className="agy-status-dot" role="status" aria-label={t('ready')} />
+++                      ) : null}
+++                    </h2>
+++                    <p className="agy-card-intro">{t('authCardIntro')}</p>
+++                  </div>
+++                </div>
++ 
++-            <button
++-              className="agy-btn agy-btn-ghost agy-refresh-btn"
++-              type="button"
++-              disabled={loadState === 'loading' || quotaBusy}
++-              onClick={() => {
++-                const minDelay = new Promise(resolve => setTimeout(resolve, 500))
++-                void Promise.all([load(unmountSignal()), loadQuota(true, unmountSignal()), minDelay])
++-              }}
++-            >
++-              <span className={quotaBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}>
++-                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
++-              </span>
++-              {quotaBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}
++-            </button>
++-          </div>
++-          <p className="agy-footer-notice">{t('quotaFooterNotice')}</p>
++-
++-          {status?.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
++-          {status?.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
++-          {status?.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
++-          {projectError === undefined ? null : <p className="agy-alert" role="alert">{projectError}</p>}
++-          {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
++-            <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
++-          ) : null}
++-          {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
++-            <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
++-          )}
++-        </article>
+++                <QuotaVisualDashboard
+++                  quota={accountQuota}
+++                  busy={isAccountBusy}
+++                  error={accountError}
+++                  onRefresh={() => { void loadQuotaForAccount(account.id, true, unmountSignal()) }}
+++                  t={t}
+++                />
+++
+++                <div className="agy-account-actions-row">
+++                  <button
+++                    className="agy-btn agy-btn-ghost agy-refresh-btn"
+++                    type="button"
+++                    disabled={loadState === 'loading' || isAccountBusy}
+++                    onClick={e => {
+++                      e.stopPropagation()
+++                      const minDelay = new Promise(resolve => setTimeout(resolve, 500))
+++                      void Promise.all([load(unmountSignal()), loadQuotaForAccount(account.id, true, unmountSignal()), minDelay])
+++                    }}
+++                  >
+++                    <span className={`agy-refresh-icon ${isAccountBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}`}>
+++                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+++                    </span>
+++                    <span>{isAccountBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}</span>
+++                  </button>
+++
+++                  <button
+++                    className="agy-btn agy-btn-logout"
+++                    type="button"
+++                    disabled={actionBusy}
+++                    onClick={e => {
+++                      e.stopPropagation()
+++                      void removeAccount(account.id, e)
+++                    }}
+++                  >
+++                    {t('logout')}
+++                  </button>
+++                </div>
+++
+++                {isSelected && status.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
+++                {isSelected && status.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
+++                {isSelected && status.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
+++                {isSelected && projectError !== undefined ? <p className="agy-alert" role="alert">{projectError}</p> : null}
+++                {isSelected && status.revoke !== undefined && status.revoke.state !== 'idle' ? (
+++                  <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
+++                ) : null}
+++              </article>
+++            )
+++          })
+++        ) : (
+++          /* Single Fallback Card (unauthenticated state) */
+++          <article className="agy-card" aria-labelledby="antigravity-auth-card-title">
+++            <div className="agy-card-header">
+++              <div className="agy-card-identity">
+++                <h2 id="antigravity-auth-card-title" className="agy-card-title">
+++                  <span>{status?.login.maskedEmail ?? t('authCardTitle')}</span>
+++                  {isConfigured ? (
+++                    <span className="agy-status-dot" role="status" aria-label={t('ready')} />
+++                  ) : null}
+++                </h2>
+++                <p className="agy-card-intro">{t('authCardIntro')}</p>
+++              </div>
+++            </div>
+++
+++            <QuotaVisualDashboard
+++              quota={quota}
+++              busy={quotaBusy}
+++              error={quotaError}
+++              onRefresh={() => { void loadQuota(true, unmountSignal()) }}
+++              t={t}
+++            />
+++
+++            <div className="agy-account-actions-row">
+++              <div className="agy-account-left-actions">
+++                {status?.login.phase === 'pending' && typeof status.login.authorizationUrl === 'string' ? (
+++                  <>
+++                    <a className="agy-btn agy-btn-relogin" href={status.login.authorizationUrl} target="_blank" rel="noreferrer">
+++                      {t('openAuthorization')}
+++                    </a>
+++                    <button className="agy-btn agy-btn-logout" type="button" disabled={loginBusy} onClick={() => { void cancelLogin() }}>
+++                      {t('cancelLogin')}
+++                    </button>
+++                  </>
+++                ) : (
+++                  <button className="agy-btn agy-btn-relogin" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
+++                    {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
+++                  </button>
+++                )}
+++
+++                <button
+++                  className="agy-btn agy-btn-ghost agy-refresh-btn"
+++                  type="button"
+++                  disabled={loadState === 'loading' || quotaBusy}
+++                  onClick={() => {
+++                    const minDelay = new Promise(resolve => setTimeout(resolve, 500))
+++                    void Promise.all([load(unmountSignal()), loadQuota(true, unmountSignal()), minDelay])
+++                  }}
+++                >
+++                  <span className={`agy-refresh-icon ${quotaBusy || loadState === 'loading' ? 'agy-spin-icon' : ''}`}>
+++                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+++                  </span>
+++                  {quotaBusy || loadState === 'loading' ? t('queryingQuota') : t('refreshStatus')}
+++                </button>
+++              </div>
+++
+++              {status?.credential?.configured ? (
+++                <button className="agy-btn agy-btn-logout" type="button" disabled={actionBusy} onClick={() => { void logout() }}>
+++                  {t('logout')}
+++                </button>
+++              ) : null}
+++            </div>
+++
+++            {status?.login.phase === 'expired' ? <p className="agy-alert" role="alert">{t('loginExpired')}</p> : null}
+++            {status?.login.phase === 'port-conflict' ? <p className="agy-alert" role="alert">{t('loginPortConflict')}</p> : null}
+++            {status?.login.phase === 'failed' ? <p className="agy-alert" role="alert">{t('loginFailed')}</p> : null}
+++            {projectError === undefined ? null : <p className="agy-alert" role="alert">{projectError}</p>}
+++            {status?.login.phase === 'pending' && status.login.expiresAt !== undefined ? (
+++              <p className="agy-card-subtext">{t('expiresAt')}: <time dateTime={status.login.expiresAt}>{status.login.expiresAt}</time></p>
+++            ) : null}
+++            {status?.revoke === undefined || status.revoke.state === 'idle' ? null : (
+++              <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
+++            )}
+++          </article>
+++        )}
++ 
++         {/* Card 2: Web Search */}
++         <article className="agy-card">
++@@ -416,6 +648,23 @@ function formatRefreshTime(resetTime: string, dayUnit: string, now = Date.now())
++   return `${remMinutes}m`
++ }
++ 
+++function formatRefreshLabel(resetTime: string, template: string, now = Date.now()): string {
+++  const target = new Date(resetTime).getTime()
+++  if (Number.isNaN(target)) return template
+++  const diffMs = Math.max(0, target - now)
+++  const totalSeconds = Math.floor(diffMs / 1000)
+++  const days = Math.floor(totalSeconds / 86400)
+++  const hours = Math.floor((totalSeconds % 86400) / 3600)
+++  const minutes = Math.floor((totalSeconds % 3600) / 60)
+++  const seconds = totalSeconds % 60
+++
+++  return template
+++    .replace('{days}', String(days))
+++    .replace('{hours}', String(hours))
+++    .replace('{minutes}', String(minutes))
+++    .replace('{seconds}', String(seconds))
+++}
+++
++ function quotaTone(fraction: number): 'normal' | 'warning' | 'error' {
++   if (fraction < 0.3) return 'error'
++   if (fraction <= 0.6) return 'warning'
++@@ -426,11 +675,13 @@ function QuotaVisualDashboard({
++   quota,
++   busy,
++   error,
+++  isInactive,
++   t,
++ }: {
++   readonly quota: QuotaStatusView | null
++   readonly busy?: boolean
++   readonly error: string | null
+++  readonly isInactive?: boolean
++   readonly onRefresh?: () => void
++   readonly t: AntigravityAuthSettingsProps['t']
++ }): ReactNode {
++@@ -448,19 +699,18 @@ function QuotaVisualDashboard({
++                   <span className="agy-quota-group-desc">{groupDesc}</span>
++                 </div>
++                 <div className="agy-quota-buckets">
++-                  {group.windows.map(window => {
++-                    const windowName = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
+++                   {group.windows.map(window => {
+++                    const windowLabel = window.window === '5h' ? t('quotaFiveHour') : t('quotaWeekly')
+++                    const windowTemplate = window.window === '5h' ? t('window5hTitle') : t('windowWeeklyTitle')
++                     const pctFormatted = (window.remainingFraction * 100).toFixed(2) + '%'
++-                    const pctRounded = Math.round(window.remainingFraction * 100)
++-                    const refreshStr = formatRefreshTime(window.resetTime, t('quotaDayUnit'))
++-                    const subtext = `${pctRounded}% ${t('remaining')} · ${t('refreshesIn').replace('{time}', refreshStr)}`
+++                    const refreshLabel = formatRefreshLabel(window.resetTime, windowTemplate)
++                     const widthPct = Math.max(0, Math.min(100, window.remainingFraction * 100))
++                     const tone = quotaTone(window.remainingFraction)
++ 
++                     return (
++                       <div key={window.window} className="agy-quota-bucket">
++                         <div className="agy-quota-bucket-head">
++-                          <span className="agy-quota-bucket-name">{windowName}</span>
+++                          <span className="agy-quota-bucket-name">{windowLabel}</span>
++                           {busy ? (
++                             <span className="agy-quota-querying">
++                               <span className="agy-querying-spinner" aria-hidden="true" />
++@@ -477,7 +727,7 @@ function QuotaVisualDashboard({
++                             <div className="agy-progress-bar" data-tone={tone} style={{ width: `${widthPct}%` }} />
++                           )}
++                         </div>
++-                        <span className="agy-quota-subtext">{subtext}</span>
+++                        <span className="agy-quota-subtext">{refreshLabel}</span>
++                       </div>
++                     )
++                   })}
++@@ -486,6 +736,13 @@ function QuotaVisualDashboard({
++             )
++           })}
++         </div>
+++      ) : busy ? (
+++        <div className="agy-quota-loading-state" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '24px 16px', gap: '8px', color: 'var(--dsw-alias-label-tertiary, #71717a)', fontSize: '13px' }}>
+++          <span className="agy-spin-icon">
+++            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>
+++          </span>
+++          <span>{t('queryingQuota')}</span>
+++        </div>
++       ) : null}
++       {error === null ? null : <p className="agy-alert" role="alert">{error}</p>}
++     </div>
++diff --git a/src/client/locales.ts b/src/client/locales.ts
++index fba2ec1..9ee2b98 100644
++--- a/src/client/locales.ts
+++++ b/src/client/locales.ts
++@@ -30,7 +30,7 @@ export const en = {
++   credentialRefreshFailed: 'The access token could not be refreshed. No fallback account or endpoint was used.',
++   credentialReloginRequired: 'The Antigravity grant requires login again.',
++   credentialLoggedOut: 'The Antigravity account is logged out on this Host.',
++-  logout: 'Log out locally',
+++  logout: 'Log out',
++   logoutFailed: 'The local logout could not be completed.',
++   revoke: 'Revoke Google grant',
++   revokeConfirm: 'Revoke this Google grant? This is separate from local logout.',
++@@ -102,22 +102,28 @@ export const en = {
++   searchCardIntro: 'Google Antigravity Search Provider used by the stock web_search tool.',
++   imageCardIntro: 'Durable image generation tools for image-capable models (gemini-3.1-flash-image).',
++   videoCardIntro: 'Workspace MP4 video understanding tools for multimodal models (gemini-3.7-flash).',
++-  privacyNotice: 'Share Antigravity login state and model routing.',
+++  privacyNotice: 'Share Antigravity session and Antigravity model routing. Select this account to refresh and use account quota.',
++   relogin: 'Log in again with Google',
++   authCardTitle: 'Login',
++-  authCardIntro: 'Share Antigravity session and Antigravity model routing.',
+++  authCardIntro: 'Share Antigravity session and Antigravity model routing. Select this account to refresh and use account quota.',
++   queryingQuota: 'Querying quota…',
++   geminiGroupTitle: 'GEMINI MODELS',
++   geminiGroupDesc: 'Models within this group: Gemini Flash, Gemini Pro',
++   claudeGptGroupTitle: 'CLAUDE AND GPT MODELS',
++   claudeGptGroupDesc: 'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
++-  window5hTitle: 'Five Hour Limit Remaining',
++-  windowWeeklyTitle: 'Weekly Limit Remaining',
++-  quotaFooterNotice: 'No token value is ever sent to the Web client, settings, logs, events, or tool metadata.',
++-  refreshStatus: 'Refresh status',
+++  window5hTitle: '{hours}h {minutes}m {seconds}s after refresh',
+++  windowWeeklyTitle: '{days}d {hours}h {minutes}m after refresh',
+++  quotaFooterNotice: 'Select this account to refresh and use account quota',
+++  refreshStatus: 'Refresh quota',
++   remaining: 'remaining',
++-  refreshesIn: 'Refreshes in {time}',
++-  quotaDayUnit: 'd',
+++  refreshesIn: 'Refreshes in',
+++  accountsListTitle: 'Logged-in Accounts',
+++  addAccount: 'Add Google Account',
+++  activeAccount: 'Active',
+++  switchAccountFailed: 'Failed to switch account',
+++  switchAccountToViewQuota: 'Select this account to load quota',
+++  removeAccount: 'Remove',
+++  removeAccountFailed: 'Failed to remove account',
++ } as const
++ 
++ export type AntigravityAuthKey = keyof typeof en
++@@ -152,7 +158,7 @@ export const zh: Record<AntigravityAuthKey, string> = {
++   credentialRefreshFailed: '无法刷新 access token，未使用备用账号或 endpoint。',
++   credentialReloginRequired: '该 Antigravity grant 需要重新登录。',
++   credentialLoggedOut: '该 Host 上的 Antigravity 账号已登出。',
++-  logout: '在本地登出',
+++  logout: '退出登录',
++   logoutFailed: '本地登出未完成。',
++   revoke: '撤销 Google grant',
++   revokeConfirm: '确定撤销此 Google grant 吗？这与本地登出是分开的操作。',
++@@ -219,25 +225,31 @@ export const zh: Record<AntigravityAuthKey, string> = {
++   quotaFailed: '无法安全加载配额。',
++   quotaLoading: '正在刷新配额…',
++   quotaRefresh: '刷新配额',
++-  quotaFiveHour: '五小时窗口',
++-  quotaWeekly: '每周窗口',
+++  quotaFiveHour: '五小时限额',
+++  quotaWeekly: '每周限额',
++   searchCardIntro: '供内置 web_search 工具使用的 Google Antigravity 全局搜索能力。',
++   imageCardIntro: '面向支持图片模型的持久化 generate_image 工具（gemini-3.1-flash-image）。',
++   videoCardIntro: '面向本地 MP4 视频文件的多模态 analyze_video 理解工具。',
++-  privacyNotice: '共享 Antigravity 登录态与模型路由。',
+++  privacyNotice: '共享 Antigravity 登录态与Antigravity 模型路由，选中此账号以刷新并使用账号配额。',
++   relogin: '重新登录 Google',
++   authCardTitle: '登录',
++-  authCardIntro: '共享 Antigravity 登录态与 Antigravity 模型路由。',
+++  authCardIntro: '共享 Antigravity 登录态与Antigravity 模型路由，选中此账号以刷新并使用账号配额。',
++   queryingQuota: '正在查询额度…',
++   geminiGroupTitle: 'GEMINI 模型',
++   geminiGroupDesc: '包含模型：Gemini Flash, Gemini Pro',
++   claudeGptGroupTitle: 'CLAUDE 与 GPT 模型',
++   claudeGptGroupDesc: '包含模型：Claude Opus, Claude Sonnet, GPT-OSS',
++-  window5hTitle: '5 小时限额剩余',
++-  windowWeeklyTitle: '周限额剩余',
++-  quotaFooterNotice: '任何 Token 值都不会发送到 Web 客户端、设置、日志、事件或工具元数据。',
++-  refreshStatus: '刷新状态',
+++  window5hTitle: '{hours}小时{minutes}分{seconds}秒后刷新',
+++  windowWeeklyTitle: '{days}天{hours}小时{minutes}分后刷新',
+++  quotaFooterNotice: '选中此账号以刷新并使用账号配额',
+++  refreshStatus: '刷新配额',
++   remaining: '剩余',
++-  refreshesIn: '{time} 后刷新',
++-  quotaDayUnit: '天',
+++  refreshesIn: '后刷新',
+++  accountsListTitle: '已登录账号',
+++  addAccount: '添加Google账号',
+++  activeAccount: '当前使用中',
+++  switchAccountFailed: '切换账号失败。',
+++  switchAccountToViewQuota: '选中此账号以加载并使用该账号配额',
+++  removeAccount: '移除',
+++  removeAccountFailed: '移除账号失败。',
++ }
++diff --git a/src/client/styles.ts b/src/client/styles.ts
++index 8f26ffe..1b75dae 100644
++--- a/src/client/styles.ts
+++++ b/src/client/styles.ts
++@@ -25,11 +25,40 @@ export const SETTINGS_CSS = `
++ 
++ .agy-bundle-header {
++   display: flex;
++-  align-items: flex-start;
+++  align-items: center;
++   justify-content: space-between;
++   gap: 20px;
++ }
++ 
+++.agy-bundle-header > div:first-child {
+++  flex: 1;
+++  min-width: 0;
+++}
+++
+++.agy-header-add-btn {
+++  background: transparent;
+++  border: none;
+++  color: var(--dsw-alias-label-primary, #ffffff);
+++  font-size: 17px;
+++  font-weight: 700;
+++  cursor: pointer;
+++  padding: 4px 10px;
+++  border-radius: 8px;
+++  transition: background-color 0.15s ease, opacity 0.15s ease;
+++  white-space: nowrap;
+++  flex: none;
+++  line-height: 24px;
+++}
+++
+++.agy-header-add-btn:hover:not(:disabled) {
+++  background: rgba(255, 255, 255, 0.08);
+++}
+++
+++.agy-header-add-btn:disabled {
+++  opacity: 0.4;
+++  cursor: not-allowed;
+++}
+++
++ .agy-title-line {
++   display: flex;
++   align-items: center;
++@@ -474,7 +503,36 @@ export const SETTINGS_CSS = `
++ }
++ 
++ .agy-refresh-btn {
++-  margin-left: auto;
+++  display: inline-flex !important;
+++  align-items: center !important;
+++  justify-content: center !important;
+++  gap: 6px !important;
+++  height: 32px !important;
+++  margin: 0 !important;
+++  padding: 0 10px !important;
+++  font-size: 13px !important;
+++  line-height: 20px !important;
+++  border-radius: 6px !important;
+++  color: var(--dsw-alias-label-secondary, #a1a1aa) !important;
+++  background: transparent !important;
+++  border: 1px solid transparent !important;
+++  flex-shrink: 0 !important;
+++}
+++
+++.agy-refresh-icon {
+++  display: inline-flex;
+++  align-items: center;
+++  justify-content: center;
+++  line-height: 1;
+++  flex-shrink: 0;
+++  width: 15px;
+++  height: 15px;
+++}
+++
+++.agy-refresh-icon svg {
+++  display: block;
+++  width: 15px;
+++  height: 15px;
++ }
++ 
++ .agy-footer-notice {
++@@ -628,7 +686,7 @@ export const SETTINGS_CSS = `
++   width: 14px;
++   left: 3px;
++   bottom: 3px;
++-  background-color: #ffffff;
+++  background-color: var(--dsw-alias-bg-body, #1a1a1a);
++   border-radius: 50%;
++   transition: 0.2s ease;
++   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
++@@ -647,9 +705,163 @@ export const SETTINGS_CSS = `
++   cursor: not-allowed;
++ }
++ 
+++/* Multi-Account Card & Radio UI */
+++.agy-account-card {
+++  display: flex;
+++  flex-direction: column;
+++  gap: 16px;
+++  padding: 20px 22px;
+++  border-radius: 16px;
+++  background: var(--dsw-alias-bg-layer-2, rgba(255, 255, 255, 0.03));
+++  border: 2px solid var(--dsw-alias-border-l2, rgba(255, 255, 255, 0.08));
+++  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+++  transition: border-color 0.2s ease, background-color 0.2s ease;
+++  user-select: none;
+++}
+++
+++.agy-account-card:not(.agy-account-active) {
+++  cursor: pointer;
+++}
+++
+++.agy-account-card:not(.agy-account-active):hover {
+++  border-color: rgba(255, 255, 255, 0.24);
+++  background: var(--dsw-alias-bg-layer-3, rgba(255, 255, 255, 0.05));
+++}
+++
+++.agy-account-card.agy-account-active {
+++  border-color: #ffffff;
+++}
+++
+++.agy-account-card-title {
+++  margin: 0;
+++  font-size: 19px;
+++  line-height: 26px;
+++  font-weight: 700;
+++  color: var(--dsw-alias-label-primary, #ffffff);
+++  letter-spacing: -0.01em;
+++  display: flex;
+++  align-items: center;
+++  gap: 8px;
+++}
+++
+++.agy-radio-circle {
+++  width: 26px;
+++  height: 26px;
+++  border-radius: 50%;
+++  border: 2.5px solid rgba(255, 255, 255, 0.65);
+++  display: flex;
+++  align-items: center;
+++  justify-content: center;
+++  flex: none;
+++  transition: border-color 0.15s ease;
+++}
+++
+++.agy-account-card:hover .agy-radio-circle {
+++  border-color: #ffffff;
+++}
+++
+++.agy-radio-circle.agy-radio-checked {
+++  border-color: #ffffff;
+++}
+++
+++.agy-radio-dot {
+++  width: 14px;
+++  height: 14px;
+++  border-radius: 50%;
+++  background: #ffffff;
+++  transition: transform 0.15s ease;
+++}
+++
+++.agy-account-actions-row {
+++  display: flex;
+++  align-items: center;
+++  justify-content: space-between;
+++  gap: 12px;
+++  margin-top: -6px;
+++  flex-wrap: nowrap;
+++}
+++
+++.agy-account-left-actions {
+++  display: flex;
+++  align-items: center;
+++  gap: 10px;
+++  flex-wrap: wrap;
+++}
+++
+++.agy-btn-relogin {
+++  background: #ffffff !important;
+++  color: #18181b !important;
+++  font-weight: 600 !important;
+++  border: none !important;
+++  height: 34px !important;
+++  padding: 0 18px !important;
+++  border-radius: 999px !important;
+++  font-size: 13px !important;
+++  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12) !important;
+++  transition: background-color 0.15s ease, opacity 0.15s ease !important;
+++  display: inline-flex !important;
+++  align-items: center !important;
+++  justify-content: center !important;
+++  text-decoration: none !important;
+++  cursor: pointer !important;
+++  white-space: nowrap !important;
+++  flex-shrink: 0 !important;
+++}
+++
+++.agy-header-relogin-btn {
+++  white-space: nowrap !important;
+++  flex: none !important;
+++  flex-shrink: 0 !important;
+++  min-width: max-content !important;
+++}
+++
+++.agy-btn-relogin:hover:not(:disabled) {
+++  background: #f4f4f5 !important;
+++}
+++
+++.agy-btn-relogin:disabled {
+++  opacity: 0.4 !important;
+++  cursor: not-allowed !important;
+++}
+++
+++.agy-btn-logout {
+++  background: #27272a !important;
+++  color: #f4f4f5 !important;
+++  font-weight: 500 !important;
+++  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+++  height: 32px !important;
+++  padding: 0 16px !important;
+++  border-radius: 999px !important;
+++  font-size: 13px !important;
+++  line-height: 20px !important;
+++  transition: background-color 0.15s ease, border-color 0.15s ease !important;
+++  display: inline-flex !important;
+++  align-items: center !important;
+++  justify-content: center !important;
+++  cursor: pointer !important;
+++  margin: 0 !important;
+++  flex-shrink: 0 !important;
+++}
+++
+++.agy-btn-logout:hover:not(:disabled) {
+++  background: #3f3f46 !important;
+++  border-color: rgba(255, 255, 255, 0.2) !important;
+++}
+++
+++.agy-btn-logout:disabled {
+++  opacity: 0.4 !important;
+++  cursor: not-allowed !important;
+++}
+++
+++.agy-pending-banner {
+++  background: rgba(59, 130, 246, 0.06);
+++  border: 1px solid rgba(59, 130, 246, 0.25);
+++}
+++
++ .agy-spin-icon {
++   display: inline-flex;
++   animation: agy-spin 1s linear infinite;
+++  transform-origin: center center;
++ }
++ 
++ @keyframes agy-spin {
++diff --git a/src/llm-adapter.ts b/src/llm-adapter.ts
++index 5ded8b2..42e3e51 100644
++--- a/src/llm-adapter.ts
+++++ b/src/llm-adapter.ts
++@@ -149,7 +149,7 @@ export class AntigravityAdapter extends LlmAdapter {
++ 
++   override providerInfo(provider: string): LlmProviderInfo {
++     if (provider !== ANTIGRAVITY_PROVIDER) throw new LlmError('Unknown Antigravity provider route', 'NO_ADAPTER')
++-    return { id: ANTIGRAVITY_PROVIDER, name: 'Google Antigravity' }
+++    return { id: ANTIGRAVITY_PROVIDER, name: 'Antigravity' }
++   }
++ 
++   override providerRetryPolicy(): ReturnType<typeof resolveRetryPolicy> {
++diff --git a/src/oauth-flow.ts b/src/oauth-flow.ts
++index 369b5de..13152c8 100644
++--- a/src/oauth-flow.ts
+++++ b/src/oauth-flow.ts
++@@ -478,13 +478,55 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
++     const expiresIn = typeof payload.expires_in === 'number' && Number.isFinite(payload.expires_in) && payload.expires_in > 0
++       ? payload.expires_in
++       : 3_600
+++    let email = extractEmailFromIdToken(payload.id_token)
+++    if (email === undefined && typeof payload.email === 'string' && payload.email.includes('@')) {
+++      email = payload.email
+++    }
+++    if (email === undefined) {
+++      email = await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
+++    }
++     return {
++       accessToken: payload.access_token,
++       refreshToken: payload.refresh_token,
++       expiresAt: clock.now() + expiresIn * 1000,
++-      ...typeof payload.email === 'string' ? { email: payload.email } : {},
+++      ...(email === undefined ? {} : { email }),
+++    }
+++  }
+++}
+++
+++function extractEmailFromIdToken(idToken: unknown): string | undefined {
+++  if (typeof idToken !== 'string') return undefined
+++  const parts = idToken.split('.')
+++  const payloadPart = parts[1]
+++  if (payloadPart === undefined) return undefined
+++  try {
+++    const raw = Buffer.from(payloadPart, 'base64url').toString('utf8')
+++    const parsed: unknown = JSON.parse(raw)
+++    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
+++      return parsed.email
+++    }
+++  } catch {
+++    return undefined
+++  }
+++  return undefined
+++}
+++
+++async function fetchUserInfoEmail(fetchImpl: typeof fetch, accessToken: string, signal: AbortSignal): Promise<string | undefined> {
+++  try {
+++    const res = await fetchImpl('https://www.googleapis.com/oauth2/v3/userinfo', {
+++      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+++      signal,
+++    })
+++    if (!res.ok) return undefined
+++    const text = await res.text()
+++    const parsed: unknown = JSON.parse(text)
+++    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
+++      return parsed.email
++     }
+++  } catch {
+++    return undefined
++   }
+++  return undefined
++ }
++ 
++ function assertCallbackRequest(request: LoopbackCallbackRequest): void {
++diff --git a/src/rpc-contract.ts b/src/rpc-contract.ts
++index ce3f2f3..162780c 100644
++--- a/src/rpc-contract.ts
+++++ b/src/rpc-contract.ts
++@@ -33,9 +33,11 @@ export interface AntigravityAuthRpcClient {
++   login(signal?: AbortSignal): Promise<RpcResult<LoginStartResult>>
++   cancelLogin(signal?: AbortSignal): Promise<RpcResult<LoginActionResult>>
++   logout(signal?: AbortSignal): Promise<RpcResult<{ state: 'logged-out' }>>
+++  switchAccount?(accountId: string, signal?: AbortSignal): Promise<RpcResult<{ status: AntigravityStatusView }>>
+++  removeAccount?(accountId: string, signal?: AbortSignal): Promise<RpcResult<{ status: AntigravityStatusView }>>
++   revoke(signal?: AbortSignal): Promise<RpcResult<RevokeActionResult>>
++   models(signal?: AbortSignal, force?: boolean): Promise<RpcResult<AntigravityModelCatalogView>>
++-  usage?(signal?: AbortSignal, force?: boolean): Promise<RpcResult<QuotaStatusView>>
+++  usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<RpcResult<QuotaStatusView>>
++ }
++ 
++ export interface AntigravityAuthConnectionRpc {
++@@ -58,9 +60,17 @@ export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc
++     login: signal => callValidated(rpc, 'login', {}, signal, parseLoginResult),
++     cancelLogin: signal => callValidated(rpc, 'cancel', {}, signal, parseActionResult),
++     logout: signal => callValidated(rpc, 'logout', {}, signal, parseLogoutResult),
+++    switchAccount: (accountId, signal) => callValidated(rpc, 'switch-account', { accountId }, signal, value => {
+++      const status = parseStatusResult(value)
+++      return status === undefined ? undefined : { status }
+++    }),
+++    removeAccount: (accountId, signal) => callValidated(rpc, 'remove-account', { accountId }, signal, value => {
+++      const status = parseStatusResult(value)
+++      return status === undefined ? undefined : { status }
+++    }),
++     revoke: signal => callValidated(rpc, 'revoke', { confirmed: true }, signal, parseRevokeResult),
++     models: (signal, force = false) => callValidated(rpc, 'models', { force }, signal, parseModelCatalogResult),
++-    usage: (signal, force = false) => callValidated(rpc, 'usage', { force }, signal, parseUsageResult),
+++    usage: (signal, force = false, accountId) => callValidated(rpc, 'usage', { force, ...(accountId === undefined ? {} : { accountId }) }, signal, parseUsageResult),
++   }
++ }
++ 
++@@ -74,11 +84,15 @@ async function callValidated<T>(
++   let result: RpcResult<unknown>
++   try {
++     result = await rpc.call(ANTIGRAVITY_AUTH_RPC_CHANNEL, `${ANTIGRAVITY_AUTH_RPC_NAMESPACE}/${endpoint}`, payload, signal)
++-  } catch {
+++  } catch (cause) {
+++    console.warn(`antigravity-auth: rpc.call ${endpoint} failed:`, cause)
++     return invalidResponse(endpoint)
++   }
++   if (!result.ok) return sanitizeFailure(result, endpoint)
++   const value = parse(result.value)
+++  if (value === undefined) {
+++    console.warn(`antigravity-auth: parse ${endpoint} result validation failed:`, result.value)
+++  }
++   return value === undefined ? invalidResponse(endpoint) : { ok: true, value }
++ }
++ 
++@@ -142,7 +156,7 @@ export function parseUsageResult(value: unknown): QuotaStatusView | undefined {
++   if (value.checkedAt !== undefined && !isIsoTime(value.checkedAt)) return undefined
++   if (value.state === 'available' && value.groups === undefined) return undefined
++   if (value.groups !== undefined) {
++-    if (!Array.isArray(value.groups) || value.groups.length === 0 || value.groups.length > 2) return undefined
+++    if (!Array.isArray(value.groups) || value.groups.length > 2) return undefined
++     const groups: QuotaGroupView[] = []
++     const groupNames = new Set<string>()
++     for (const rawGroup of value.groups) {
++@@ -184,6 +198,8 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
++       'credential',
++       'revoke',
++       'capabilities',
+++      'accounts',
+++      'activeAccountId',
++     ])
++     || value.pluginId !== 'dsh-antigravity-auth'
++     || value.phase !== 'bootstrap'
++@@ -209,6 +225,22 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
++   }
++   if (seen.size !== CAPABILITY_ROW_IDS.length || CAPABILITY_ROW_IDS.some(id => !seen.has(id))) return undefined
++ 
+++  let accounts: import('./status.ts').AccountSummaryView[] | undefined
+++  if (value.accounts !== undefined) {
+++    if (!Array.isArray(value.accounts)) return undefined
+++    accounts = []
+++    for (const acc of value.accounts) {
+++      const parsed = parseAccountSummary(acc)
+++      if (parsed === undefined) return undefined
+++      accounts.push(parsed)
+++    }
+++  }
+++
+++  const activeAccountId = value.activeAccountId
+++  if (activeAccountId !== undefined && (typeof activeAccountId !== 'string' || !isBoundedSafeText(activeAccountId, 4096))) {
+++    return undefined
+++  }
+++
++   return {
++     pluginId: 'dsh-antigravity-auth',
++     phase: 'bootstrap',
++@@ -220,6 +252,26 @@ function parseStatus(value: unknown): AntigravityStatusView | undefined {
++     ...(credential === undefined ? {} : { credential }),
++     ...(revoke === undefined ? {} : { revoke }),
++     capabilities,
+++    ...(accounts === undefined ? {} : { accounts }),
+++    ...(activeAccountId === undefined ? {} : { activeAccountId }),
+++  }
+++}
+++
+++function parseAccountSummary(value: unknown): import('./status.ts').AccountSummaryView | undefined {
+++  if (!isRecord(value) || !hasAllowedKeys(value, ['id', 'email', 'maskedEmail', 'projectAvailable', 'active', 'addedAt'])) return undefined
+++  if (typeof value.id !== 'string' || !isBoundedSafeText(value.id, 4096)
+++    || typeof value.active !== 'boolean') return undefined
+++  if (value.projectAvailable !== undefined && typeof value.projectAvailable !== 'boolean') return undefined
+++  if (value.email !== undefined && (typeof value.email !== 'string' || !isBoundedSafeText(value.email, 4096))) return undefined
+++  if (value.maskedEmail !== undefined && (typeof value.maskedEmail !== 'string' || !isBoundedSafeText(value.maskedEmail, 4096))) return undefined
+++  if (value.addedAt !== undefined && (typeof value.addedAt !== 'string' || !isIsoTime(value.addedAt))) return undefined
+++  return {
+++    id: value.id,
+++    active: value.active,
+++    ...(value.projectAvailable === undefined ? {} : { projectAvailable: value.projectAvailable }),
+++    ...(value.email === undefined ? {} : { email: value.email }),
+++    ...(value.maskedEmail === undefined ? {} : { maskedEmail: value.maskedEmail }),
+++    ...(value.addedAt === undefined ? {} : { addedAt: value.addedAt }),
++   }
++ }
++ 
++diff --git a/src/rpc.ts b/src/rpc.ts
++index 3489c10..a97d875 100644
++--- a/src/rpc.ts
+++++ b/src/rpc.ts
++@@ -7,12 +7,13 @@ import type { BootstrapStatusService } from './status.ts'
++ import type { QuotaStatusView } from './quota.ts'
++ import { isSafeRpcErrorCode, safeRpcErrorMessage } from './rpc-vocabulary.ts'
++ import type { AntigravityModelCatalogService } from './model-catalog.ts'
+++import { isBoundedSafeText } from './safe-text.ts'
++ 
++ export { ANTIGRAVITY_AUTH_RPC_CHANNEL, ANTIGRAVITY_AUTH_RPC_NAMESPACE } from './rpc-contract.ts'
++ 
++ /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
++ export async function handleAntigravityAuthRpc(
++-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
+++  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke' | 'switchAccount' | 'removeAccount'> & { usage?: (signal?: AbortSignal, force?: boolean, accountId?: string) => Promise<QuotaStatusView> },
++   endpoint: string,
++   payload: unknown,
++   signal?: AbortSignal,
++@@ -36,9 +37,9 @@ export async function handleAntigravityAuthRpc(
++         : modelCatalog.catalogSnapshot() }
++     }
++     if (endpoint === 'usage') {
++-      if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force: boolean }')
+++      if (!isRefreshPayload(payload)) return badRequest('usage expects {} or { force?: boolean, accountId?: string }')
++       if (service.usage === undefined) return { ok: true, value: { state: 'protocol-drift' as const } }
++-      return { ok: true, value: await service.usage(signal, payload.force) }
+++      return { ok: true, value: await service.usage(signal, payload.force, payload.accountId) }
++     }
++     if (endpoint === 'acknowledge-risk') {
++       if (!isAcknowledgement(payload)) return badRequest('acknowledge-risk expects { acknowledge: true }')
++@@ -56,6 +57,16 @@ export async function handleAntigravityAuthRpc(
++       if (!isEmptyRecord(payload)) return badRequest('logout expects an empty payload')
++       return { ok: true, value: await service.logout() }
++     }
+++    if (endpoint === 'switch-account') {
+++      if (!isAccountPayload(payload)) return badRequest('switch-account expects { accountId: string }')
+++      if (typeof service.switchAccount !== 'function') return badRequest('switch-account is not supported')
+++      return { ok: true, value: { status: await service.switchAccount(payload.accountId) } }
+++    }
+++    if (endpoint === 'remove-account') {
+++      if (!isAccountPayload(payload)) return badRequest('remove-account expects { accountId: string }')
+++      if (typeof service.removeAccount !== 'function') return badRequest('remove-account is not supported')
+++      return { ok: true, value: { status: await service.removeAccount(payload.accountId) } }
+++    }
++     if (endpoint === 'revoke') {
++       if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
++       return { ok: true, value: await service.revoke(true, signal) }
++@@ -66,6 +77,14 @@ export async function handleAntigravityAuthRpc(
++   }
++ }
++ 
+++function isAccountPayload(value: unknown): value is { accountId: string } {
+++  return isRecord(value)
+++    && Object.keys(value).length === 1
+++    && typeof value.accountId === 'string'
+++    && value.accountId.length > 0
+++    && value.accountId.length <= 4096
+++}
+++
++ function badRequest(message: string): RpcResult<never> {
++   return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
++ }
++@@ -96,10 +115,11 @@ function isEmptyRecord(value: unknown): value is Record<string, never> {
++   return isRecord(value) && Object.keys(value).length === 0
++ }
++ 
++-function isRefreshPayload(value: unknown): value is { force?: boolean } {
+++function isRefreshPayload(value: unknown): value is { force?: boolean; accountId?: string } {
++   return isRecord(value)
++-    && Object.keys(value).every(key => key === 'force')
+++    && Object.keys(value).every(key => key === 'force' || key === 'accountId')
++     && (value.force === undefined || typeof value.force === 'boolean')
+++    && (value.accountId === undefined || (typeof value.accountId === 'string' && isBoundedSafeText(value.accountId, 4096)))
++ }
++ 
++ function isAcknowledgement(value: unknown): value is { acknowledge: true } {
++diff --git a/src/status.ts b/src/status.ts
++index 74b521c..9eee5f4 100644
++--- a/src/status.ts
+++++ b/src/status.ts
++@@ -56,6 +56,15 @@ export interface CapabilityGateStatus {
++   readonly reasonCode: CapabilityGateReasonCode
++ }
++ 
+++export interface AccountSummaryView {
+++  readonly id: string
+++  readonly email?: string
+++  readonly maskedEmail?: string
+++  readonly projectAvailable?: boolean
+++  readonly active: boolean
+++  readonly addedAt?: string
+++}
+++
++ export interface AntigravityStatusView {
++   readonly pluginId: typeof ANTIGRAVITY_PLUGIN_ID
++   readonly phase: 'bootstrap'
++@@ -68,6 +77,8 @@ export interface AntigravityStatusView {
++   readonly credential?: CredentialStatusView
++   readonly revoke?: RevokeStatusView
++   readonly capabilities: readonly CapabilityGateStatus[]
+++  readonly accounts?: readonly AccountSummaryView[]
+++  readonly activeAccountId?: string
++ }
++ 
++ export interface RiskAcknowledgementResult {
++@@ -80,9 +91,11 @@ export interface BootstrapStatusService {
++   startLogin(): Promise<LoginStartResult>
++   completeCallback(callbackUrl: string): Promise<LoginCompletionResult>
++   cancelLogin(): Promise<{ readonly phase: LoginPhase; readonly errorCode?: LoginErrorCode }>
++-  logout(): Promise<LogoutResult>
+++  logout(accountId?: string): Promise<LogoutResult>
+++  switchAccount?(accountId: string): Promise<AntigravityStatusView>
+++  removeAccount?(accountId: string): Promise<AntigravityStatusView>
++   revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
++-  usage?(signal?: AbortSignal, force?: boolean): Promise<QuotaStatusView>
+++  usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<QuotaStatusView>
++   dispose(): Promise<void>
++ }
++ 
++@@ -106,6 +119,8 @@ export function createStatusView(
++   credential?: CredentialStatusView,
++   revoke?: RevokeStatusView,
++   gates: CapabilityGateEvidence = {},
+++  accounts?: readonly AccountSummaryView[],
+++  activeAccountId?: string,
++ ): AntigravityStatusView {
++   return Object.freeze({
++     pluginId: ANTIGRAVITY_PLUGIN_ID,
++@@ -118,6 +133,8 @@ export function createStatusView(
++     ...(credential === undefined ? {} : { credential: Object.freeze({ ...credential }) }),
++     ...(revoke === undefined ? {} : { revoke: Object.freeze({ ...revoke }) }),
++     capabilities: Object.freeze(capabilitiesFor(login, gates).map(capability => Object.freeze({ ...capability }))),
+++    ...(accounts === undefined ? {} : { accounts: Object.freeze(accounts.map(a => Object.freeze({ ...a }))) }),
+++    ...(activeAccountId === undefined ? {} : { activeAccountId }),
++   })
++ }
++ 
++diff --git a/tests/auth-service.spec.ts b/tests/auth-service.spec.ts
++index f51fcba..db155ed 100644
++--- a/tests/auth-service.spec.ts
+++++ b/tests/auth-service.spec.ts
++@@ -67,9 +67,8 @@ describe('Antigravity auth service', () => {
++     })
++ 
++     const record = await store.read()
++-    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'a***@example.com' })
+++    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'alice@example.com' })
++     expect(JSON.stringify(record)).not.toContain('access-secret')
++-    expect(JSON.stringify(record)).not.toContain('alice@example.com')
++     expect(JSON.stringify(await service.status())).not.toContain('project-secret')
++     expect(await service.status()).toMatchObject({
++       riskAcknowledged: true,
++@@ -344,4 +343,27 @@ describe('Antigravity auth service', () => {
++     await expect(service.status()).resolves.toMatchObject({ login: { configured: true, projectAvailable: true } })
++     await service.dispose()
++   })
+++
+++  it('supports listing multiple accounts, switching active account, and removing account', async () => {
+++    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+++    await store.commit({ refreshToken: 'refresh-1', projectId: 'project-1', email: 'user1@example.com' })
+++    await store.commit({ refreshToken: 'refresh-2', projectId: 'project-2', email: 'user2@example.com' })
+++
+++    const service = createAntigravityAuthService({ store })
+++    const status = await service.status()
+++    expect(status.accounts).toHaveLength(2)
+++    expect(status.activeAccountId).toBe('user2@example.com')
+++    expect(status.login.maskedEmail).toBe('u***@example.com')
+++
+++    // Switch account to user1
+++    const switchedStatus = await service.switchAccount('user1@example.com')
+++    expect(switchedStatus.activeAccountId).toBe('user1@example.com')
+++
+++    // Remove user1
+++    const remainingStatus = await service.removeAccount('user1@example.com')
+++    expect(remainingStatus.accounts).toHaveLength(1)
+++    expect(remainingStatus.activeAccountId).toBe('user2@example.com')
+++
+++    await service.dispose()
+++  })
++ })
++diff --git a/tests/auth-store.spec.ts b/tests/auth-store.spec.ts
++index 7638238..847bf8a 100644
++--- a/tests/auth-store.spec.ts
+++++ b/tests/auth-store.spec.ts
++@@ -1,4 +1,4 @@
++-import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+++import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
++ import { tmpdir } from 'node:os'
++ import { join } from 'node:path'
++ import { afterEach, describe, expect, it } from 'vitest'
++@@ -114,4 +114,58 @@ describe('single-account Antigravity auth store', () => {
++       expect(String(error)).not.toContain(path)
++     }
++   })
+++
+++  it('supports multiple accounts, switching active account, and removing accounts', async () => {
+++    const { path } = await storeFixture()
+++    const store = createAuthStore(path)
+++
+++    const account1 = await store.commit({ refreshToken: 'refresh-1', projectId: 'proj-1', email: 'account1@example.com' })
+++    expect(account1.email).toBe('account1@example.com')
+++    expect(await store.listAccounts()).toHaveLength(1)
+++
+++    const account2 = await store.commit({ refreshToken: 'refresh-2', projectId: 'proj-2', email: 'account2@example.com' })
+++    expect(account2.email).toBe('account2@example.com')
+++    expect(await store.listAccounts()).toHaveLength(2)
+++    expect((await store.read())?.email).toBe('account2@example.com')
+++
+++    // Switch back to account 1
+++    const switched = await store.setActiveAccount('account1@example.com')
+++    expect(switched?.email).toBe('account1@example.com')
+++    expect((await store.read())?.email).toBe('account1@example.com')
+++
+++    // Remove account 1 -> active should fallback to account 2
+++    expect(await store.removeAccount('account1@example.com')).toBe(true)
+++    expect(await store.listAccounts()).toHaveLength(1)
+++    expect((await store.read())?.email).toBe('account2@example.com')
+++  })
+++
+++  it('seamlessly reads legacy single-account auth.json format', async () => {
+++    const { directory, path } = await storeFixture()
+++    const store = createAuthStore(path)
+++
+++    // Write a legacy single-account file
+++    await chmod(directory, 0o700)
+++    await mkdir(join(directory, 'nested'), { recursive: true, mode: 0o700 })
+++    await writeFile(path, JSON.stringify({
+++      version: 1,
+++      refreshToken: 'legacy-refresh-token',
+++      projectId: 'legacy-project',
+++      email: 'legacy@example.com',
+++      revision: 3,
+++      updatedAt: '2026-01-01T00:00:00.000Z',
+++      lineage: 'legacy-lineage',
+++    }), { mode: 0o600 })
+++
+++    const read = await store.read()
+++    expect(read).toMatchObject({
+++      version: 1,
+++      refreshToken: 'legacy-refresh-token',
+++      projectId: 'legacy-project',
+++      email: 'legacy@example.com',
+++      revision: 3,
+++    })
+++    const accounts = await store.listAccounts()
+++    expect(accounts).toHaveLength(1)
+++    expect(accounts[0]?.email).toBe('legacy@example.com')
+++  })
++ })
++diff --git a/tests/client-settings.client.spec.tsx b/tests/client-settings.client.spec.tsx
++index 0c8ffe2..28cebfd 100644
++--- a/tests/client-settings.client.spec.tsx
+++++ b/tests/client-settings.client.spec.tsx
++@@ -83,7 +83,7 @@ describe('Antigravity bootstrap settings', () => {
++ 
++     expect(await screen.findByRole('heading', { name: en.title })).toBeTruthy()
++     expect(screen.queryByLabelText(/token|client secret|endpoint/i)).toBeNull()
++-    expect(screen.queryByRole('button', { name: /add|switch|rotate/i })).toBeNull()
+++    expect(screen.queryByRole('textbox')).toBeNull()
++     expect(screen.getByRole('button', { name: en.login })).toHaveProperty('disabled', false)
++ 
++     fireEvent.click(screen.getByRole('button', { name: en.login }))
++@@ -160,19 +160,29 @@ describe('Antigravity bootstrap settings', () => {
++   })
++ 
++   describe.each([
++-    { language: 'English', copy: en, dayUnit: 'd', resetPrefix: 'Refreshes in ', resetSuffix: '' },
++-    { language: 'Chinese', copy: zh, dayUnit: '天', resetPrefix: '', resetSuffix: ' 后刷新' },
++-  ])('$language quota reset countdown', ({ copy, dayUnit, resetPrefix, resetSuffix }) => {
+++    {
+++      language: 'English',
+++      copy: en,
+++      weeklyExpected: (d: number, h: number, m: number) => `${d}d ${h}h ${m}m after refresh`,
+++      fiveHExpected: (h: number, m: number, s: number) => `${h}h ${m}m ${s}s after refresh`,
+++    },
+++    {
+++      language: 'Chinese',
+++      copy: zh,
+++      weeklyExpected: (d: number, h: number, m: number) => `${d}天${h}小时${m}分后刷新`,
+++      fiveHExpected: (h: number, m: number, s: number) => `${h}小时${m}分${s}秒后刷新`,
+++    },
+++  ])('$language quota reset countdown', ({ copy, weeklyExpected, fiveHExpected }) => {
++     it.each([
++-      { minutes: 94 * 60 + 43, expected: `3${dayUnit} 22h 43m` },
++-      { minutes: 48 * 60, expected: `2${dayUnit} 0h 0m` },
++-      { minutes: 24 * 60, expected: `1${dayUnit} 0h 0m` },
++-      { minutes: 24 * 60 - 1, expected: '23h 59m' },
++-      { minutes: 60, expected: '1h 0m' },
++-      { minutes: 43, expected: '43m' },
++-      { minutes: 0.5, expected: '0m' },
++-      { minutes: 0, expected: '0m' },
++-      { minutes: -1, expected: '0m' },
+++      { minutes: 94 * 60 + 43, expected: (fn: typeof weeklyExpected) => fn(3, 22, 43) },
+++      { minutes: 48 * 60, expected: (fn: typeof weeklyExpected) => fn(2, 0, 0) },
+++      { minutes: 24 * 60, expected: (fn: typeof weeklyExpected) => fn(1, 0, 0) },
+++      { minutes: 24 * 60 - 1, expected: (fn: typeof weeklyExpected) => fn(0, 23, 59) },
+++      { minutes: 60, expected: (fn: typeof weeklyExpected) => fn(0, 1, 0) },
+++      { minutes: 43, expected: (fn: typeof weeklyExpected) => fn(0, 0, 43) },
+++      { minutes: 0.5, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
+++      { minutes: 0, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
+++      { minutes: -1, expected: (fn: typeof weeklyExpected) => fn(0, 0, 0) },
++     ])('renders $minutes remaining minutes as $expected', async ({ minutes, expected }) => {
++       const now = Date.parse('2026-09-10T00:00:00.000Z')
++       vi.spyOn(Date, 'now').mockReturnValue(now)
++@@ -198,8 +208,8 @@ describe('Antigravity bootstrap settings', () => {
++ 
++       render(<AntigravityAuthSettings rpc={rpc} t={key => copy[key]} subscribe={() => () => {}} />)
++ 
++-      expect(await screen.findByText(`22% ${copy.remaining} · ${resetPrefix}${expected}${resetSuffix}`)).toBeTruthy()
++-      expect(screen.getByText(`85% ${copy.remaining} · ${resetPrefix}5h 0m${resetSuffix}`)).toBeTruthy()
+++      expect(await screen.findByText(expected(weeklyExpected))).toBeTruthy()
+++      expect(screen.getByText(fiveHExpected(5, 0, 0))).toBeTruthy()
++     })
++   })
++ 
++@@ -254,7 +264,7 @@ describe('Antigravity bootstrap settings', () => {
++   it('renders safe pending, success, cancelled, expired, port-conflict, and failure states', async () => {
++     const cases = [
++       ['pending', { phase: 'pending', configured: false, projectAvailable: false, authorizationUrl: `https://accounts.google.com/o/oauth2/v2/auth?state=${'a'.repeat(43)}`, expiresAt: '2026-08-21T00:00:00.000Z' }, en.openAuthorization],
++-      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.relogin],
+++      ['success', { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'a***@example.com' }, en.addAccount],
++       ['cancelled', { phase: 'cancelled', configured: false, projectAvailable: false, errorCode: 'cancelled' }, en.login],
++       ['expired', { phase: 'expired', configured: false, projectAvailable: false, errorCode: 'expired' }, en.loginExpired],
++       ['port-conflict', { phase: 'port-conflict', configured: false, projectAvailable: false, errorCode: 'port-conflict' }, en.loginPortConflict],
++@@ -308,7 +318,7 @@ describe('Antigravity bootstrap settings', () => {
++     await vi.waitFor(() => expect(status).toHaveBeenCalledOnce())
++     await vi.advanceTimersByTimeAsync(1_000)
++     await vi.waitFor(() => expect(status).toHaveBeenCalledTimes(2))
++-    expect(screen.getByText(en.relogin)).toBeTruthy()
+++    expect(screen.getByText(en.addAccount)).toBeTruthy()
++     unmount()
++     vi.useRealTimers()
++   })
++@@ -352,4 +362,62 @@ describe('Antigravity bootstrap settings', () => {
++     unmount()
++     expect(actionSignal?.aborted).toBe(true)
++   })
+++
+++  it('renders multi-account list with radio selection and allows switching and removing accounts', async () => {
+++    const statusWithAccounts = createStatusView(
+++      true,
+++      { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'u***1@example.com' },
+++      { state: 'logged-in', configured: true },
+++      undefined,
+++      {},
+++      [
+++        { id: 'user1@example.com', email: 'user1@example.com', maskedEmail: 'u***1@example.com', projectAvailable: true, active: true },
+++        { id: 'user2@example.com', email: 'user2@example.com', maskedEmail: 'u***2@example.com', projectAvailable: true, active: false },
+++      ],
+++      'user1@example.com',
+++    )
+++    const switchedStatus = createStatusView(
+++      true,
+++      { phase: 'success', configured: true, projectAvailable: true, maskedEmail: 'u***2@example.com' },
+++      { state: 'logged-in', configured: true },
+++      undefined,
+++      {},
+++      [
+++        { id: 'user1@example.com', email: 'user1@example.com', maskedEmail: 'u***1@example.com', projectAvailable: true, active: false },
+++        { id: 'user2@example.com', email: 'user2@example.com', maskedEmail: 'u***2@example.com', projectAvailable: true, active: true },
+++      ],
+++      'user2@example.com',
+++    )
+++    const rpc = rpcFixture()
+++    rpc.status = vi.fn().mockResolvedValue({ ok: true, value: { status: statusWithAccounts } })
+++    rpc.switchAccount = vi.fn().mockResolvedValue({ ok: true, value: { status: switchedStatus } })
+++    rpc.removeAccount = vi.fn().mockResolvedValue({ ok: true, value: { status: switchedStatus } })
+++
+++    const { unmount } = render(
+++      <AntigravityAuthSettings rpc={rpc} t={key => en[key]} subscribe={() => () => {}} />,
+++    )
+++
+++    expect(await screen.findByText('user1@example.com')).toBeTruthy()
+++    expect(screen.getByText('user2@example.com')).toBeTruthy()
+++
+++    // Check radio checked states
+++    const account1Element = screen.getByText('user1@example.com').closest('.agy-account-item')
+++    const account2Element = screen.getByText('user2@example.com').closest('.agy-account-item')
+++    expect(account1Element?.getAttribute('aria-checked')).toBe('true')
+++    expect(account2Element?.getAttribute('aria-checked')).toBe('false')
+++
+++    // Click account 2 to switch
+++    expect(account2Element).toBeTruthy()
+++    fireEvent.click(account2Element!)
+++    await waitFor(() => expect(rpc.switchAccount).toHaveBeenCalledWith('user2@example.com', expect.any(AbortSignal)))
+++
+++    // Click logout button on account 1 (sorted after active account user2)
+++    const account1Item = screen.getByText('user1@example.com').closest('.agy-account-item')!
+++    const logoutBtn = account1Item.querySelector('.agy-btn-logout') as HTMLButtonElement
+++    expect(logoutBtn).toBeTruthy()
+++    fireEvent.click(logoutBtn)
+++    await waitFor(() => expect(rpc.removeAccount).toHaveBeenCalledWith('user1@example.com', expect.any(AbortSignal)))
+++
+++    unmount()
+++  })
++ })
++diff --git a/tests/oauth-flow.spec.ts b/tests/oauth-flow.spec.ts
++index 830769e..73229c0 100644
++--- a/tests/oauth-flow.spec.ts
+++++ b/tests/oauth-flow.spec.ts
++@@ -331,4 +331,24 @@ describe('Antigravity OAuth flow', () => {
++       expect(String(error)).not.toContain('private-token-response')
++     }
++   })
+++
+++  it('extracts email from id_token in token exchange or falls back to userinfo', async () => {
+++    const fakePayload = Buffer.from(JSON.stringify({ email: 'bob@example.com' })).toString('base64url')
+++    const idToken = `header.${fakePayload}.signature`
+++    const fetchImpl = vi.fn(async () => {
+++      return new Response(JSON.stringify({
+++        access_token: 'access-secret',
+++        refresh_token: 'refresh-secret',
+++        expires_in: 60,
+++        id_token: idToken,
+++      }))
+++    })
+++    const exchange = createGoogleTokenExchanger(fetchImpl as typeof fetch, {
+++      now: () => 1_000,
+++      setTimeout,
+++      clearTimeout,
+++    })
+++    const result = await exchange({ code: 'authorization-code', verifier: 'pkce-verifier', signal: new AbortController().signal })
+++    expect(result.email).toBe('bob@example.com')
+++  })
++ })
++diff --git a/tests/rpc.spec.ts b/tests/rpc.spec.ts
++index 87029d8..2c9bfec 100644
++--- a/tests/rpc.spec.ts
+++++ b/tests/rpc.spec.ts
++@@ -388,4 +388,21 @@ describe('Antigravity login RPC', () => {
++     })
++     expect(JSON.stringify([malformed, sanitized, rejected])).not.toMatch(/secret|callbackUrl|access-token/i)
++   })
+++
+++  it('handles switch-account and remove-account RPC endpoints', async () => {
+++    const service = createBootstrapStatusService()
+++    service.switchAccount = vi.fn().mockResolvedValue(createStatusView(true, { phase: 'success', configured: true, projectAvailable: true }))
+++    service.removeAccount = vi.fn().mockResolvedValue(createStatusView(true, { phase: 'idle', configured: false, projectAvailable: false }))
+++
+++    const switchResult = await handleAntigravityAuthRpc(service, 'switch-account', { accountId: 'acc-1' }, signal)
+++    expect(switchResult).toMatchObject({ ok: true })
+++    expect(service.switchAccount).toHaveBeenCalledWith('acc-1')
+++
+++    const removeResult = await handleAntigravityAuthRpc(service, 'remove-account', { accountId: 'acc-1' }, signal)
+++    expect(removeResult).toMatchObject({ ok: true })
+++    expect(service.removeAccount).toHaveBeenCalledWith('acc-1')
+++
+++    const badSwitch = await handleAntigravityAuthRpc(service, 'switch-account', {}, signal)
+++    expect(badSwitch).toMatchObject({ ok: false, error: { code: 'bad-request' } })
+++  })
++ })
+diff --git a/sync.sh b/sync.sh
+new file mode 100755
+index 0000000..e3be4f8
+--- /dev/null
++++ b/sync.sh
+@@ -0,0 +1,93 @@
++#!/usr/bin/env bash
++#==============================================================================
++# sync.sh — dsh-antigravity-auth 上游同步脚本
++#==============================================================================
++#
++# 功能：
++#   将当前 custom 分支与上游 main 分支合并，采用 Patch Rebase 方案：
++#   先重置到上游最新，再 rebase 本地修改，若有冲突则手动解决。
++#
++# 作用范围：
++#   - 仅针对当前仓库（dsh-antigravity-auth）
++#   - 需要 remote 配置：upstream（原上游）、origin（你的 fork）
++#   - 需要分支：custom（本地修改）、main（跟踪 upstream/main）
++#
++# 实现策略（Patch Rebase 方案）：
++#   1. git fetch upstream — 拉取上游最新
++#   2. git checkout main && git reset --hard upstream/main — 重置 main 到上游最新
++#   3. git checkout custom — 切回 custom 分支
++#   4. git rebase main — 将本地修改 rebase 到上游最新之上
++#      - 如果 patch 应用失败（冲突）：
++#        a. 暂停，提示手动解决冲突
++#        b. 解决后 git add . && git rebase --continue
++#        c. 或者 git rebase --abort 放弃本次同步
++#   5. 重新生成 sync.patch
++#   6. git push --force-with-lease origin custom — 同步到你的 fork
++#
++# 为什么用 patch 方案而非 -X ours：
++#   -X ours 会静默丢弃上游对同一行的修改，导致有用的上游更新丢失
++#   patch rebase 方案：
++#     - 上游无冲突的修改自动合并
++#     - 有冲突时暂停，由你决定保留哪些修改
++#     - 合并后可以重新生成 patch，确保 patch 文件永远可用
++#
++# 后续扩展：
++#   - 新增本地修改后，先 commit 到 custom 分支，再运行本脚本
++#   - 如果 patch 文件过期，运行 ./sync.sh 会自动重新生成
++#   - 要在新机器重建：clone → git checkout -b custom → git apply sync.patch
++#
++#==============================================================================
++
++set -e
++
++SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
++cd "$SCRIPT_DIR"
++
++REPO_NAME="$(basename "$SCRIPT_DIR")"
++
++echo "=== 同步 $REPO_NAME (Patch Rebase 方案) ==="
++
++# Step 1: 拉取上游最新
++echo "[1/5] 拉取上游最新代码..."
++git fetch upstream
++
++# Step 2: 重置 main 到上游最新
++echo "[2/5] 重置 main 到 upstream/main..."
++git checkout main
++git reset --hard upstream/main
++
++# Step 3: 切回 custom 分支
++echo "[3/5] 切换到 custom 分支..."
++git checkout custom
++
++# Step 4: Rebase 到 main（本地修改应用到上游最新之上）
++echo "[4/5] Rebase custom 到 main（自动应用本地修改）..."
++if git rebase main; then
++    echo "✅ Rebase 成功，本地修改已应用到上游最新"
++
++    # 重新生成 patch
++    echo "[5/5] 重新生成 sync.patch..."
++    git diff upstream/main...custom > "$SCRIPT_DIR/sync.patch"
++    echo "✅ sync.patch 已更新 ($(wc -l < "$SCRIPT_DIR/sync.patch") 行)"
++
++    # 推送到 fork
++    read -p "是否推送到 origin/custom? [y/N] " -n 1 -r < /dev/tty
++    echo
++    if [[ $REPLY =~ ^[Yy]$ ]]; then
++        git push --force-with-lease origin custom
++        echo "✅ 已推送到 origin/custom"
++    else
++        echo "跳过推送"
++    fi
++else
++    echo "❌ Rebase 冲突！请手动解决冲突后运行:"
++    echo "   git add . && git rebase --continue"
++    echo ""
++    echo "   # 解决后重新生成 patch:"
++    echo "   git diff upstream/main...custom > sync.patch"
++    echo ""
++    echo "   或者放弃本次同步: git rebase --abort"
++    exit 1
++fi
++
++echo "=== $REPO_NAME 同步完成 ==="
 diff --git a/tests/auth-service.spec.ts b/tests/auth-service.spec.ts
 index f51fcba..db155ed 100644
 --- a/tests/auth-service.spec.ts
