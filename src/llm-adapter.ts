@@ -71,6 +71,11 @@ const MAX_PROVIDER_ERROR_BYTES = 64 * 1024
 const MAX_PROVIDER_ERROR_FRAME_BYTES = 16 * 1024
 const MAX_PROVIDER_ERROR_JSON_DEPTH = 8
 const MAX_PROVIDER_PARTS = 4096
+// A capacity-exhausted 503 clears on its own; two short waits absorb the blip
+// without holding a turn open long enough to look hung.
+const MAX_CAPACITY_RETRIES = 2
+const CAPACITY_RETRY_BASE_DELAY_MS = 1500
+const CAPACITY_RETRY_MAX_DELAY_MS = 8000
 
 export interface AntigravityAuthCredentialSource {
   credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
@@ -247,6 +252,7 @@ export class AntigravityAdapter extends LlmAdapter {
     }
     const hasEmitted = { value: false }
     let replayed = false
+    let capacityAttempt = 0
     for (;;) {
       const credential = await this.readCredential(signal, replayed)
       if (credential === undefined) {
@@ -288,6 +294,21 @@ export class AntigravityAdapter extends LlmAdapter {
           maxFrameBytes: this.options.maxFrameBytes,
         })) {
           throw contextWindowExceededError(response.status)
+        }
+        // A "no capacity available" 503 is a capacity blip on one model tier,
+        // not a bad request: wait out the cooldown instead of failing the turn.
+        if (capacityAttempt < MAX_CAPACITY_RETRIES
+          && !hasEmitted.value
+          && !isAborted(signal)
+          && await responseReportsModelCapacityExhausted(response, this.options)) {
+          capacityAttempt += 1
+          await cancelResponse(response)
+          await sleep(backoffDelayMs(capacityAttempt), signal)
+          if (isAborted(signal)) {
+            yield finishChunk('aborted', 'CANCELLED')
+            return
+          }
+          continue
         }
         await cancelResponse(response)
         throw toLlmError(statusError)
@@ -1231,15 +1252,17 @@ function errorDetails(value: Record<string, unknown>): NonNullable<ProviderEvent
   }
 }
 
+interface ProviderErrorReadOptions {
+  readonly signal?: AbortSignal
+  readonly idleTimeoutMs: number
+  readonly totalTimeoutMs: number
+  readonly maxResponseBytes: number
+  readonly maxFrameBytes: number
+}
+
 async function responseReportsContextWindowExceeded(
   response: Response,
-  options: {
-    readonly signal?: AbortSignal
-    readonly idleTimeoutMs: number
-    readonly totalTimeoutMs: number
-    readonly maxResponseBytes: number
-    readonly maxFrameBytes: number
-  },
+  options: ProviderErrorReadOptions,
 ): Promise<boolean> {
   try {
     for await (const event of iteratePrivateSse(response, {
@@ -1258,6 +1281,57 @@ async function responseReportsContextWindowExceeded(
     if (isAborted(options.signal)) throw new LlmError('The Antigravity request was cancelled', 'CANCELLED')
     return false
   }
+}
+
+/**
+ * Detect the provider's capacity-exhaustion verdict on a 5xx status.
+ *
+ * The endpoint reports `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for
+ * model X on the server") as HTTP 503. That is a momentary capacity blip on one
+ * model tier rather than a defect in the request, so the caller can wait and
+ * resend instead of failing the turn.
+ * @param response - the private endpoint response, still unread.
+ * @param options - bounded read limits shared with the context-window probe.
+ * @returns whether the body declares capacity exhaustion.
+ */
+async function responseReportsModelCapacityExhausted(
+  response: Response,
+  options: ProviderErrorReadOptions,
+): Promise<boolean> {
+  try {
+    for await (const event of iteratePrivateSse(response, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      idleTimeoutMs: options.idleTimeoutMs,
+      totalTimeoutMs: options.totalTimeoutMs,
+      maxBytes: Math.min(MAX_PROVIDER_ERROR_BYTES, options.maxResponseBytes),
+      maxFrameBytes: Math.min(MAX_PROVIDER_ERROR_FRAME_BYTES, options.maxFrameBytes),
+    })) {
+      if (event.data.includes('MODEL_CAPACITY_EXHAUSTED') || event.data.includes('No capacity available')) return true
+    }
+    return false
+  } catch (error) {
+    if (error instanceof PrivateTransportError && error.code === 'cancelled') throw toLlmError(error)
+    if (isAborted(options.signal)) throw new LlmError('The Antigravity request was cancelled', 'CANCELLED')
+    return false
+  }
+}
+
+/** Bounded exponential backoff between capacity retries. */
+function backoffDelayMs(attempt: number): number {
+  const base = CAPACITY_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
+  const jitter = Math.floor(Math.random() * 250)
+  return Math.min(base + jitter, CAPACITY_RETRY_MAX_DELAY_MS)
+}
+
+/** Abort-aware sleep so a cancelled turn never waits out a cooldown. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return new Promise(resolve => { setTimeout(resolve, ms) })
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+    const onAbort = (): void => { clearTimeout(timer); resolve() }
+    if (signal.aborted) { clearTimeout(timer); resolve(); return }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function providerErrorReportsContextWindowExceeded(value: Record<string, unknown>, depth: number): boolean {
