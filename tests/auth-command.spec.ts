@@ -67,6 +67,9 @@ function emptyService() {
     logout: vi.fn(),
     startLogin: vi.fn(),
     status: vi.fn(),
+    listAccounts: vi.fn(async () => ({ activeId: undefined, accounts: [] })),
+    switchAccount: vi.fn(async () => ({ ok: true, message: 'switched' })),
+    removeAccount: vi.fn(async () => ({ ok: true, message: 'removed' })),
   }
 }
 
@@ -81,6 +84,53 @@ function makeHarness(
 }
 
 describe('Antigravity auth command', () => {
+  it('lists cached accounts and active account with /anti accounts', async () => {
+    const service = {
+      ...emptyService(),
+      listAccounts: vi.fn(async () => ({
+        activeId: 'acc_1',
+        accounts: [
+          { id: 'acc_1', email: 'alice@gmail.com', maskedEmail: 'a***@gmail.com', projectId: 'p1', refreshToken: 't1', updatedAt: '', isActive: true, index: 1 },
+          { id: 'acc_2', email: 'bob@gmail.com', maskedEmail: 'b***@gmail.com', projectId: 'p2', refreshToken: 't2', updatedAt: '', isActive: false, index: 2 },
+        ],
+      })),
+    }
+    const { command } = makeHarness(service)
+    const result = await command.handler({ rawInput: 'accounts' })
+    expect(result).toEqual({
+      kind: 'success',
+      text: expect.stringContaining('alice@gmail.com'),
+    })
+    expect((result as { text: string }).text).toContain('* [活跃] [1]')
+    expect((result as { text: string }).text).toContain('[2] bob@gmail.com')
+  })
+
+  it('switches active account with /anti switch <id>', async () => {
+    const service = {
+      ...emptyService(),
+      switchAccount: vi.fn(async (target: string) => ({
+        ok: true,
+        message: `已切换至账号: ${target}`,
+      })),
+    }
+    const { command } = makeHarness(service)
+    const result = await command.handler({ rawInput: 'switch 2' })
+    expect(service.switchAccount).toHaveBeenCalledWith('2')
+    expect(result).toEqual({
+      kind: 'success',
+      text: '已切换至账号: 2',
+    })
+  })
+
+  it('requires target parameter for /anti switch', async () => {
+    const { command } = makeHarness(emptyService())
+    const result = await command.handler({ rawInput: 'switch' })
+    expect(result).toMatchObject({
+      kind: 'error',
+      text: expect.stringContaining('请指定要切换的账号序号或邮箱'),
+    })
+  })
+
   it('reports value-free login status by default', async () => {
     const service = {
       ...emptyService(),
@@ -244,7 +294,7 @@ describe('Antigravity auth command', () => {
 
     await expect(command.handler({ rawInput: 'device' } as never)).resolves.toEqual({
       kind: 'error',
-      text: 'unknown operation "device" (available: status, login, cancel, logout)',
+      text: 'unknown operation "device" (available: status, accounts, switch <id>, login, cancel, logout, remove <id>)',
     })
     expect(service.acknowledgeRisk).not.toHaveBeenCalled()
     expect(service.startLogin).not.toHaveBeenCalled()

@@ -74,7 +74,15 @@ export function apply(ctx: Context): void {
     cleanup: unprovide,
     label: 'antigravity-auth: OAuth and LLM operations',
   })
-  ctx.inject(['commands'], commandCtx => commandCtx.commands.register(createAntigravityAuthCommand(service, () => accountMode)))
+  ctx.inject(['commands'], (commandCtx) => {
+    const mainCommand = createAntigravityAuthCommand(service, () => accountMode)
+    commandCtx.commands.register(mainCommand)
+    commandCtx.commands.register({
+      ...mainCommand,
+      name: 'anti',
+      description: 'Antigravity OAuth 多账号管理与切换 (/anti accounts | switch | login)',
+    })
+  })
 }
 
 export * from './auth-service.ts'
@@ -87,6 +95,7 @@ export * from './llm-adapter.ts'
 export * from './private-transport.ts'
 export * from './replay.ts'
 export * from './quota.ts'
+export * from './account-store.ts'
 export * from './media-admission.ts'
 export * from './model-catalog.ts'
 export * from './capability-gates.ts'

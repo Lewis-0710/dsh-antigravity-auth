@@ -113,6 +113,7 @@ export interface CredentialCoordinator {
   revokeStatus(): RevokeStatusView
   logout(): Promise<LogoutResult>
   revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
+  resetCache(): void
   dispose(): Promise<void>
 }
 
@@ -207,6 +208,16 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     },
 
     revokeStatus: () => ({ ...revokeStatus }),
+
+    resetCache: () => {
+      generation += 1
+      abortOperations()
+      cached = undefined
+      observedRevision = 0
+      observedLineage = undefined
+      refreshFlight = undefined
+      revokeFlight = undefined
+    },
 
     logout: async () => {
       ensureNotDisposed()

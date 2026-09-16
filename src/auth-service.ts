@@ -47,7 +47,13 @@ export interface AntigravityAuthServiceOptions {
   readonly autoActivateGates?: boolean
 }
 
-export type { HostCredential } from './credential-coordinator.ts'
+import {
+  createAccountStore,
+  defaultAccountStorePath,
+  type AntigravityAccountStore,
+  type CachedAccount,
+} from './account-store.ts'
+export type { CachedAccount } from './account-store.ts'
 
 export class AntigravityAuthService implements BootstrapStatusService {
   private readonly store: AntigravityAuthStore
@@ -56,6 +62,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly quota: QuotaService
   private readonly gates: CapabilityGateRegistry
   private readonly autoActivate: boolean
+  readonly accountStore: AntigravityAccountStore
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
@@ -65,6 +72,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.autoActivate = options.autoActivateGates ?? false
     const storePath = options.storePath ?? defaultAuthStorePath()
     this.store = options.store ?? createAuthStore(storePath)
+    this.accountStore = createAccountStore(defaultAccountStorePath(storePath), storePath)
     this.gates = options.gates ?? (options.gatePath !== undefined
       ? createFileCapabilityGates(options.gatePath)
       : options.store === undefined
@@ -84,6 +92,58 @@ export class AntigravityAuthService implements BootstrapStatusService {
       validateProject: (accessToken, signal) => projectDiscovery.discover(accessToken, signal),
       commit: (token, project, signal) => this.commitCredential(token, project, signal),
     })
+  }
+
+  async listAccounts(): Promise<{
+    activeId: string | undefined
+    accounts: readonly (CachedAccount & { isActive: boolean; index: number })[]
+  }> {
+    return await this.accountStore.list()
+  }
+
+  async switchAccount(idOrEmailOrIndex: string): Promise<{
+    ok: boolean
+    message: string
+    account?: CachedAccount
+  }> {
+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+    const account = await this.accountStore.setActive(idOrEmailOrIndex)
+    if (account === undefined) {
+      return { ok: false, message: `未找到匹配的 Antigravity 账号 "${idOrEmailOrIndex}"` }
+    }
+    const draft = {
+      refreshToken: account.refreshToken,
+      projectId: account.projectId,
+      ...(account.email === undefined ? {} : { email: account.email }),
+      ...(account.lineage === undefined ? {} : { lineage: account.lineage }),
+    }
+    const committed = await this.store.commit(draft)
+    this.credentials.resetCache()
+    if (this.autoActivate) {
+      await this.autoActivateGates(committed.lineage ?? 'legacy-account')
+    }
+    this.notifyStatus()
+    return {
+      ok: true,
+      message: `已切换至账号: ${account.email ?? account.maskedEmail ?? account.id} (项目: ${account.projectId})`,
+      account,
+    }
+  }
+
+  async removeAccount(idOrEmailOrIndex: string): Promise<{ ok: boolean; message: string }> {
+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
+    const removed = await this.accountStore.removeAccount(idOrEmailOrIndex)
+    if (removed === undefined) {
+      return { ok: false, message: `未找到匹配的 Antigravity 账号 "${idOrEmailOrIndex}"` }
+    }
+    const current = await this.accountStore.read()
+    if (current.activeId !== undefined) {
+      await this.switchAccount(current.activeId)
+    } else {
+      await this.logout()
+    }
+    this.notifyStatus()
+    return { ok: true, message: `已移除账号: ${removed.email ?? removed.maskedEmail ?? removed.id}` }
   }
 
   async status(): Promise<AntigravityStatusView> {
@@ -238,6 +298,14 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
+    const accountEmail = token.email ?? project.email
+    await this.accountStore.saveAccount({
+      projectId: project.projectId,
+      refreshToken: token.refreshToken,
+      updatedAt: committed.updatedAt,
+      ...(accountEmail === undefined ? {} : { email: accountEmail }),
+      ...(committed.lineage === undefined ? {} : { lineage: committed.lineage }),
+    }).catch(() => {})
     if (this.autoActivate) {
       const subject = committed.lineage ?? 'legacy-account'
       await this.autoActivateGates(subject)
