@@ -444,6 +444,22 @@ export function buildAuthorizationUrl(state: string, verifier: string): string {
   return url.toString()
 }
 
+/** Decode the email claim from a Google id_token JWT without verifying it. */
+function decodeJwtEmail(idToken: string): string | undefined {
+  const parts = idToken.split('.')
+  if (parts.length !== 3) return undefined
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1] as string, 'base64url').toString('utf8')) as unknown
+    if (typeof payload === 'object' && payload !== null) {
+      const email = (payload as { email?: unknown }).email
+      return typeof email === 'string' && email.length > 0 ? email : undefined
+    }
+  } catch {
+    // malformed JWT
+  }
+  return undefined
+}
+
 /** Testable Google token exchange; response bodies are parsed only in Host memory. */
 export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuthClock = systemClock()): ExchangeCode {
   return async ({ code, verifier, signal }) => {
@@ -478,11 +494,16 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
     const expiresIn = typeof payload.expires_in === 'number' && Number.isFinite(payload.expires_in) && payload.expires_in > 0
       ? payload.expires_in
       : 3_600
+    const email = typeof payload.email === 'string'
+      ? payload.email
+      : typeof payload.id_token === 'string'
+        ? decodeJwtEmail(payload.id_token)
+        : undefined
     return {
       accessToken: payload.access_token,
       refreshToken: payload.refresh_token,
       expiresAt: clock.now() + expiresIn * 1000,
-      ...typeof payload.email === 'string' ? { email: payload.email } : {},
+      ...email === undefined ? {} : { email },
     }
   }
 }

@@ -37,6 +37,8 @@ import type { CapabilityGateOutcome, CapabilityRowId } from './status.ts'
 export interface AntigravityAuthServiceOptions {
   readonly store?: AntigravityAuthStore
   readonly storePath?: string
+  /** Multi-account cache; in-memory when the auth store is injected without a path. */
+  readonly accountStore?: AntigravityAccountStore
   readonly flowOptions?: Omit<OAuthFlowOptions, 'commit' | 'validateProject'>
   /** Inject a complete private transport only for deterministic Host tests. */
   readonly projectOptions?: ProjectDiscoveryOptions
@@ -49,6 +51,7 @@ export interface AntigravityAuthServiceOptions {
 
 import {
   createAccountStore,
+  createMemoryAccountStore,
   defaultAccountStorePath,
   type AntigravityAccountStore,
   type CachedAccount,
@@ -72,7 +75,10 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.autoActivate = options.autoActivateGates ?? false
     const storePath = options.storePath ?? defaultAuthStorePath()
     this.store = options.store ?? createAuthStore(storePath)
-    this.accountStore = createAccountStore(defaultAccountStorePath(storePath), storePath)
+    this.accountStore = options.accountStore
+      ?? (options.store !== undefined && options.storePath === undefined
+        ? createMemoryAccountStore()
+        : createAccountStore(defaultAccountStorePath(storePath), storePath))
     this.gates = options.gates ?? (options.gatePath !== undefined
       ? createFileCapabilityGates(options.gatePath)
       : options.store === undefined

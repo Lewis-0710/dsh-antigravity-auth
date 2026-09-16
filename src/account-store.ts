@@ -303,3 +303,76 @@ export function createAccountStore(
     },
   }
 }
+
+/** In-memory account store for tests and in-memory auth compositions. */
+export function createMemoryAccountStore(): AntigravityAccountStore {
+  let data: AccountsData = {
+    version: ACCOUNTS_RECORD_VERSION,
+    activeId: undefined,
+    accounts: [],
+  }
+  return {
+    path: ':memory:',
+    read: async () => data,
+    saveAccount: async (draft) => {
+      const accounts = [...data.accounts]
+      let existingIndex = -1
+      if (draft.email !== undefined && draft.email.trim().length > 0) {
+        existingIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(draft.email as string))
+      }
+      if (existingIndex < 0) {
+        existingIndex = accounts.findIndex(a => a.refreshToken === draft.refreshToken)
+      }
+      let accountId: string
+      let isNew = false
+      if (existingIndex >= 0) {
+        const existing = accounts[existingIndex]!
+        accountId = existing.id
+        accounts[existingIndex] = {
+          ...existing,
+          ...(draft.email === undefined ? {} : { email: draft.email }),
+          projectId: draft.projectId,
+          refreshToken: draft.refreshToken,
+          updatedAt: draft.updatedAt ?? new Date().toISOString(),
+          ...(draft.lineage === undefined ? {} : { lineage: draft.lineage }),
+        }
+      } else {
+        isNew = true
+        accountId = draft.id ?? `acc_${accounts.length + 1}`
+        accounts.push({
+          id: accountId,
+          ...(draft.email === undefined ? {} : { email: draft.email }),
+          ...(maskEmail(draft.email) === undefined ? {} : { maskedEmail: maskEmail(draft.email) }),
+          projectId: draft.projectId,
+          refreshToken: draft.refreshToken,
+          updatedAt: draft.updatedAt ?? new Date().toISOString(),
+          ...(draft.lineage === undefined ? {} : { lineage: draft.lineage }),
+        })
+      }
+      data = { version: ACCOUNTS_RECORD_VERSION, activeId: accountId, accounts }
+      return { activeId: accountId, account: accounts.find(a => a.id === accountId)!, isNew }
+    },
+    setActive: async (query) => {
+      const match = findMatchingAccount(data.accounts, query)
+      if (match === undefined) return undefined
+      data = { ...data, activeId: match.account.id }
+      return match.account
+    },
+    removeAccount: async (query) => {
+      const match = findMatchingAccount(data.accounts, query)
+      if (match === undefined) return undefined
+      const remaining = data.accounts.filter(a => a.id !== match.account.id)
+      const activeId = data.activeId === match.account.id ? remaining[0]?.id : data.activeId
+      data = { version: ACCOUNTS_RECORD_VERSION, activeId, accounts: remaining }
+      return match.account
+    },
+    list: async () => ({
+      activeId: data.activeId,
+      accounts: data.accounts.map((acc, index) => ({
+        ...acc,
+        index: index + 1,
+        isActive: acc.id === data.activeId,
+      })),
+    }),
+  }
+}
