@@ -218,12 +218,6 @@ export function createAccountStore(
       if (existingIndex < 0) {
         existingIndex = accounts.findIndex(a => a.refreshToken === draft.refreshToken)
       }
-      if (existingIndex < 0) {
-        // A re-login carries a fresh refresh token, so fall back to the project
-        // when it identifies exactly one cached account.
-        const byProject = accounts.filter(a => a.projectId === draft.projectId)
-        if (byProject.length === 1) existingIndex = accounts.indexOf(byProject[0] as CachedAccount)
-      }
 
       let accountId: string
       let isNew = false
@@ -328,10 +322,6 @@ export function createMemoryAccountStore(): AntigravityAccountStore {
       }
       if (existingIndex < 0) {
         existingIndex = accounts.findIndex(a => a.refreshToken === draft.refreshToken)
-      }
-      if (existingIndex < 0) {
-        const byProject = accounts.filter(a => a.projectId === draft.projectId)
-        if (byProject.length === 1) existingIndex = accounts.indexOf(byProject[0] as CachedAccount)
       }
       let accountId: string
       let isNew = false
