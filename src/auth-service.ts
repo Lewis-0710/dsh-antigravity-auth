@@ -34,6 +34,29 @@ import {
 } from './capability-gates.ts'
 import type { CapabilityGateOutcome, CapabilityRowId } from './status.ts'
 
+export const USERINFO_ENDPOINT = 'https://www.googleapis.com/oauth2/v3/userinfo' as const
+
+/**
+ * Fetch the account email through the Google userinfo endpoint. Antigravity
+ * requests `userinfo.email` but not `openid`, so the token exchange never
+ * carries an `id_token`; userinfo is the only email source for this flow.
+ * @param accessToken - live bearer token for the current account.
+ * @returns the raw email, or undefined when the probe cannot answer.
+ */
+export async function fetchUserEmail(accessToken: string): Promise<string | undefined> {
+  const response = await fetch(USERINFO_ENDPOINT, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (!response.ok) return undefined
+  const text = await response.text()
+  if (text.length > 64 * 1024) return undefined
+  const payload = JSON.parse(text) as unknown
+  if (typeof payload !== 'object' || payload === null) return undefined
+  const email = (payload as { email?: unknown }).email
+  return typeof email === 'string' && email.includes('@') ? email : undefined
+}
+
 export interface AntigravityAuthServiceOptions {
   readonly store?: AntigravityAuthStore
   readonly storePath?: string
@@ -47,6 +70,12 @@ export interface AntigravityAuthServiceOptions {
   readonly gates?: CapabilityGateRegistry
   readonly gatePath?: string
   readonly autoActivateGates?: boolean
+  /**
+   * Resolve the account email from a live access token. Absent by default so
+   * unit compositions never egress; the production mount wires
+   * {@link fetchUserEmail}.
+   */
+  readonly fetchEmail?: (accessToken: string) => Promise<string | undefined>
 }
 
 import {
@@ -66,6 +95,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly gates: CapabilityGateRegistry
   private readonly autoActivate: boolean
   readonly accountStore: AntigravityAccountStore
+  private readonly fetchEmail: ((accessToken: string) => Promise<string | undefined>) | undefined
+  private emailBackfillAttempted = false
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
@@ -73,6 +104,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   constructor(options: AntigravityAuthServiceOptions = {}) {
     this.autoActivate = options.autoActivateGates ?? false
+    this.fetchEmail = options.fetchEmail
     const storePath = options.storePath ?? defaultAuthStorePath()
     this.store = options.store ?? createAuthStore(storePath)
     this.accountStore = options.accountStore
@@ -104,7 +136,47 @@ export class AntigravityAuthService implements BootstrapStatusService {
     activeId: string | undefined
     accounts: readonly (CachedAccount & { isActive: boolean; index: number })[]
   }> {
+    await this.backfillActiveAccountEmail()
     return await this.accountStore.list()
+  }
+
+  /**
+   * Backfill the active account's email through the injected fetcher, once per
+   * process. Accounts saved before the email probe existed (or seeded from an
+   * email-less auth.json) stay usable without it; the fetcher failure only
+   * leaves the email unset.
+   */
+  private async backfillActiveAccountEmail(): Promise<void> {
+    if (this.emailBackfillAttempted || this.fetchEmail === undefined || this.disposed) return
+    this.emailBackfillAttempted = true
+    try {
+      const record = await this.readRecord()
+      if (record === undefined || record.email !== undefined) return
+      const credential = await this.credentials.credential()
+      if (credential === undefined) return
+      const email = await this.fetchEmail(credential.accessToken)
+      if (email === undefined) return
+      const current = await this.readRecord()
+      if (current === undefined || current.email !== undefined) return
+      const masked = maskEmail(email)
+      const committed = await this.store.compareAndCommit(current.revision, {
+        refreshToken: current.refreshToken,
+        projectId: current.projectId,
+        ...(masked === undefined ? {} : { email: masked }),
+        ...(current.lineage === undefined ? {} : { lineage: current.lineage }),
+      }, current.lineage)
+      if (committed === undefined) return
+      await this.accountStore.saveAccount({
+        email,
+        projectId: current.projectId,
+        refreshToken: current.refreshToken,
+        updatedAt: committed.updatedAt,
+        ...(current.lineage === undefined ? {} : { lineage: current.lineage }),
+      })
+      this.notifyStatus()
+    } catch {
+      // Best-effort backfill: a missing email never blocks account listing.
+    }
   }
 
   async switchAccount(idOrEmailOrIndex: string): Promise<{
@@ -117,10 +189,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
     if (account === undefined) {
       return { ok: false, message: `未找到匹配的 Antigravity 账号 "${idOrEmailOrIndex}"` }
     }
+    const maskedAccountEmail = maskEmail(account.email)
     const draft = {
       refreshToken: account.refreshToken,
       projectId: account.projectId,
-      ...(account.email === undefined ? {} : { email: account.email }),
+      ...(maskedAccountEmail === undefined ? {} : { email: maskedAccountEmail }),
       ...(account.lineage === undefined ? {} : { lineage: account.lineage }),
     }
     const committed = await this.store.commit(draft)
@@ -296,7 +369,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
     if (this.disposed || flowGeneration !== this.activeFlowGeneration || signal.aborted) {
       throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
     }
-    const email = maskEmail(project.email ?? token.email)
+    const rawEmail = project.email ?? token.email
+      ?? (this.fetchEmail === undefined
+        ? undefined
+        : await this.fetchEmail(token.accessToken).catch(() => undefined))
+    const email = maskEmail(rawEmail)
     const draft = {
       refreshToken: token.refreshToken,
       projectId: project.projectId,
@@ -304,12 +381,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
-    const accountEmail = token.email ?? project.email
     await this.accountStore.saveAccount({
       projectId: project.projectId,
       refreshToken: token.refreshToken,
       updatedAt: committed.updatedAt,
-      ...(accountEmail === undefined ? {} : { email: accountEmail }),
+      ...(rawEmail === undefined ? {} : { email: rawEmail }),
       ...(committed.lineage === undefined ? {} : { lineage: committed.lineage }),
     }).catch(() => {})
     if (this.autoActivate) {

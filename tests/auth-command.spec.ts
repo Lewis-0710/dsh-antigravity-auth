@@ -99,10 +99,10 @@ describe('Antigravity auth command', () => {
     const result = await command.handler({ rawInput: 'accounts' } as never)
     expect(result).toEqual({
       kind: 'success',
-      text: expect.stringContaining('alice@gmail.com'),
+      text: expect.stringContaining('a***@gmail.com'),
     })
     expect((result as { text: string }).text).toContain('* [活跃] [1]')
-    expect((result as { text: string }).text).toContain('[2] bob@gmail.com')
+    expect((result as { text: string }).text).toContain('[2] b***@gmail.com')
   })
 
   it('switches active account with /anti switch <id>', async () => {

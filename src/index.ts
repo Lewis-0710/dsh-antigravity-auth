@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-llm'
-import { createAntigravityAuthService } from './auth-service.ts'
+import { createAntigravityAuthService, fetchUserEmail } from './auth-service.ts'
 import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
@@ -25,6 +25,7 @@ export function apply(ctx: Context): void {
   const service = createAntigravityAuthService({
     storePath: defaultAuthStorePath(),
     autoActivateGates: true,
+    fetchEmail: fetchUserEmail,
   })
   // Account-control activation for the slash command. A terminal composition
   // composes no public WebServer, so the command starts enabled (local-only

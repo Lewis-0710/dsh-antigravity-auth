@@ -344,4 +344,47 @@ describe('Antigravity auth service', () => {
     await expect(service.status()).resolves.toMatchObject({ login: { configured: true, projectAvailable: true } })
     await service.dispose()
   })
+
+  it('backfills the active account email through the injected fetcher once per process', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'rt-1', projectId: 'p-1' })
+    const fetchEmail = vi.fn(async () => 'carol@example.com')
+    const service = createAntigravityAuthService({
+      store,
+      fetchEmail,
+      credentialOptions: {
+        refreshToken: vi.fn(async () => ({ accessToken: 'live-access', expiresAt: 10_000 })),
+      },
+    })
+
+    const first = await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledWith('live-access')
+    expect(first.accounts[0]?.email).toBe('carol@example.com')
+    expect(first.accounts[0]?.maskedEmail).toBe('c***@example.com')
+    await expect(store.read()).resolves.toMatchObject({ email: 'c***@example.com' })
+
+    // The once-per-process fence prevents a second probe.
+    await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledTimes(1)
+    await service.dispose()
+  })
+
+  it('leaves the email unset when the injected fetcher cannot answer', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'rt-1', projectId: 'p-1' })
+    const fetchEmail = vi.fn(async () => undefined)
+    const service = createAntigravityAuthService({
+      store,
+      fetchEmail,
+      credentialOptions: {
+        refreshToken: vi.fn(async () => ({ accessToken: 'live-access', expiresAt: 10_000 })),
+      },
+    })
+
+    const listed = await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledWith('live-access')
+    expect(listed.accounts[0]?.email).toBeUndefined()
+    await expect(store.read()).resolves.not.toHaveProperty('email')
+    await service.dispose()
+  })
 })

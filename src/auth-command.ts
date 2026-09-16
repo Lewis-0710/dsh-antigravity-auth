@@ -95,7 +95,7 @@ export function createAntigravityAuthCommand(
             `Antigravity 账号列表 (共 ${list.accounts.length} 个):`,
             ...list.accounts.map((acc) => {
               const activeMark = acc.isActive ? ' * [活跃] ' : '   '
-              const emailDisplay = acc.email ?? acc.maskedEmail ?? '(未提供邮箱)'
+              const emailDisplay = acc.maskedEmail ?? acc.email ?? '(未提供邮箱)'
               return `${activeMark}[${acc.index}] ${emailDisplay} (项目: ${acc.projectId})`
             }),
             '',
