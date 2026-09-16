@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createAntigravityAuthCommand } from '../src/auth-command.ts'
+import { createAntigravityAuthCommand, type AuthCommandService } from '../src/auth-command.ts'
 import type { LogoutResult } from '../src/credential-coordinator.ts'
 import type { LoginActionResult, LoginStartResult } from '../src/login-types.ts'
 import type { LoopbackRpcMode } from '../src/loopback-rpc.ts'
@@ -60,21 +60,21 @@ function pendingStatus(): AntigravityStatusView {
   }
 }
 
-function emptyService() {
+function emptyService(): AuthCommandService {
   return {
     acknowledgeRisk: vi.fn(),
     cancelLogin: vi.fn(),
     logout: vi.fn(),
     startLogin: vi.fn(),
     status: vi.fn(),
-    listAccounts: vi.fn(async () => ({ activeId: undefined, accounts: [] })),
-    switchAccount: vi.fn(async () => ({ ok: true, message: 'switched' })),
-    removeAccount: vi.fn(async () => ({ ok: true, message: 'removed' })),
+    listAccounts: vi.fn(),
+    switchAccount: vi.fn(),
+    removeAccount: vi.fn(),
   }
 }
 
 function makeHarness(
-  service: ReturnType<typeof emptyService>,
+  service: AuthCommandService,
   mode: LoopbackRpcMode = 'enabled',
   opened = true,
 ) {
@@ -96,7 +96,7 @@ describe('Antigravity auth command', () => {
       })),
     }
     const { command } = makeHarness(service)
-    const result = await command.handler({ rawInput: 'accounts' })
+    const result = await command.handler({ rawInput: 'accounts' } as never)
     expect(result).toEqual({
       kind: 'success',
       text: expect.stringContaining('alice@gmail.com'),
@@ -114,7 +114,7 @@ describe('Antigravity auth command', () => {
       })),
     }
     const { command } = makeHarness(service)
-    const result = await command.handler({ rawInput: 'switch 2' })
+    const result = await command.handler({ rawInput: 'switch 2' } as never)
     expect(service.switchAccount).toHaveBeenCalledWith('2')
     expect(result).toEqual({
       kind: 'success',
@@ -124,7 +124,7 @@ describe('Antigravity auth command', () => {
 
   it('requires target parameter for /anti switch', async () => {
     const { command } = makeHarness(emptyService())
-    const result = await command.handler({ rawInput: 'switch' })
+    const result = await command.handler({ rawInput: 'switch' } as never)
     expect(result).toMatchObject({
       kind: 'error',
       text: expect.stringContaining('请指定要切换的账号序号或邮箱'),

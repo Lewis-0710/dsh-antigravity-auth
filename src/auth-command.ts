@@ -5,7 +5,7 @@ import { ACCOUNT_COMMAND_DENIED_MESSAGE, type LoopbackRpcMode } from './loopback
 import { openAuthorizationUrl } from './open-authorization-url.ts'
 import type { AntigravityStatusView } from './status.ts'
 
-type AuthCommandService = Pick<
+export type AuthCommandService = Pick<
   AntigravityAuthService,
   'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'listAccounts' | 'switchAccount' | 'removeAccount'
 >
@@ -66,7 +66,9 @@ export function createAntigravityAuthCommand(
       if (operation === 'status') {
         try {
           const status = await service.status()
-          const list = await service.listAccounts().catch(() => undefined)
+          const list = typeof service.listAccounts === 'function'
+            ? await Promise.resolve().then(() => service.listAccounts()).catch(() => undefined)
+            : undefined
           let text = formatStatus(status)
           if (list !== undefined && list.accounts.length > 0) {
             const activeAcc = list.accounts.find(a => a.isActive)

@@ -1,8 +1,7 @@
 /** Owner-only, versioned, multi-account persistence for Google Antigravity. */
 
-import { chmod, lstat, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { isBoundedSafeText } from './safe-text.ts'
 import { maskEmail } from './auth-service.ts'
 
 export const ACCOUNTS_RECORD_VERSION = 1 as const
