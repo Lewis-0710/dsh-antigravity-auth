@@ -440,7 +440,7 @@ export function buildAuthorizationUrl(state: string, verifier: string): string {
   url.searchParams.set('code_challenge_method', 'S256')
   url.searchParams.set('state', state)
   url.searchParams.set('access_type', 'offline')
-  url.searchParams.set('prompt', 'consent')
+  url.searchParams.set('prompt', 'select_account consent')
   return url.toString()
 }
 
