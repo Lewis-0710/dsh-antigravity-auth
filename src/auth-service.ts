@@ -109,7 +109,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.store = options.store ?? createAuthStore(storePath)
     this.accountStore = options.accountStore
       ?? (options.store !== undefined && options.storePath === undefined
-        ? createMemoryAccountStore()
+        ? createMemoryAccountStore(this.store)
         : createAccountStore(defaultAccountStorePath(storePath), storePath))
     this.gates = options.gates ?? (options.gatePath !== undefined
       ? createFileCapabilityGates(options.gatePath)
@@ -119,6 +119,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.credentials = createCredentialCoordinator({
       ...options.credentialOptions,
       store: this.store,
+      onTokenRotated: async (record) => {
+        await this.accountStore.syncRefreshToken(record.refreshToken, record.email)
+      },
     })
     this.quota = createQuotaService({
       ...options.quotaOptions,
@@ -337,6 +340,10 @@ export class AntigravityAuthService implements BootstrapStatusService {
     try {
       const result = await this.credentials.logout()
       await this.gates.clear()
+      const currentAccounts = await this.accountStore.read()
+      if (currentAccounts.activeId !== undefined) {
+        await this.accountStore.removeAccount(currentAccounts.activeId)
+      }
       this.notifyStatus()
       return result
     } catch {
@@ -347,7 +354,13 @@ export class AntigravityAuthService implements BootstrapStatusService {
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     const result = await this.credentials.revoke(confirmed, signal)
-    if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') await this.gates.clear()
+    if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') {
+      await this.gates.clear()
+      const currentAccounts = await this.accountStore.read()
+      if (currentAccounts.activeId !== undefined) {
+        await this.accountStore.removeAccount(currentAccounts.activeId)
+      }
+    }
     this.notifyStatus()
     return result
   }

@@ -40,6 +40,7 @@ export interface AntigravityAccountStore {
   }): Promise<{ activeId: string; account: CachedAccount; isNew: boolean }>
   setActive(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
   removeAccount(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
+  syncRefreshToken(refreshToken: string, email?: string): Promise<void>
   list(): Promise<{ activeId: string | undefined; accounts: readonly (CachedAccount & { isActive: boolean; index: number })[] }>
 }
 
@@ -50,6 +51,27 @@ export function defaultAccountStorePath(authStorePath: string): string {
 
 function normalizeKey(str: string): string {
   return str.trim().toLowerCase()
+}
+
+/** Generate a guaranteed unique account ID that never collides with deleted or existing accounts. */
+export function nextAccountId(accounts: readonly CachedAccount[]): string {
+  const existing = new Set(accounts.map(a => a.id))
+  let max = 0
+  for (const a of accounts) {
+    const match = /^acc_(\d+)$/.exec(a.id)
+    if (match?.[1]) {
+      const num = Number(match[1])
+      if (Number.isSafeInteger(num) && num > max) {
+        max = num
+      }
+    }
+  }
+  let candidate = `acc_${max + 1}`
+  while (existing.has(candidate)) {
+    max += 1
+    candidate = `acc_${max + 1}`
+  }
+  return candidate
 }
 
 /** Match an account by 1-based index, id, or email (exact or prefix). */
@@ -117,6 +139,7 @@ export function createAccountStore(
       ) {
         const rawAccounts = (parsed as { accounts: unknown[] }).accounts
         const accounts: CachedAccount[] = []
+        const seenIds = new Set<string>()
         for (const item of rawAccounts) {
           if (typeof item === 'object' && item !== null) {
             const rec = item as Record<string, unknown>
@@ -125,8 +148,13 @@ export function createAccountStore(
               typeof rec.projectId === 'string' &&
               typeof rec.refreshToken === 'string'
             ) {
+              let id = rec.id
+              if (seenIds.has(id)) {
+                id = nextAccountId(accounts)
+              }
+              seenIds.add(id)
               accounts.push({
-                id: rec.id,
+                id,
                 email: typeof rec.email === 'string' ? rec.email : undefined,
                 maskedEmail: typeof rec.maskedEmail === 'string' ? rec.maskedEmail : maskEmail(typeof rec.email === 'string' ? rec.email : undefined),
                 projectId: rec.projectId,
@@ -236,7 +264,7 @@ export function createAccountStore(
         }
       } else {
         isNew = true
-        accountId = draft.id ?? `acc_${accounts.length + 1}`
+        accountId = draft.id ?? nextAccountId(accounts)
         accounts.push({
           id: accountId,
           email,
@@ -289,6 +317,26 @@ export function createAccountStore(
       })
       return match.account
     },
+    syncRefreshToken: async (refreshToken: string, email?: string) => {
+      const current = await readRaw()
+      const accounts = [...current.accounts]
+      let targetIndex = -1
+      if (email !== undefined && email.trim().length > 0) {
+        targetIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(email))
+      }
+      if (targetIndex < 0 && current.activeId !== undefined) {
+        targetIndex = accounts.findIndex(a => a.id === current.activeId)
+      }
+      if (targetIndex >= 0) {
+        const existing = accounts[targetIndex]!
+        accounts[targetIndex] = {
+          ...existing,
+          refreshToken,
+          updatedAt: new Date().toISOString(),
+        }
+        await writeRaw({ ...current, accounts })
+      }
+    },
 
     list: async () => {
       const current = await readRaw()
@@ -305,16 +353,46 @@ export function createAccountStore(
 }
 
 /** In-memory account store for tests and in-memory auth compositions. */
-export function createMemoryAccountStore(): AntigravityAccountStore {
+export function createMemoryAccountStore(authStore?: { read(): Promise<{ refreshToken: string; projectId: string; email?: string; updatedAt?: string; lineage?: string } | undefined> }): AntigravityAccountStore {
   let data: AccountsData = {
     version: ACCOUNTS_RECORD_VERSION,
     activeId: undefined,
     accounts: [],
   }
+  let seeded = false
+  async function ensureSeeded(): Promise<void> {
+    if (seeded || authStore === undefined || data.accounts.length > 0) return
+    seeded = true
+    try {
+      const auth = await authStore.read()
+      if (auth !== undefined && typeof auth.refreshToken === 'string' && typeof auth.projectId === 'string') {
+        const initialAccount: CachedAccount = {
+          id: 'acc_1',
+          email: auth.email,
+          maskedEmail: maskEmail(auth.email),
+          projectId: auth.projectId,
+          refreshToken: auth.refreshToken,
+          updatedAt: auth.updatedAt ?? new Date().toISOString(),
+          lineage: auth.lineage,
+        }
+        data = {
+          version: ACCOUNTS_RECORD_VERSION,
+          activeId: initialAccount.id,
+          accounts: [initialAccount],
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
   return {
     path: ':memory:',
-    read: async () => data,
+    read: async () => {
+      await ensureSeeded()
+      return data
+    },
     saveAccount: async (draft) => {
+      await ensureSeeded()
       const accounts = [...data.accounts]
       let existingIndex = -1
       if (draft.email !== undefined && draft.email.trim().length > 0) {
@@ -338,7 +416,7 @@ export function createMemoryAccountStore(): AntigravityAccountStore {
         }
       } else {
         isNew = true
-        accountId = draft.id ?? `acc_${accounts.length + 1}`
+        accountId = draft.id ?? nextAccountId(accounts)
         accounts.push({
           id: accountId,
           ...(draft.email === undefined ? {} : { email: draft.email }),
@@ -353,12 +431,14 @@ export function createMemoryAccountStore(): AntigravityAccountStore {
       return { activeId: accountId, account: accounts.find(a => a.id === accountId)!, isNew }
     },
     setActive: async (query) => {
+      await ensureSeeded()
       const match = findMatchingAccount(data.accounts, query)
       if (match === undefined) return undefined
       data = { ...data, activeId: match.account.id }
       return match.account
     },
     removeAccount: async (query) => {
+      await ensureSeeded()
       const match = findMatchingAccount(data.accounts, query)
       if (match === undefined) return undefined
       const remaining = data.accounts.filter(a => a.id !== match.account.id)
@@ -366,13 +446,36 @@ export function createMemoryAccountStore(): AntigravityAccountStore {
       data = { version: ACCOUNTS_RECORD_VERSION, activeId, accounts: remaining }
       return match.account
     },
-    list: async () => ({
-      activeId: data.activeId,
+    syncRefreshToken: async (refreshToken: string, email?: string) => {
+      await ensureSeeded()
+      const accounts = [...data.accounts]
+      let targetIndex = -1
+      if (email !== undefined && email.trim().length > 0) {
+        targetIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(email))
+      }
+      if (targetIndex < 0 && data.activeId !== undefined) {
+        targetIndex = accounts.findIndex(a => a.id === data.activeId)
+      }
+      if (targetIndex >= 0) {
+        const existing = accounts[targetIndex]!
+        accounts[targetIndex] = {
+          ...existing,
+          refreshToken,
+          updatedAt: new Date().toISOString(),
+        }
+        data = { ...data, accounts }
+      }
+    },
+    list: async () => {
+      await ensureSeeded()
+      return {
+        activeId: data.activeId,
       accounts: data.accounts.map((acc, index) => ({
         ...acc,
         index: index + 1,
         isActive: acc.id === data.activeId,
       })),
-    }),
+      }
+    },
   }
 }

@@ -122,6 +122,49 @@ describe('account-store', () => {
     expect(data.accounts).toHaveLength(1)
     expect(data.activeId).toBe('acc_1')
   })
+
+  it('does not reuse account ID when earlier account is deleted', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anti-acc-test-'))
+    const authPath = join(dir, 'auth.json')
+    const accPath = join(dir, 'accounts.json')
+    const store = createAccountStore(accPath, authPath)
+
+    const a = await store.saveAccount({ email: 'a@example.com', projectId: 'p1', refreshToken: 't1' })
+    const b = await store.saveAccount({ email: 'b@example.com', projectId: 'p2', refreshToken: 't2' })
+    expect(a.account.id).toBe('acc_1')
+    expect(b.account.id).toBe('acc_2')
+
+    // Remove account A (acc_1)
+    await store.removeAccount('acc_1')
+    const dataAfterRemove = await store.read()
+    expect(dataAfterRemove.accounts).toHaveLength(1)
+    expect(dataAfterRemove.accounts[0]?.id).toBe('acc_2')
+
+    // Add account C
+    const c = await store.saveAccount({ email: 'c@example.com', projectId: 'p3', refreshToken: 't3' })
+    // Account C must receive acc_3, NOT reuse acc_2!
+    expect(c.account.id).toBe('acc_3')
+    expect(c.account.id).not.toBe(b.account.id)
+
+    // Removing C must NOT delete B
+    await store.removeAccount(c.account.id)
+    const dataFinal = await store.read()
+    expect(dataFinal.accounts).toHaveLength(1)
+    expect(dataFinal.accounts[0]?.id).toBe('acc_2')
+  })
+
+  it('syncRefreshToken updates refreshToken on active account', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anti-acc-test-'))
+    const authPath = join(dir, 'auth.json')
+    const accPath = join(dir, 'accounts.json')
+    const store = createAccountStore(accPath, authPath)
+
+    await store.saveAccount({ email: 'a@example.com', projectId: 'p1', refreshToken: 'r1' })
+    await store.syncRefreshToken('r2_rotated', 'a@example.com')
+
+    const data = await store.read()
+    expect(data.accounts[0]?.refreshToken).toBe('r2_rotated')
+  })
 })
 
 describe('findMatchingAccount', () => {

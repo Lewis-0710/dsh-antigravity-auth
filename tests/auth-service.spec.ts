@@ -4,6 +4,7 @@ import { createAntigravityAuthService } from '../src/auth-service.ts'
 import type { PrivateTransport, PrivateTransportRequest } from '../src/private-transport.ts'
 import type { LoopbackCallbackRequest } from '../src/oauth-flow.ts'
 import { createMemoryCapabilityGates, type CapabilityGateRegistry } from '../src/capability-gates.ts'
+import { CredentialOperationError } from '../src/credential-coordinator.ts'
 
 function projectTransport(payload: unknown): PrivateTransport {
   return { request: vi.fn(async () => new Response(JSON.stringify(payload))) }
@@ -385,6 +386,121 @@ describe('Antigravity auth service', () => {
     expect(fetchEmail).toHaveBeenCalledWith('live-access')
     expect(listed.accounts[0]?.email).toBeUndefined()
     await expect(store.read()).resolves.not.toHaveProperty('email')
+    await service.dispose()
+  })
+
+  it('syncs rotated refresh token to account cache and preserves it across switches', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A1', projectId: 'p-1', email: 'alice@example.com' })
+    const refreshAccessToken = vi.fn(async () => ({
+      accessToken: 'access-A2',
+      refreshToken: 'token-A2',
+      expiresAt: 10_000,
+    }))
+    const service = createAntigravityAuthService({
+      store,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: refreshAccessToken,
+      },
+    })
+
+    // Seed account B into accountStore
+    await service.accountStore.saveAccount({
+      id: 'acc_2',
+      email: 'bob@example.com',
+      projectId: 'p-2',
+      refreshToken: 'token-B',
+    })
+
+    // Trigger refresh on account A, rotating its token to token-A2
+    const cred = await service.credential(undefined, { forceRefresh: true })
+    expect(cred?.refreshToken).toBe('token-A2')
+    expect((await store.read())?.refreshToken).toBe('token-A2')
+
+    // Verify account store also synced token-A2
+    const accounts = (await service.listAccounts()).accounts
+    const accA = accounts.find(a => a.email === 'alice@example.com')
+    expect(accA?.refreshToken).toBe('token-A2')
+
+    // Switch to account B
+    await service.switchAccount('bob@example.com')
+    expect((await store.read())?.refreshToken).toBe('token-B')
+
+    // Switch back to account A
+    await service.switchAccount('alice@example.com')
+    // Must write token-A2 back to store, not the obsolete token-A1!
+    expect((await store.read())?.refreshToken).toBe('token-A2')
+
+    await service.dispose()
+  })
+
+  it('cleans up cached account credentials on logout', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A1', projectId: 'p-1', email: 'alice@example.com' })
+    const service = createAntigravityAuthService({ store })
+
+    expect((await service.listAccounts()).accounts).toHaveLength(1)
+
+    // Log out
+    await service.logout()
+
+    // Both authStore and accountStore must be cleared of account A
+    expect(await store.read()).toBeUndefined()
+    expect((await service.listAccounts()).accounts).toHaveLength(0)
+
+    // Cannot switch back to account A without re-login
+    const switchRes = await service.switchAccount('alice@example.com')
+    expect(switchRes.ok).toBe(false)
+
+    await service.dispose()
+  })
+
+  it('resets error state when switching from an invalid account to a valid account', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'invalid-token-A', projectId: 'p-1', email: 'alice@example.com' })
+
+    const refreshAccessToken = vi.fn(async ({ refreshToken }: { refreshToken: string }) => {
+      if (refreshToken === 'invalid-token-A') {
+        throw new CredentialOperationError('invalid-grant')
+      }
+      return { accessToken: 'valid-access-B', expiresAt: 10_000 }
+    })
+
+    const service = createAntigravityAuthService({
+      store,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: refreshAccessToken,
+      },
+    })
+
+    // Add account B
+    await service.accountStore.saveAccount({
+      id: 'acc_2',
+      email: 'bob@example.com',
+      projectId: 'p-2',
+      refreshToken: 'valid-token-B',
+    })
+
+    // Account A fails and enters re-login-required
+    const credA = await service.credential(undefined, { forceRefresh: true })
+    expect(credA).toBeUndefined()
+    const statusA = await service.status()
+    expect(statusA.credential?.state).toBe('re-login-required')
+
+    // Switch to account B
+    await service.switchAccount('bob@example.com')
+
+    // Coordinator error state must be reset so B can successfully fetch credentials!
+    const credB = await service.credential()
+    expect(credB).toBeDefined()
+    expect(credB?.accessToken).toBe('valid-access-B')
+    expect(credB?.projectId).toBe('p-2')
+
+    const statusB = await service.status()
+    expect(statusB.credential?.state).toBe('logged-in')
+
     await service.dispose()
   })
 })
