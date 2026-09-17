@@ -338,6 +338,7 @@ export class AntigravityAdapter extends LlmAdapter {
     let usage: TokenUsage | undefined
     let finish: string | undefined
     let eventError: ProviderEvent['error']
+    let pendingSignature: string | undefined
     for await (const sse of iteratePrivateSse(response, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       idleTimeoutMs: this.options.idleTimeoutMs,
@@ -355,11 +356,23 @@ export class AntigravityAdapter extends LlmAdapter {
       if (event.usage !== undefined) usage = event.usage
       if (event.finish !== undefined) finish = event.finish
       for (const part of event.parts) {
+        // A part with no observable content must never announce a block. An
+        // emitted `block-start` that is never closed both violates the stream
+        // grammar and desynchronizes the replay envelope from the emitted
+        // blocks, which makes DSH drop the whole turn's replay metadata. The
+        // part's provider-issued signature is still validation-bearing, so it
+        // is carried onto the next block that does open.
+        if (part.kind !== 'tool-call' && part.text.length === 0) {
+          if (part.signature !== undefined) pendingSignature = part.signature
+          continue
+        }
         if (current === undefined || !sameBlock(current, part)) {
           if (current !== undefined) {
             yield endBlock(current)
           }
           current = beginBlock(states, part)
+          if (current.signature === undefined && pendingSignature !== undefined) current.signature = pendingSignature
+          pendingSignature = undefined
           yield { type: 'block-start', index: current.index, blockType: current.kind }
         }
         if (part.kind === 'tool-call') {
@@ -386,13 +399,9 @@ export class AntigravityAdapter extends LlmAdapter {
         }
       }
     }
-    if (current !== undefined) {
-      if (current.kind === 'text' && current.text.length === 0) {
-        states.pop()
-      } else {
-        yield endBlock(current)
-      }
-    }
+    // Every block that announced itself above is closed here, so the emitted
+    // stream and the replay envelope below always describe the same block list.
+    if (current !== undefined) yield endBlock(current)
     if (usage !== undefined) yield { type: 'usage', usage }
     if (eventError !== undefined) {
       yield finishChunk(
@@ -410,7 +419,10 @@ export class AntigravityAdapter extends LlmAdapter {
       yield finishChunk('error', 'EMPTY_RESPONSE')
       return
     }
-    let lastReasoningSignature: string | undefined
+    // The provider can deliver the signature that validates a replayed tool call
+    // in a trailing content-free frame, i.e. after the call itself. Seed the
+    // backfill with that pending signature so it is never dropped on the floor.
+    let lastReasoningSignature: string | undefined = pendingSignature
     for (const state of states) {
       if (state.kind === 'reasoning' && state.signature !== undefined) {
         lastReasoningSignature = state.signature
