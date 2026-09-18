@@ -25,6 +25,20 @@ const CAPACITY_BODY = JSON.stringify({
   },
 })
 
+/**
+ * The same structural capacity verdict carried on HTTP 429. Rate limiting is a
+ * quota verdict for the caller to surface, not a tier blip to resend: the retry
+ * must be pinned to 503 and must not fire on this body.
+ */
+const RATE_LIMITED_CAPACITY_BODY = JSON.stringify({
+  error: {
+    code: 429,
+    message: 'No capacity available for model gemini-3.8-flash-high on the server',
+    status: 'RESOURCE_EXHAUSTED',
+    details: [{ '@type': 'type.googleapis.com/google.rpc.ErrorInfo', reason: 'MODEL_CAPACITY_EXHAUSTED', metadata: { model: 'gemini-3.8-flash-high' } }],
+  },
+})
+
 const message = (text: string): Message => ({
   id: 'message-id' as never,
   role: 'user',
@@ -76,6 +90,37 @@ describe('Antigravity capacity-exhausted retry', () => {
 
   it('does not retry an ordinary 503 that is not a capacity verdict', async () => {
     const request = vi.fn(async (_input: PrivateTransportRequest) => new Response('{"error":{"code":503,"status":"UNAVAILABLE"}}', { status: 503 }))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: async () => credential() },
+      transport: { request },
+    })
+
+    await expect(collect(adapter, options())).rejects.toMatchObject({ code: 'UPSTREAM' })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry a 429 whose body carries the capacity marker', async () => {
+    // The capacity marker alone must not widen the retry to rate limiting: a
+    // 429 stays a single request and surfaces as RATE_LIMIT for the caller.
+    const request = vi.fn(async (_input: PrivateTransportRequest) => {
+      if (request.mock.calls.length === 1) {
+        return new Response(RATE_LIMITED_CAPACITY_BODY, { status: 429, headers: { 'content-type': 'application/json' } })
+      }
+      return new Response('data: {"response":{"parts":[{"text":"recovered"}],"finishReason":"STOP"}}\n\n')
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: async () => credential() },
+      transport: { request },
+    })
+
+    await expect(collect(adapter, options())).rejects.toMatchObject({ code: 'RATE_LIMIT', failure: { status: 429 } })
+    expect(request).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not retry a 500 whose body carries the capacity marker', async () => {
+    // Pinning to 503 must not be implemented as "any 5xx": a genuine server
+    // fault that quotes the capacity marker is still not a tier blip.
+    const request = vi.fn(async (_input: PrivateTransportRequest) => new Response(CAPACITY_BODY, { status: 500 }))
     const adapter = new AntigravityAdapter({
       auth: { credential: async () => credential() },
       transport: { request },

@@ -297,7 +297,11 @@ export class AntigravityAdapter extends LlmAdapter {
         }
         // A "no capacity available" 503 is a capacity blip on one model tier,
         // not a bad request: wait out the cooldown instead of failing the turn.
-        if (capacityAttempt < MAX_CAPACITY_RETRIES
+        // The status must be pinned to 503 first: a 429 that happens to carry the
+        // same capacity marker is still a rate-limit verdict, and the existing
+        // contract is that 429 is reported to the caller without a resend.
+        if (response.status === 503
+          && capacityAttempt < MAX_CAPACITY_RETRIES
           && !hasEmitted.value
           && !isAborted(signal)
           && await responseReportsModelCapacityExhausted(response, this.options)) {
@@ -1296,12 +1300,16 @@ async function responseReportsContextWindowExceeded(
 }
 
 /**
- * Detect the provider's capacity-exhaustion verdict on a 5xx status.
+ * Detect the provider's capacity-exhaustion verdict on an HTTP 503 body.
  *
  * The endpoint reports `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for
  * model X on the server") as HTTP 503. That is a momentary capacity blip on one
  * model tier rather than a defect in the request, so the caller can wait and
  * resend instead of failing the turn.
+ *
+ * This probe only inspects the body; the caller is responsible for pinning the
+ * status to 503 first. A 429 carrying the same marker is a rate-limit verdict
+ * and must not be resent.
  * @param response - the private endpoint response, still unread.
  * @param options - bounded read limits shared with the context-window probe.
  * @returns whether the body declares capacity exhaustion.
