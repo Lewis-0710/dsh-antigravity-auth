@@ -2135,10 +2135,10 @@ index 74b521c..9eee5f4 100644
  
 diff --git a/sync.sh b/sync.sh
 new file mode 100755
-index 0000000..37b0c10
+index 0000000..e3a30a3
 --- /dev/null
 +++ b/sync.sh
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,160 @@
 +#!/usr/bin/env bash
 +#==============================================================================
 +# sync.sh — dsh-antigravity-auth 上游同步脚本
@@ -2192,7 +2192,7 @@ index 0000000..37b0c10
 +echo "[1.5] 暂存本地未提交修改..."
 +STASHED=false
 +if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-+    git stash push -m "sync.sh auto-stash" -- sync.patch sync.sh 2>/dev/null || true
++    git stash push -m "sync.sh auto-stash" 2>/dev/null || true
 +    STASHED=true
 +fi
 +
@@ -2207,6 +2207,8 @@ index 0000000..37b0c10
 +
 +if git apply --check "$PATCH_FILE" 2>/dev/null; then
 +    git apply "$PATCH_FILE"
++    git add -A
++    git commit -m "feat(custom): apply custom modifications ($(date +%Y-%m-%d))" 2>/dev/null || true
 +    git branch -f custom custom-new
 +    git checkout custom
 +    git branch -D custom-new 2>/dev/null || true
@@ -2270,19 +2272,30 @@ index 0000000..37b0c10
 +    git stash pop 2>/dev/null || true
 +fi
 +
-+# Step 4: 重新生成 patch
++# Step 4: 重新生成 patch（排除 sync.patch 自身，保证补丁纯净）
 +echo "[4/4] 重新生成 sync.patch..."
-+git diff upstream/main...custom > "$PATCH_FILE"
++git diff upstream/main...custom -- . ':!sync.patch' > "$PATCH_FILE"
 +echo "✅ sync.patch 已更新 ($(wc -l < "$PATCH_FILE") 行)"
 +
++# 自动提交更新后的 patch 文件（如果存在变动）
++git add "$PATCH_FILE"
++if ! git diff --cached --quiet 2>/dev/null; then
++    git commit -m "chore: regenerate sync.patch" 2>/dev/null || true
++    echo "✅ sync.patch 已自动提交"
++fi
++
 +# 推送到 fork
-+read -p "是否推送到 origin/custom? [y/N] " -n 1 -r < /dev/tty
-+echo
-+if [[ $REPLY =~ ^[Yy]$ ]]; then
-+    git push origin custom
-+    echo "✅ 已推送到 origin/custom"
++if [ -t 0 ]; then
++    read -p "是否推送到 origin/custom? [y/N] " -n 1 -r < /dev/tty
++    echo
++    if [[ $REPLY =~ ^[Yy]$ ]]; then
++        git push origin custom
++        echo "✅ 已推送到 origin/custom"
++    else
++        echo "跳过推送"
++    fi
 +else
-+    echo "跳过推送"
++    echo "非交互终端环境，跳过交互推送提示"
 +fi
 +
 +echo "=== $REPO_NAME 同步完成 ==="
