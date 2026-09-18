@@ -270,10 +270,15 @@ describe('Antigravity LLM adapter', () => {
     })
 
     const chunks = await collectThroughRuntime(adapter, options())
-    expect(chunks.at(-1)).toMatchObject({
+    const finish = chunks.at(-1)
+    expect(finish).toMatchObject({
       type: 'finish',
       reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
     })
+    expect(finish).toMatchObject({
+      reason: { failure: { message: expect.stringContaining('HTTP 400') } },
+    })
+    expect(JSON.stringify(finish)).not.toMatch(/The Antigravity private request failed safely/)
   })
 
   it('repairs a truncated historical tool-call argument object and replays it', async () => {

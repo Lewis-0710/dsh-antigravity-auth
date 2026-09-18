@@ -1585,14 +1585,28 @@ function toModelCatalogError(
   return new LlmError('The Antigravity live model catalog did not match the audited schema', 'PROTOCOL_DRIFT')
 }
 
+const LLM_FAILURE_MESSAGES: Readonly<Record<PrivateFailureKind, string>> = {
+  authentication: 'The Antigravity private request failed: authentication required',
+  forbidden: 'The Antigravity private request failed: this account is forbidden',
+  'rate-limited': 'Antigravity rate limit reached (Google returned 429 Resource Exhausted); please wait for your quota window to refresh',
+  cancelled: 'The Antigravity private request was cancelled',
+  timeout: 'The Antigravity private request timed out',
+  'attribution-rejected': 'The Antigravity private request failed: identity attribution was rejected',
+  'protocol-drift': 'The Antigravity private request was rejected (protocol drift)',
+  'response-limit': 'The Antigravity private response exceeded the byte limit',
+  'request-limit': 'The Antigravity private request exceeded the byte limit',
+  upstream: 'The Antigravity private endpoint is unavailable',
+  network: 'The Antigravity private request could not be reached',
+  failed: 'The Antigravity private request failed safely',
+}
+
 function toLlmError(error: unknown): LlmError {
   if (error instanceof LlmError) return error
   if (error instanceof PrivateTransportError) {
     const kind = classifyPrivateFailure(error)
     const code = LLM_FAILURE_CODES[kind]
-    const message = kind === 'rate-limited'
-      ? 'Antigravity rate limit reached (Google returned 429 Resource Exhausted); please wait for your quota window to refresh'
-      : 'The Antigravity private request failed safely'
+    const base = LLM_FAILURE_MESSAGES[kind]
+    const message = error.status === undefined ? base : `${base} (HTTP ${String(error.status)})`
     return error.status === undefined
       ? new LlmError(message, code)
       : new LlmError(message, code, { status: error.status })

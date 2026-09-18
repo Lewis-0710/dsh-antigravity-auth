@@ -167,6 +167,7 @@ describe('Antigravity signed replay', () => {
 
     await expect(collect(adapter, options('antigravity-gemini-3.7-flash'))).rejects.toMatchObject({
       code: 'PROTOCOL_DRIFT',
+      message: expect.stringContaining('HTTP 400'),
     })
   })
 })

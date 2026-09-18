@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Private LLM transport failures now surface a safe failure kind and HTTP status (for example `protocol drift (HTTP 400)`) instead of the opaque "failed safely" card. Gemini thinking-signature replay remains as landed in #29.
+
 ## [0.1.4-rc.1] - 2026-09-10
 
 - Completes English settings descriptions, localizes the ready status and capability control labels, and uses natural English/Chinese quota reset word order. Adds dictionary and language-switching regression coverage.
