@@ -242,6 +242,106 @@ describe('Antigravity LLM adapter', () => {
     expect(request).toHaveBeenCalledOnce()
   })
 
+  it('carries one response-level Gemini thinking signature into an unsigned tool call and replays it', async () => {
+    const signature = 'gemini-thought-signature'
+    const body = 'data: {"response":{"parts":[{"text":"planning","thought":true},{"functionCall":{"id":"call-sig","name":"bash","args":{"command":"pwd"}}}],"thoughtSignature":"gemini-thought-signature"}}\n\n'
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response(body)) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options())
+    const finish = chunks.at(-1)
+    expect(finish?.type).toBe('finish')
+    if (finish?.type === 'finish') {
+      expect(finish.replayState).toMatchObject({
+        blocks: [
+          { kind: 'reasoning' },
+          { kind: 'tool-call', signature },
+        ],
+      })
+    }
+  })
+
+  it('describes an HTTP 400 rejection without losing the protocol-drift classification', async () => {
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request: vi.fn(async () => new Response('rejected', { status: 400 })) },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options())
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'error', failure: { code: 'PROTOCOL_DRIFT', status: 400 } },
+    })
+  })
+
+  it('repairs a truncated historical tool-call argument object and replays it', async () => {
+    const toolCallId = 'call_repairable'
+    const model = 'antigravity-gemini-3.7-flash'
+    const assistant = {
+      id: 'assistant-repairable',
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: toolCallId, name: 'bash', arguments: '{"command":"pwd"' }],
+      source: { kind: 'model', provider: ANTIGRAVITY_PROVIDER, model },
+    } as unknown as Message
+    const toolResult: Message = {
+      id: 'result-repairable' as never,
+      role: 'user',
+      source: { kind: 'tool', callId: toolCallId as never },
+      content: [{ type: 'tool-result', toolCallId: toolCallId as never, content: [{ type: 'text', text: '/workspace' }] }],
+    }
+    const request = vi.fn(async (input: PrivateTransportRequest) => {
+      const payload = JSON.parse(String(input.body)) as {
+        request: { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }
+      }
+      const call = payload.request.contents[1]?.parts?.[0] as { functionCall?: { args?: unknown } } | undefined
+      expect(call?.functionCall?.args).toEqual({ command: 'pwd' })
+      return new Response('data: {"response":{"parts":[{"text":"repaired"}],"finishReason":"STOP"}}\n\n')
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model, messages: [message('hello'), assistant, toolResult] }))
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'text-delta', text: 'repaired' }))
+    expect(request).toHaveBeenCalledOnce()
+  })
+
+  it('drops an unrepairable historical tool-call fragment instead of locking the session', async () => {
+    const toolCallId = 'call_truncated'
+    const model = 'antigravity-gemini-3.7-flash'
+    const assistant = {
+      id: 'assistant-truncated',
+      role: 'assistant',
+      content: [{ type: 'tool-call', id: toolCallId, name: 'bash', arguments: '{"command":"echo hi' }],
+      source: { kind: 'model', provider: ANTIGRAVITY_PROVIDER, model },
+    } as unknown as Message
+    const toolResult: Message = {
+      id: 'result-truncated' as never,
+      role: 'user',
+      source: { kind: 'tool', callId: toolCallId as never },
+      content: [{ type: 'tool-result', toolCallId: toolCallId as never, content: [{ type: 'text', text: 'hi' }] }],
+    }
+    const request = vi.fn(async (input: PrivateTransportRequest) => {
+      const payload = JSON.parse(String(input.body)) as {
+        request: { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }
+      }
+      const call = payload.request.contents[1]?.parts?.[0] as { functionCall?: { args?: unknown } } | undefined
+      expect(call?.functionCall?.args).toEqual({})
+      return new Response('data: {"response":{"parts":[{"text":"recovered"}],"finishReason":"STOP"}}\n\n')
+    })
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('opaque-test-value')) },
+      transport: { request },
+    })
+
+    const chunks = await collectThroughRuntime(adapter, options({ model, messages: [message('hello'), assistant, toolResult] }))
+    expect(chunks).toContainEqual(expect.objectContaining({ type: 'text-delta', text: 'recovered' }))
+    expect(request).toHaveBeenCalledOnce()
+  })
+
   it('maps a bounded multiline HTTP 400 SSE error to DSH context-overflow recovery', async () => {
     const providerDetail = 'prompt is too long: 200001 tokens > 200000 maximum'
     const payload = JSON.stringify({
@@ -874,5 +974,24 @@ describe('Antigravity LLM adapter', () => {
     expect(encoded).toContain('project-id')
     expect(encoded).not.toContain('access-secret')
     expect(encoded).toContain('functionDeclarations')
+  })
+
+  it('drops trailing empty text part when tool call is emitted for Gemini', async () => {
+    const request = vi.fn(async () => new Response(
+      'data: {"response":{"parts":[{"text":"thinking...\\n\\n","thought":true}]}}\n\n'
+      + 'data: {"response":{"parts":[{"functionCall":{"id":"call-1","name":"pwsh","args":{"command":"ls"}}}]}}\n\n'
+      + 'data: {"response":{"parts":[{"text":""}],"finishReason":"STOP"}}\n\n'
+    ))
+    const adapter = new AntigravityAdapter({
+      auth: { credential: vi.fn(async () => credential('access-secret')) },
+      transport: { request },
+    })
+    const chunks = await collect(adapter.stream(options({ model: 'antigravity-gemini-3.8-flash' })))
+
+    expect(chunks.some(chunk => chunk.type === 'block-start' && chunk.blockType === 'text')).toBe(false)
+    const reasoningEnd = chunks.find(chunk => chunk.type === 'block-end' && 'block' in chunk && chunk.block.type === 'reasoning')
+    expect(reasoningEnd).toMatchObject({ block: { type: 'reasoning', text: 'thinking...' } })
+    const toolCallEnd = chunks.find(chunk => chunk.type === 'block-end' && 'block' in chunk && chunk.block.type === 'tool-call')
+    expect(toolCallEnd).toBeDefined()
   })
 })

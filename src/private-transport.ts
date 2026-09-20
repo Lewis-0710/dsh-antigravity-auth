@@ -63,6 +63,7 @@ export function createPrivateTransport(options: PrivateTransportOptions = {}): P
 /** Convert a bounded response status to a safe provider error without exposing its body. */
 export function privateStatusError(status: number): PrivateTransportError | undefined {
   if (status >= 200 && status < 300) return undefined
+  if (status === 400) return new PrivateTransportError('protocol-drift', 'The private endpoint rejected the request as invalid', { status })
   if (status === 401) return new PrivateTransportError('authentication', 'The private endpoint requires authentication', { status })
   if (status === 403) return new PrivateTransportError('forbidden', 'The private endpoint forbade this account', { status })
   if (status === 429) return new PrivateTransportError('rate-limited', 'The private endpoint is rate-limited', { status })

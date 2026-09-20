@@ -71,6 +71,11 @@ const MAX_PROVIDER_ERROR_BYTES = 64 * 1024
 const MAX_PROVIDER_ERROR_FRAME_BYTES = 16 * 1024
 const MAX_PROVIDER_ERROR_JSON_DEPTH = 8
 const MAX_PROVIDER_PARTS = 4096
+// A capacity-exhausted 503 clears on its own; two short waits absorb the blip
+// without holding a turn open long enough to look hung.
+const MAX_CAPACITY_RETRIES = 2
+const CAPACITY_RETRY_BASE_DELAY_MS = 1500
+const CAPACITY_RETRY_MAX_DELAY_MS = 8000
 
 export interface AntigravityAuthCredentialSource {
   credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
@@ -247,6 +252,7 @@ export class AntigravityAdapter extends LlmAdapter {
     }
     const hasEmitted = { value: false }
     let replayed = false
+    let capacityAttempt = 0
     for (;;) {
       const credential = await this.readCredential(signal, replayed)
       if (credential === undefined) {
@@ -289,6 +295,25 @@ export class AntigravityAdapter extends LlmAdapter {
         })) {
           throw contextWindowExceededError(response.status)
         }
+        // A "no capacity available" 503 is a capacity blip on one model tier,
+        // not a bad request: wait out the cooldown instead of failing the turn.
+        // The status must be pinned to 503 first: a 429 that happens to carry the
+        // same capacity marker is still a rate-limit verdict, and the existing
+        // contract is that 429 is reported to the caller without a resend.
+        if (response.status === 503
+          && capacityAttempt < MAX_CAPACITY_RETRIES
+          && !hasEmitted.value
+          && !isAborted(signal)
+          && await responseReportsModelCapacityExhausted(response, this.options)) {
+          capacityAttempt += 1
+          await cancelResponse(response)
+          await sleep(backoffDelayMs(capacityAttempt), signal)
+          if (isAborted(signal)) {
+            yield finishChunk('aborted', 'CANCELLED')
+            return
+          }
+          continue
+        }
         await cancelResponse(response)
         throw toLlmError(statusError)
       }
@@ -317,6 +342,7 @@ export class AntigravityAdapter extends LlmAdapter {
     let usage: TokenUsage | undefined
     let finish: string | undefined
     let eventError: ProviderEvent['error']
+    let pendingSignature: string | undefined
     for await (const sse of iteratePrivateSse(response, {
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       idleTimeoutMs: this.options.idleTimeoutMs,
@@ -334,11 +360,23 @@ export class AntigravityAdapter extends LlmAdapter {
       if (event.usage !== undefined) usage = event.usage
       if (event.finish !== undefined) finish = event.finish
       for (const part of event.parts) {
+        // A part with no observable content must never announce a block. An
+        // emitted `block-start` that is never closed both violates the stream
+        // grammar and desynchronizes the replay envelope from the emitted
+        // blocks, which makes DSH drop the whole turn's replay metadata. The
+        // part's provider-issued signature is still validation-bearing, so it
+        // is carried onto the next block that does open.
+        if (part.kind !== 'tool-call' && part.text.length === 0) {
+          if (part.signature !== undefined) pendingSignature = part.signature
+          continue
+        }
         if (current === undefined || !sameBlock(current, part)) {
           if (current !== undefined) {
             yield endBlock(current)
           }
           current = beginBlock(states, part)
+          if (current.signature === undefined && pendingSignature !== undefined) current.signature = pendingSignature
+          pendingSignature = undefined
           yield { type: 'block-start', index: current.index, blockType: current.kind }
         }
         if (part.kind === 'tool-call') {
@@ -356,6 +394,7 @@ export class AntigravityAdapter extends LlmAdapter {
         } else if (part.kind === 'reasoning') {
           current.text += part.text
           hasEmitted.value ||= part.text.length > 0
+          if (part.signature !== undefined) current.signature = part.signature
           if (part.text.length > 0) yield { type: 'reasoning-delta', index: current.index, text: part.text }
         } else {
           current.text += part.text
@@ -364,6 +403,8 @@ export class AntigravityAdapter extends LlmAdapter {
         }
       }
     }
+    // Every block that announced itself above is closed here, so the emitted
+    // stream and the replay envelope below always describe the same block list.
     if (current !== undefined) yield endBlock(current)
     if (usage !== undefined) yield { type: 'usage', usage }
     if (eventError !== undefined) {
@@ -381,6 +422,19 @@ export class AntigravityAdapter extends LlmAdapter {
     if (states.length === 0) {
       yield finishChunk('error', 'EMPTY_RESPONSE')
       return
+    }
+    // The provider can deliver the signature that validates a replayed tool call
+    // in a trailing content-free frame, i.e. after the call itself. Seed the
+    // backfill with that pending signature so it is never dropped on the floor.
+    let lastReasoningSignature: string | undefined = pendingSignature
+    for (const state of states) {
+      if (state.kind === 'reasoning' && state.signature !== undefined) {
+        lastReasoningSignature = state.signature
+      } else if (state.kind === 'tool-call') {
+        if (state.signature === undefined && lastReasoningSignature !== undefined) {
+          state.signature = lastReasoningSignature
+        }
+      }
     }
     const replayBlocks: AntigravityReplayBlock[] = states.map(state => ({
       kind: state.kind,
@@ -683,7 +737,7 @@ function assembleFunctionName(current: string | undefined, fragment: string): st
 
 function endBlock(state: BlockState): StreamChunk {
   if (state.kind === 'text') return { type: 'block-end', index: state.index, block: { type: 'text', text: state.text } }
-  if (state.kind === 'reasoning') return { type: 'block-end', index: state.index, block: { type: 'reasoning', text: state.text } }
+  if (state.kind === 'reasoning') return { type: 'block-end', index: state.index, block: { type: 'reasoning', text: state.text.trimEnd() } }
   let parsed: unknown
   try {
     parsed = JSON.parse(state.text) as unknown
@@ -900,10 +954,27 @@ function claudeToolTypeHint(value: unknown): string {
   return type
 }
 
+function findMessageReasoningSignature(
+  message: Message,
+  replayBlocks: readonly AntigravityReplayBlock[],
+): string | undefined {
+  const fromReplay = replayBlocks.find(b => b.kind === 'reasoning' && b.signature !== undefined)?.signature
+  if (fromReplay !== undefined) return fromReplay
+  for (const block of message.content) {
+    if (block.type === 'reasoning') {
+      const sig = (block as unknown as { signature?: string; thoughtSignature?: string }).signature
+        ?? (block as unknown as { signature?: string; thoughtSignature?: string }).thoughtSignature
+      if (typeof sig === 'string' && sig.length > 0) return sig
+    }
+  }
+  return undefined
+}
+
 function mapMessage(message: Message, model: string, toolNames: Map<string, string>): Record<string, unknown> {
   const parts: Record<string, unknown>[] = []
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
+  const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const isClaude = antigravityModelFamily(model) === 'claude'
   let replayIndex = 0
   let sawClaudeFunctionCall = false
@@ -924,7 +995,7 @@ function mapMessage(message: Message, model: string, toolNames: Map<string, stri
       const callId = rememberToolName(toolNames, block.id, block.name)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
-        : blockSignature
+        : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
       sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
@@ -964,6 +1035,7 @@ async function mapMessageWithAttachments(
   if (attachments === undefined) throw new LlmError('Antigravity image input requires the Host AttachmentStore', 'UNSUPPORTED_MODALITY')
   const replay = compatibleReplayState(message, ANTIGRAVITY_PROVIDER, model, contentKinds(message))
   const replayBlocks = replay?.blocks ?? []
+  const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const parts: Record<string, unknown>[] = []
   const isClaude = antigravityModelFamily(model) === 'claude'
   let replayIndex = 0
@@ -988,7 +1060,7 @@ async function mapMessageWithAttachments(
       const callId = rememberToolName(toolNames, block.id, block.name)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
-        : blockSignature
+        : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
       sawClaudeFunctionCall ||= isClaude
       parts.push({
         functionCall: {
@@ -1074,10 +1146,20 @@ function parseProviderEvent(data: string): ProviderEvent {
   const root = isRecord(value.response) ? value.response : value
   if (isRecord(root.error)) return { parts: [], error: errorDetails(root.error) }
   const partsValue = findParts(root)
+  // Gemini attaches the thinking signature to the response or candidate rather
+  // than to each part. Capture it once here and hand it to the parts that need
+  // validation, otherwise a replayed functionCall reaches the endpoint unsigned
+  // and the provider rejects the whole request with HTTP 400.
+  const responseSignature = responseLevelSignature(root, value, partsValue)
   const parts: ProviderPart[] = []
   for (const part of partsValue) {
     const parsed = parsePart(part)
-    if (parsed !== undefined) parts.push(parsed)
+    if (parsed === undefined) continue
+    if (parsed.kind === 'tool-call' && parsed.signature === undefined && responseSignature !== undefined) {
+      parts.push({ ...parsed, signature: responseSignature })
+      continue
+    }
+    parts.push(parsed)
   }
   const usage = parseUsage(root.usageMetadata ?? value.usageMetadata)
   const finish = findFinish(root)
@@ -1086,6 +1168,35 @@ function parseProviderEvent(data: string): ProviderEvent {
     ...(usage === undefined ? {} : { usage }),
     ...(finish === undefined ? {} : { finish }),
   }
+}
+
+/** First provider-issued signature carried by the response envelope itself. */
+function responseLevelSignature(
+  root: Record<string, unknown>,
+  envelope: Record<string, unknown>,
+  parts: readonly unknown[],
+): string | undefined {
+  const direct = signatureOf(root) ?? signatureOf(envelope)
+  if (direct !== undefined) return direct
+  if (Array.isArray(root.candidates)) {
+    for (const candidate of root.candidates) {
+      if (!isRecord(candidate)) continue
+      const candidateSignature = signatureOf(candidate)
+        ?? (isRecord(candidate.content) ? signatureOf(candidate.content) : undefined)
+        ?? (isRecord(candidate.metadata) && isRecord(candidate.metadata.google) ? signatureOf(candidate.metadata.google) : undefined)
+      if (candidateSignature !== undefined) return candidateSignature
+    }
+  }
+  if (isRecord(root.metadata) && isRecord(root.metadata.google)) {
+    const nested = signatureOf(root.metadata.google)
+    if (nested !== undefined) return nested
+  }
+  for (const part of parts) {
+    if (!isRecord(part)) continue
+    const partSignature = signatureOf(part) ?? (isRecord(part.metadata) && isRecord(part.metadata.google) ? signatureOf(part.metadata.google) : undefined)
+    if (partSignature !== undefined) return partSignature
+  }
+  return undefined
 }
 
 function findParts(value: Record<string, unknown>): unknown[] {
@@ -1135,6 +1246,9 @@ function parsePart(value: unknown): ProviderPart | undefined {
     const kind = value.thought === true || value.reasoning === true || value.thinking === true ? 'reasoning' as const : 'text' as const
     const signature = signatureOf(value)
     const text = typeof value.text === 'string' ? value.text : ''
+    if (kind === 'text' && text.length === 0 && signature === undefined) {
+      return undefined
+    }
     return { kind, text, ...(signature === undefined ? {} : { signature }) }
   }
   if (value.inlineData !== undefined || value.inline_data !== undefined) {
@@ -1154,15 +1268,17 @@ function errorDetails(value: Record<string, unknown>): NonNullable<ProviderEvent
   }
 }
 
+interface ProviderErrorReadOptions {
+  readonly signal?: AbortSignal
+  readonly idleTimeoutMs: number
+  readonly totalTimeoutMs: number
+  readonly maxResponseBytes: number
+  readonly maxFrameBytes: number
+}
+
 async function responseReportsContextWindowExceeded(
   response: Response,
-  options: {
-    readonly signal?: AbortSignal
-    readonly idleTimeoutMs: number
-    readonly totalTimeoutMs: number
-    readonly maxResponseBytes: number
-    readonly maxFrameBytes: number
-  },
+  options: ProviderErrorReadOptions,
 ): Promise<boolean> {
   try {
     for await (const event of iteratePrivateSse(response, {
@@ -1181,6 +1297,61 @@ async function responseReportsContextWindowExceeded(
     if (isAborted(options.signal)) throw new LlmError('The Antigravity request was cancelled', 'CANCELLED')
     return false
   }
+}
+
+/**
+ * Detect the provider's capacity-exhaustion verdict on an HTTP 503 body.
+ *
+ * The endpoint reports `MODEL_CAPACITY_EXHAUSTED` ("No capacity available for
+ * model X on the server") as HTTP 503. That is a momentary capacity blip on one
+ * model tier rather than a defect in the request, so the caller can wait and
+ * resend instead of failing the turn.
+ *
+ * This probe only inspects the body; the caller is responsible for pinning the
+ * status to 503 first. A 429 carrying the same marker is a rate-limit verdict
+ * and must not be resent.
+ * @param response - the private endpoint response, still unread.
+ * @param options - bounded read limits shared with the context-window probe.
+ * @returns whether the body declares capacity exhaustion.
+ */
+async function responseReportsModelCapacityExhausted(
+  response: Response,
+  options: ProviderErrorReadOptions,
+): Promise<boolean> {
+  try {
+    for await (const event of iteratePrivateSse(response, {
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      idleTimeoutMs: options.idleTimeoutMs,
+      totalTimeoutMs: options.totalTimeoutMs,
+      maxBytes: Math.min(MAX_PROVIDER_ERROR_BYTES, options.maxResponseBytes),
+      maxFrameBytes: Math.min(MAX_PROVIDER_ERROR_FRAME_BYTES, options.maxFrameBytes),
+    })) {
+      if (event.data.includes('MODEL_CAPACITY_EXHAUSTED') || event.data.includes('No capacity available')) return true
+    }
+    return false
+  } catch (error) {
+    if (error instanceof PrivateTransportError && error.code === 'cancelled') throw toLlmError(error)
+    if (isAborted(options.signal)) throw new LlmError('The Antigravity request was cancelled', 'CANCELLED')
+    return false
+  }
+}
+
+/** Bounded exponential backoff between capacity retries. */
+function backoffDelayMs(attempt: number): number {
+  const base = CAPACITY_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1)
+  const jitter = Math.floor(Math.random() * 250)
+  return Math.min(base + jitter, CAPACITY_RETRY_MAX_DELAY_MS)
+}
+
+/** Abort-aware sleep so a cancelled turn never waits out a cooldown. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) return new Promise(resolve => { setTimeout(resolve, ms) })
+  return new Promise(resolve => {
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+    const onAbort = (): void => { clearTimeout(timer); resolve() }
+    if (signal.aborted) { clearTimeout(timer); resolve(); return }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function providerErrorReportsContextWindowExceeded(value: Record<string, unknown>, depth: number): boolean {
@@ -1272,17 +1443,75 @@ function findFinish(value: Record<string, unknown>): string | undefined {
 }
 
 function signatureOf(value: Record<string, unknown>): string | undefined {
-  return stringValue(value.thoughtSignature ?? value.thought_signature ?? value.signature)
+  const direct = stringValue(value.thoughtSignature ?? value.thought_signature ?? value.signature)
+  if (direct !== undefined) return direct
+  const metadata = isRecord(value.metadata) ? value.metadata : undefined
+  const google = metadata !== undefined && isRecord(metadata.google) ? metadata.google : undefined
+  return google === undefined ? undefined : stringValue(google.thoughtSignature ?? google.thought_signature ?? google.signature)
 }
 
 function parseJsonObject(value: string): Record<string, unknown> {
+  if (typeof value !== 'string' || value.trim().length === 0) return {}
   try {
     const parsed = JSON.parse(value) as unknown
     if (isRecord(parsed)) return parsed
   } catch {
-    // The provider must never receive silently rewritten historical tool calls.
+    // A turn interrupted mid-stream can persist a truncated arguments fragment.
+    // Repair the common missing-brace case before falling back, because one
+    // malformed historical call must not make the whole session unusable: the
+    // fragment is replayed on every later request, so throwing here locks the
+    // session permanently.
+    const repaired = repairTruncatedJsonObject(value)
+    if (repaired !== undefined) return repaired
   }
-  throw new LlmError('The Antigravity tool-call history is malformed', 'PROTOCOL_DRIFT')
+  return {}
+}
+
+/** Recover a truncated JSON object body; undefined when it is not safely repairable. */
+function repairTruncatedJsonObject(value: string): Record<string, unknown> | undefined {
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('{')) return undefined
+  let inString = false
+  let escaped = false
+  for (const character of trimmed) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+  }
+  // An unterminated string cannot be closed without guessing its content.
+  if (inString || escaped) return undefined
+  const suffix = closingSuffix(trimmed)
+  if (suffix.length === 0) return undefined
+  try {
+    const parsed = JSON.parse(`${trimmed}${suffix}`) as unknown
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Structural closing characters needed to balance a truncated JSON object body. */
+function closingSuffix(value: string): string {
+  const stack: string[] = []
+  let inString = false
+  let escaped = false
+  for (const character of value) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === '"') inString = false
+      continue
+    }
+    if (character === '"') inString = true
+    else if (character === '{') stack.push('}')
+    else if (character === '[') stack.push(']')
+    else if (character === '}' || character === ']') stack.pop()
+  }
+  return stack.reverse().join('')
 }
 
 function blocksToText(blocks: readonly { type: string; text?: string }[]): string {
