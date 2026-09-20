@@ -153,17 +153,22 @@ describe('account-store', () => {
     expect(dataFinal.accounts[0]?.id).toBe('acc_2')
   })
 
-  it('syncRefreshToken updates refreshToken on active account', async () => {
+  it('syncRefreshToken updates refreshToken on the bound account id', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'anti-acc-test-'))
     const authPath = join(dir, 'auth.json')
     const accPath = join(dir, 'accounts.json')
     const store = createAccountStore(accPath, authPath)
 
-    await store.saveAccount({ email: 'a@example.com', projectId: 'p1', refreshToken: 'r1' })
-    await store.syncRefreshToken('r2_rotated', 'a@example.com')
+    const saved = await store.saveAccount({ email: 'a@example.com', projectId: 'p1', refreshToken: 'r1' })
+    await store.saveAccount({ email: 'b@example.com', projectId: 'p2', refreshToken: 'rB' })
+    await store.setActive('b@example.com')
+    const updated = await store.syncRefreshToken({ accountId: saved.account.id, refreshToken: 'r2_rotated' })
+    expect(updated).toBe(true)
 
     const data = await store.read()
-    expect(data.accounts[0]?.refreshToken).toBe('r2_rotated')
+    expect(data.accounts.find(a => a.id === saved.account.id)?.refreshToken).toBe('r2_rotated')
+    expect(data.accounts.find(a => a.email === 'b@example.com')?.refreshToken).toBe('rB')
+    expect(await store.syncRefreshToken({ accountId: 'acc_missing', refreshToken: 'nope' })).toBe(false)
   })
 })
 

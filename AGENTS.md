@@ -47,7 +47,7 @@ If any verification fails, stop and report the mismatch before changing files.
 - The plugin-owned Wire Identity module keeps the fixed audited `agy` User-Agent/framing and obtains the truthful DSH identity value from public `attributionHeaders()`, carrying it in `X-DeepSeek-Harness-Attribution`.
 - LLM, Search, Image, Video, Quota, and project discovery must share that one Host-only identity module; callers must not construct identity headers independently.
 - OAuth credentials and secret-bearing network requests stay Host-side. Browser, RPC, settings, logs, fixtures, and session text never receive tokens, codes, verifiers, cookies, callback URLs, or media base64.
-- The product is single-account only: no account arrays, switching, rotation, quota pools, identity fallback, fingerprint regeneration, automatic onboarding, or fallback project.
+- The product caches multiple Google accounts locally and activates one at a time through explicit switch/login/logout/remove. Do not add quota pools, automatic account rotation, identity fallback, fingerprint regeneration, automatic onboarding, or a fallback project. Refresh, logout, revoke, and email backfill must stay bound to the account that started the operation.
 - Default development and `pnpm run check` are offline. Live OAuth and private endpoint calls always require a new explicit user authorization.
 
 ## Slash-command examples

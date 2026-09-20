@@ -1,5 +1,9 @@
 # Changelog
 
+## [Unreleased]
+
+- Caches multiple Antigravity Google accounts locally and activates one at a time through `/antigravity-auth` (`/anti`) `accounts`, `switch`, `login`, `logout`, and `remove`. Refresh-token rotation, logout/revoke cleanup, and userinfo email backfill bind to the account that started the operation, so a late result cannot overwrite or delete a different active account.
+
 ## [0.1.4-rc.1] - 2026-09-10
 
 - Completes English settings descriptions, localizes the ready status and capability control labels, and uses natural English/Chinese quota reset word order. Adds dictionary and language-switching regression coverage.

@@ -104,11 +104,16 @@ dsh plugin --profile web list
 在提供 DSH `commands` 缝的交互界面上，本 bundle 会注册 `antigravity-auth` slash 命令，作为 Web 设置卡片的替代入口：
 
 ```text
-/antigravity-auth            # 查看当前登录状态（默认）
-/antigravity-auth login      # 启动 Google OAuth 授权流程
-/antigravity-auth cancel     # 取消进行中的授权
-/antigravity-auth logout     # 清除共享的 Antigravity 凭证
+/antigravity-auth              # 查看当前登录状态（默认）
+/antigravity-auth accounts     # 列出本地缓存的账号
+/antigravity-auth switch <id>  # 按序号、id 或邮箱激活缓存账号
+/antigravity-auth login        # 启动 Google OAuth 授权流程
+/antigravity-auth cancel       # 取消进行中的授权
+/antigravity-auth logout       # 登出当前账号并删除其缓存凭据
+/antigravity-auth remove <id>  # 删除一个缓存账号（若为当前账号则同时登出）
 ```
+
+`/anti` 是同一条命令。成功的 `login` 会把新凭据写入本地账号缓存（`accounts.json`），并把它设为 `auth.json` 中的活动账号。同一时刻只有一个账号处于活动状态；其余 refresh token 会留在磁盘上，直到对该账号执行 `logout` 或 `remove`。`logout` 与 Web 上的显式撤销会清空 Host 内存和 `auth.json`，然后只删除**启动该操作的那个账号**。若 coordinator 将撤销标记为 `superseded`（例如在 Google 撤销请求进行期间切换了账号），则不会删除新的活动账号。刷新令牌轮换与可选的 userinfo 邮箱回填绑定到操作开始时捕获的账号身份，而不是显示用邮箱，也不是结果返回时恰好处于活动状态的账号。
 
 账户操作面向本地终端登录入口：在无 DSH WebServer、或显式绑定 `127.0.0.1` 的本地 Host 上执行；仅当 WebServer 在其它网卡上暴露共享的 `commands` 缝时，命令才会在不触碰认证服务的前提下被拒绝。账户 RPC 仍保留其更严格的 ADR-0008 守卫（真实 dispatcher 仅挂在显式 `127.0.0.1` bind 上）。
 
@@ -139,8 +144,8 @@ X-DeepSeek-Harness-Attribution: deepseek-harness/<version> (+repository-url)
 
 - token 值绝不进入前端、设置、日志、会话事件或工具 metadata，仅在 Host 侧发起私有请求时附带认证 header。
 - auth、gate evidence 与受控 live image 文件在 POSIX 上严格校验属主 mode；Windows 由 ACL 管理访问权限，因此不把合成的 POSIX group/other bits 作为访问判据，但仍执行 symlink、文件类型、大小、schema 与内容校验。
-- 严格单账号模式：不提供账号池、轮换、身份回退或账号切换。
-- 本地登出立即清除 Host 内存与本地存储。
+- 本地多账号缓存与手动切换：`accounts.json` 可保存多个 refresh token，`auth.json` 只保存当前活动记录。不提供额度池、自动账号轮换、身份回退或 fingerprint regeneration。
+- 本地登出会清空 Host 内存和 `auth.json`，并删除该账号的缓存凭据，因此无法再用 `switch` 恢复。其余缓存账号保留。撤销是独立的显式动作，清理范围同样只覆盖启动该操作的账号；`superseded` 不能授权删除另一个活动账号。
 - DSH alpha.5 不再提供逐 method 或 Host 侧 carrier authority。插件只在公开 WebServer bind 恰为 `127.0.0.1` 时启用真实 account RPC；缺失、all-interface 与未知 bind 只返回 `loopback-required`。浏览器在 `ConnectionHandle.isLoopback` 为 false 时也不会注册该设置分区，但该客户端提示仅用于 UX：在 DSH 提供对应 Host 侧事实前，owner-contained 自定义 carrier 仍不能获得授权。
 - 原始多媒体 base64 绝不注入会话正文或前端 RPC。
 

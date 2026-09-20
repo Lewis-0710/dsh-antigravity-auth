@@ -1,8 +1,8 @@
-# Specification: Single-account Antigravity OAuth Capability Bundle
+# Specification: Antigravity OAuth Capability Bundle
 
 ## Problem Statement
 
-用户希望在 DeepSeek Harness（DSH）中直接使用自己单个 Google Antigravity 账号的权益，并获得与现有 Codex capability bundle 对齐的登录、LLM、Web Search、图片生成与编辑、图片列表、用量状态和设置体验，同时增加视频理解能力。
+用户希望在 DeepSeek Harness（DSH）中使用自己的 Google Antigravity 账号权益，并获得与现有 Codex capability bundle 对齐的登录、LLM、Web Search、图片生成与编辑、图片列表、用量状态和设置体验，同时增加视频理解能力。本地可缓存多个账号并手动切换当前活动账号；同一时刻只有一个账号对 LLM、Search、Image、Video 与 Quota 生效。
 
 现有可选路径不能满足这一目标：AI Studio API key 与 Vertex ADC 不消费 Antigravity 权益；官方 `agy` 子进程桥不是用户希望的集成形态；社区实现虽然公开了 Antigravity OAuth、私有 Cloud Code transport、模型、Search、Image 和 quota contract，但这些 contract 属于逆向、非官方且可能随时变化。
 
@@ -10,20 +10,20 @@
 
 用户已经确认以下产品方向：
 
-- 主路径是单账号 Antigravity OAuth + private Cloud Code 模拟，不是 `agy` subprocess bridge；
+- 主路径是 Antigravity OAuth + private Cloud Code 模拟，不是 `agy` subprocess bridge；当前活动账号只有一个，本地可缓存多个账号并手动切换；
 - private request 固定模拟 `agy` wire identity，不先尝试 DSH 默认 User-Agent；
-- 不做多账号、轮换、quota pool、identity fallback 或 fingerprint regeneration；
+- 允许 Host-only 本地多账号缓存与手动切换；不做自动账号轮换、quota pool、identity fallback 或 fingerprint regeneration；
 - 保留现有 DSH LLM runtime，不修改 DSH core；在插件内部集中实现 provider-required User-Agent 与 DSH secondary attribution carrier；
 - Google 已明确禁止第三方软件使用 Antigravity 登录，因此该能力只能作为 private、unofficial、reverse-engineered、experimental self-use；公开发布为 NO-GO；
 - 任何真实 OAuth 或 private endpoint 调用都必须在实现之外再次得到用户明确授权。
 
 ## Solution
 
-构建一个 private DSH capability bundle `dsh-antigravity-auth`，通过 Host-only OAuth module 管理单个用户账号，通过自有 `AntigravityAdapter` 接入 DSH `LlmAdapter` seam，并通过 DSH 的 Web、Tool、Attachment、Filesystem、Settings 与 typed loopback RPC interfaces 提供 Search、Image、Video POC、Usage 和客户端状态体验。
+构建一个 private DSH capability bundle `dsh-antigravity-auth`，通过 Host-only OAuth module 管理本地账号缓存与当前活动凭据，通过自有 `AntigravityAdapter` 接入 DSH `LlmAdapter` seam，并通过 DSH 的 Web、Tool、Attachment、Filesystem、Settings 与 typed loopback RPC interfaces 提供 Search、Image、Video POC、Usage 和客户端状态体验。
 
 插件直接实现一个 Host-only Wire Identity module：它为 private Cloud Code 固定 exact provider User-Agent/framing，调用公开 `attributionHeaders()` 得到真实 DSH application identity value，并通过固定的 `X-DeepSeek-Harness-Attribution` header 携带该值。插件不替换整个 `ctx.llm` module、不修改 DSH core、不 patch installed packages，也不通过 Tool 绕过 LLM adapter seam。
 
-插件将固定依赖已审计版本的 community Antigravity core，只复用 endpoint/OAuth metadata、raw transport、request metadata、model registry、transform 与 quota pure/public surfaces。它不会启用 community AccountManager、account storage、rotation、quota-style fallback、automatic onboarding、hard-coded project fallback、fingerprint regeneration 或 signature bypass sentinel。
+插件将固定依赖已审计版本的 community Antigravity core，只复用 endpoint/OAuth metadata、raw transport、request metadata、model registry、transform 与 quota pure/public surfaces。它不会启用 community AccountManager、community rotation、quota-style fallback、automatic onboarding、hard-coded project fallback、fingerprint regeneration 或 signature bypass sentinel。插件自有的 `accounts.json` 只保存本地 refresh token 缓存并支持显式切换，不是额度池或自动 failover。
 
 所有 secret-bearing private requests 由一个 Host-only Wire Identity module 统一构造 headers/framing。OAuth code/verifier/token、private response bodies 和媒体 base64 永不进入客户端、RPC、settings、日志或 fixture。默认 CI 只运行 mock/fixture；live gates 独立 opt-in，并按 OAuth、attribution/text、LLM、Search、Image、Video 顺序最小化执行。
 
@@ -31,7 +31,7 @@
 
 ## User Stories
 
-1. As a DSH 用户, I want 使用自己的单个 Antigravity 账号登录, so that 我可以在 DSH 中使用该账号的 Antigravity 权益。
+1. As a DSH 用户, I want 使用自己的 Antigravity 账号登录, so that 我可以在 DSH 中使用该账号的 Antigravity 权益。
 2. As a DSH 用户, I want 在登录前看到醒目的 unofficial 与账号封禁风险提示, so that 我能在知情的情况下决定是否继续。
 3. As a DSH 用户, I want 明确确认风险后才生成授权链接, so that 插件不会在未经确认时接触我的 Google 账号。
 4. As a DSH 用户, I want 通过标准浏览器完成 Google authorization-code flow, so that 我不需要向 DSH 输入账号密码或 cookie。
@@ -44,14 +44,14 @@
 11. As a DSH 用户, I want 能取消或超时一个 pending login, so that verifier 和 listener 会被及时释放。
 12. As a DSH 用户, I want access token 只驻留 Host memory, so that 重启后的长期凭据暴露面保持最小。
 13. As a DSH 用户, I want refresh token 存在 owner-only 的 plugin-owned auth store, so that 其它本地用户不能读取它。
-14. As a DSH 用户, I want token store 使用结构化、版本化的单账号 schema, so that 升级和损坏检测不依赖易错的分隔字符串。
+14. As a DSH 用户, I want 活动凭据 store 使用结构化、版本化的单记录 schema, so that 升级和损坏检测不依赖易错的分隔字符串。
 15. As a DSH 用户, I want 新登录只在 exchange 和 project validation 成功后替换旧凭据, so that 一次失败登录不会让我失去现有可用状态。
 16. As a DSH 用户, I want refresh 请求进程内合并且跨进程按 revision 协调, so that 并发请求不会覆盖 rotated refresh token。
 17. As a DSH 用户, I want `invalid_grant` 明确要求重新登录而不是删除所有诊断状态, so that 我知道恢复动作是什么。
 18. As a DSH 用户, I want local logout 只清理本地凭据, so that 我可以不撤销整个 Google grant 地停止使用插件。
 19. As a DSH 用户, I want revoke 是独立的显式动作, so that 我不会误撤销同一 OAuth grant 的其它会话。
 20. As a DSH 用户, I want 状态页只显示掩码邮箱、登录状态、过期时间和 project availability, so that token 与完整 project identity 不会进入浏览器。
-21. As a DSH 用户, I want 插件只维护一个账号并且没有 Add、Switch 或 Rotate 控件, so that 产品不会滑向账号池或额度规避。
+21. As a DSH 用户, I want 能列出并手动切换本地缓存的账号, so that 我可以在多个 Google 账号之间改当前活动凭据，而不会把它们合成额度池或自动轮换。
 22. As a DSH 用户, I want 登录后只执行 read-only project discovery, so that 插件不会在我不知情时创建或 provision Google Cloud resources。
 23. As a DSH 用户, I want project discovery 无结果时得到 `project-unavailable`, so that 插件不会使用 community hard-coded fallback project。
 24. As a DSH 用户, I want automatic onboarding 永远不由 login 或第一条 prompt 触发, so that 有副作用的项目创建保持独立决策。
@@ -117,7 +117,7 @@
 84. As a DSH 用户, I want client unmount 或取消操作释放 listener 与 pending request, so that插件不会遗留后台资源。
 85. As a 插件维护者, I want Auth/LLM、Search、Image、Video 作为独立 Cordis rows, so that未通过 gate 的 capability 可以不注册而不影响状态卡。
 86. As a 插件维护者, I want package exports、Host/client builds、bundle metadata 和 smoke tests 对齐 DSH 插件约定, so that安装后的 artifact 能被 DSH 正确加载。
-87. As a 插件维护者, I want README 中英文版本都披露 unofficial、Terms 风险、单账号限制和 gate 状态, so that用户不会误解支持等级。
+87. As a 插件维护者, I want README 中英文版本都披露 unofficial、Terms 风险、本地多账号缓存与手动切换（非额度池）以及 gate 状态, so that用户不会误解支持等级。
 88. As a 插件维护者, I want 默认 CI 完全无网络且不读取真实 auth files, so that贡献者运行测试不会触发账号操作。
 89. As a 插件维护者, I want live tests 只能通过显式环境开关逐 gate 运行, so that一次测试命令不会批量调用 private endpoints。
 90. As a 项目所有者, I want package 与 repository 保持 private 且不执行 npm publish, so that实验性实现不会被误当成公开支持产品。
@@ -168,11 +168,13 @@
 - state 是 256-bit random handle，不携带 verifier、project 或 account data。Pending flow 只存在 Host memory，默认五分钟，一次消费；进程重启使其失效。
 - listener 只在 pending login 期间绑定 loopback；固定 callback 端口冲突直接失败，不改绑 `0.0.0.0` 或随机端口。
 - callback 在 state 被原子消费后才执行 token exchange；只有 exchange、project validation 和 auth-store commit 全部成功，浏览器才显示 success。
-- auth store 是单个 versioned record，保存 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。Gate evidence 绑定该 record 的 login lineage；替换 commit 是线性化点，旧 lineage 的证据即使因 crash/清理失败仍留在文件中也不能授权新账号。
+- auth store（`auth.json`）是单个 versioned record，保存当前活动账号的 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。Gate evidence 绑定该 record 的 login lineage；替换 commit 是线性化点，旧 lineage 的证据即使因 crash/清理失败仍留在文件中也不能授权新账号。
+- 账号缓存（`accounts.json`）可保存多个 refresh token，每条记录有稳定、不因删除而复用的账号 id。同一时刻只有 `auth.json` 中的那一条对 LLM/Search/Image/Video/Quota 生效。切换把选中缓存记录写回 `auth.json` 并重置 coordinator 的旧账号状态。
+- 刷新令牌轮换必须按刷新开始时绑定的稳定账号 id（及可选 lineage）写回缓存，不得用显示邮箱或完成时的 `activeId` 代替。userinfo 邮箱回填同样绑定发起查询的账号；账号已切换则丢弃结果。
 - parent directory 在 POSIX 上为 `0700`，auth file 为 `0600`；Windows 使用用户数据目录 ACL，不把合成的 POSIX group/other mode bits 作为访问判据。所有平台仍执行 symlink、文件类型、大小与 schema 校验，且不创建明文 backup copy。
 - refresh 使用锁内读取、锁外 network、锁内 lineage compare-and-commit；旧结果不得覆盖较新的 Login、Logout 或 refresh。
 - userinfo 是可选、非关键 operation；插件不解码未验证 access token 来推断账号、plan 或权限。
-- Logout 与 Revoke 是两个不同 actions。Revoke 使用 Google revoke endpoint 的 form body，不把 token 放入 URL。
+- Logout 与 Revoke 是两个不同 actions。Revoke 使用 Google revoke endpoint 的 form body，不把 token 放入 URL。两者的本地清理都绑定启动操作时的账号：成功后删除该账号的缓存凭据，使其无法再通过 switch 恢复。`superseded`（例如撤销进行期间切换了账号）不得删除新的活动账号，也不得把迟到的轮换或邮箱结果写到新账号上。
 
 ### Private transport and identity decisions
 
@@ -264,6 +266,9 @@
 - token exchange 与 refresh request/response schema、redaction 和 AbortSignal。
 - auth-store absent、round-trip、POSIX owner-only permissions、Windows ACL-mode compatibility、atomic failure、corruption 与 unsupported version；capability evidence 与 controlled live-image store 使用同一平台判定，并在所有平台保留结构与大小校验。
 - Login replacement、Logout、Revoke、refresh single-flight、cross-process revision race 和 rotated refresh token。
+- 刷新 A 完成轮换后、缓存同步结束前切换到 B：A 的新 token 只更新 A，B 的 token 与 projectId 不变。
+- 撤销 A 等待期间切换到 B：coordinator 返回 `superseded` 时 B 的缓存与当前 `auth.json` 均保留。
+- 对尚无邮箱的 A 发起 userinfo 后切换到 B：A 的邮箱不得写入 B 或当前 `auth.json`。
 - `invalid_grant`、401、429、5xx 与 timeout 的状态转换。
 - read-only project discovery；任何 fixture 中出现 onboarding 或 hard-coded fallback 都使测试失败。
 
@@ -342,7 +347,7 @@
 
 ## Out of Scope
 
-- 多账号登录、账号列表、账号切换、轮换、health score、killswitch 或 quota pool。
+- 自动账号轮换、health score、killswitch 或 quota pool。本地多账号缓存与手动切换在范围内；跨账号自动 failover 不在范围内。
 - quota-style fallback、Gemini CLI quota fallback、跨账号或跨 identity retry。
 - fingerprint randomization、version cycling、header-style rotation或其它反检测策略。
 - 官方 `agy` CLI subprocess bridge作为主 transport。

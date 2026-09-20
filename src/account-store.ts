@@ -27,6 +27,12 @@ export interface AccountStoreOptions {
   readonly platform?: NodeJS.Platform
 }
 
+export interface RefreshTokenSync {
+  readonly accountId: string
+  readonly refreshToken: string
+  readonly lineage?: string | undefined
+}
+
 export interface AntigravityAccountStore {
   readonly path: string
   read(): Promise<AccountsData>
@@ -40,7 +46,8 @@ export interface AntigravityAccountStore {
   }): Promise<{ activeId: string; account: CachedAccount; isNew: boolean }>
   setActive(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
   removeAccount(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
-  syncRefreshToken(refreshToken: string, email?: string): Promise<void>
+  /** Update one cached account by stable id. Never falls back to the current active account. */
+  syncRefreshToken(update: RefreshTokenSync): Promise<boolean>
   list(): Promise<{ activeId: string | undefined; accounts: readonly (CachedAccount & { isActive: boolean; index: number })[] }>
 }
 
@@ -117,6 +124,30 @@ export function findMatchingAccount(
   }
 
   return undefined
+}
+
+function applyBoundRefreshToken(
+  accounts: readonly CachedAccount[],
+  update: RefreshTokenSync,
+): CachedAccount[] | undefined {
+  const index = accounts.findIndex(account => account.id === update.accountId)
+  if (index < 0) return undefined
+  const existing = accounts[index]
+  if (existing === undefined) return undefined
+  if (
+    update.lineage !== undefined
+    && existing.lineage !== undefined
+    && existing.lineage !== update.lineage
+  ) {
+    return undefined
+  }
+  const next = [...accounts]
+  next[index] = {
+    ...existing,
+    refreshToken: update.refreshToken,
+    updatedAt: new Date().toISOString(),
+  }
+  return next
 }
 
 /** Create the multi-account store managing accounts.json. */
@@ -238,9 +269,9 @@ export function createAccountStore(
       const email = draft.email
       const masked = maskEmail(email)
 
-      // Match existing account by email or by refreshToken
-      let existingIndex = -1
-      if (email !== undefined && email.trim().length > 0) {
+      // Prefer stable id, then email, then refreshToken.
+      let existingIndex = draft.id === undefined ? -1 : accounts.findIndex(a => a.id === draft.id)
+      if (existingIndex < 0 && email !== undefined && email.trim().length > 0) {
         existingIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(email))
       }
       if (existingIndex < 0) {
@@ -317,25 +348,12 @@ export function createAccountStore(
       })
       return match.account
     },
-    syncRefreshToken: async (refreshToken: string, email?: string) => {
+    syncRefreshToken: async (update) => {
       const current = await readRaw()
-      const accounts = [...current.accounts]
-      let targetIndex = -1
-      if (email !== undefined && email.trim().length > 0) {
-        targetIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(email))
-      }
-      if (targetIndex < 0 && current.activeId !== undefined) {
-        targetIndex = accounts.findIndex(a => a.id === current.activeId)
-      }
-      if (targetIndex >= 0) {
-        const existing = accounts[targetIndex]!
-        accounts[targetIndex] = {
-          ...existing,
-          refreshToken,
-          updatedAt: new Date().toISOString(),
-        }
-        await writeRaw({ ...current, accounts })
-      }
+      const accounts = applyBoundRefreshToken(current.accounts, update)
+      if (accounts === undefined) return false
+      await writeRaw({ ...current, accounts })
+      return true
     },
 
     list: async () => {
@@ -394,8 +412,8 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
     saveAccount: async (draft) => {
       await ensureSeeded()
       const accounts = [...data.accounts]
-      let existingIndex = -1
-      if (draft.email !== undefined && draft.email.trim().length > 0) {
+      let existingIndex = draft.id === undefined ? -1 : accounts.findIndex(a => a.id === draft.id)
+      if (existingIndex < 0 && draft.email !== undefined && draft.email.trim().length > 0) {
         existingIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(draft.email as string))
       }
       if (existingIndex < 0) {
@@ -406,9 +424,11 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
       if (existingIndex >= 0) {
         const existing = accounts[existingIndex]!
         accountId = existing.id
+        const masked = maskEmail(draft.email)
         accounts[existingIndex] = {
           ...existing,
           ...(draft.email === undefined ? {} : { email: draft.email }),
+          ...(masked === undefined ? {} : { maskedEmail: masked }),
           projectId: draft.projectId,
           refreshToken: draft.refreshToken,
           updatedAt: draft.updatedAt ?? new Date().toISOString(),
@@ -446,25 +466,12 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
       data = { version: ACCOUNTS_RECORD_VERSION, activeId, accounts: remaining }
       return match.account
     },
-    syncRefreshToken: async (refreshToken: string, email?: string) => {
+    syncRefreshToken: async (update) => {
       await ensureSeeded()
-      const accounts = [...data.accounts]
-      let targetIndex = -1
-      if (email !== undefined && email.trim().length > 0) {
-        targetIndex = accounts.findIndex(a => a.email !== undefined && normalizeKey(a.email) === normalizeKey(email))
-      }
-      if (targetIndex < 0 && data.activeId !== undefined) {
-        targetIndex = accounts.findIndex(a => a.id === data.activeId)
-      }
-      if (targetIndex >= 0) {
-        const existing = accounts[targetIndex]!
-        accounts[targetIndex] = {
-          ...existing,
-          refreshToken,
-          updatedAt: new Date().toISOString(),
-        }
-        data = { ...data, accounts }
-      }
+      const accounts = applyBoundRefreshToken(data.accounts, update)
+      if (accounts === undefined) return false
+      data = { ...data, accounts }
+      return true
     },
     list: async () => {
       await ensureSeeded()

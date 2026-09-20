@@ -45,7 +45,7 @@ Moves the development baseline to DSH `0.1.5-rc.1`. Gemini and Claude requests p
 
 ### Shared Antigravity Login State
 
-- Uses one Host-only auth coordinator for LLM, Search, Image, Video, and Quota operations.
+- Uses one Host-only auth coordinator for LLM, Search, Image, Video, and Quota operations. Multiple Google accounts may be cached locally; commands activate one of them at a time.
 - Direct OAuth 2.0 with PKCE S256: Host memory generates verifier and state handle; the browser receives only the authorization URL.
 - The callback listener binds only `127.0.0.1:51121`, accepting only the registered one-shot code/state pair.
 - Resolves credentials through versioned owner-only storage (POSIX `0600`; Windows user-data ACLs), short-lived in-memory cache, and proactive refresh before expiry.
@@ -110,11 +110,16 @@ Verify the entry, restart `dsh web`, and refresh the browser. This version uses 
 On interactive surfaces that host the DSH `commands` seam, the bundle registers an `antigravity-auth` slash command as an alternative to the Web settings card:
 
 ```text
-/antigravity-auth            # show current login state (default)
-/antigravity-auth login      # start the Google OAuth authorization flow
-/antigravity-auth cancel     # cancel a pending authorization
-/antigravity-auth logout     # clear the shared Antigravity credential
+/antigravity-auth              # show current login state (default)
+/antigravity-auth accounts     # list locally cached accounts
+/antigravity-auth switch <id>  # activate a cached account by index, id, or email
+/antigravity-auth login        # start the Google OAuth authorization flow
+/antigravity-auth cancel       # cancel a pending authorization
+/antigravity-auth logout       # sign out the active account and drop its cached credential
+/antigravity-auth remove <id>  # drop one cached account (signs out if it was active)
 ```
+
+`/anti` is the same command. Successful `login` writes the new credential into the local account cache (`accounts.json`) and makes it active in `auth.json`. Only one account is active at a time; other cached refresh tokens stay on disk until `logout` or `remove` targets that account. `logout` and an explicit Web revoke clear Host memory and `auth.json`, then delete **only** the account that started the operation. A revoke that the coordinator marks `superseded` (for example because you switched accounts while Google's revoke request was in flight) does not delete the newly active account. Refresh-token rotation and optional userinfo email backfill are bound to the account identity captured at the start of that operation, not to the display email or whichever account is active when the result arrives.
 
 Account operations are the terminal login entry point: they run on a local DSH Host (no WebServer at all, or one bound explicitly to `127.0.0.1`) and are denied before touching the auth service only when the WebServer exposes the shared `commands` seam on any other interface. The account RPC keeps its own stricter ADR-0008 guard (a real dispatcher on the explicit `127.0.0.1` bind only).
 
@@ -145,8 +150,8 @@ Requests are code-owned: only fixed HTTPS Antigravity origins and enumerated `v1
 
 - Token values never enter the browser, settings, logs, session events, or tool metadata. Only Host-side requests receive authorization headers.
 - POSIX owner-only modes are enforced for auth, gate-evidence, and controlled live-image files. Windows access is governed by ACLs, so synthetic POSIX group/other bits are not treated as an access decision; symlink, file-type, size, schema, and content checks remain enforced.
-- Single-account only: no account arrays, switching, rotation, quota pools, or identity fallback.
-- Local logout clears local storage and in-memory caches immediately.
+- Local multi-account cache with manual switch: `accounts.json` may hold several refresh tokens; `auth.json` holds only the active record. There is no quota pool, automatic account rotation, identity fallback, or fingerprint regeneration.
+- Local logout clears Host memory and `auth.json`, then removes that account's cached credential so `switch` cannot restore it. Other cached accounts are left in place. Revoke is a separate explicit action and follows the same per-account cleanup; `superseded` does not authorize deleting a different active account.
 - DSH alpha.5 no longer exposes a per-method or Host-side carrier authority tier. The plugin therefore enables the real account RPC handler only when the public WebServer bind is exactly `127.0.0.1`; absent, all-interface, and unknown binds receive only `loopback-required`. The browser also hides the section when `ConnectionHandle.isLoopback` is false, but that client hint is UX only: an owner-contained custom carrier cannot be authorized until DSH exposes a corresponding Host-side fact.
 - Raw media base64 never enters session text or browser RPC.
 
