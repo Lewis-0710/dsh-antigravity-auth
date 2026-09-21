@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH compatibility:** `0.1.4-rc.1` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
+> **DSH compatibility:** `0.1.4-rc.2` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 
 [![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
 
-Release: **v0.1.4-rc.1** (npm tag: `rc`).
+Release: **v0.1.4-rc.2** (npm tag: `rc`).
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -26,6 +26,13 @@ The settings section follows the DSH interface language (English or Chinese), in
 > account-gated Antigravity backend surface is unsupported, revocable, and
 > may be rate-limited or changed without notice. Do not rely on it for
 > production workloads.
+
+## 0.1.4-rc.2: account switching and Gemini replay fixes
+
+- Adds local account caching and explicit switching through `/antigravity-auth` or `/anti`, with one active account at a time.
+- Keeps delayed refresh, logout, and revoke work bound to its original credential, preserving other accounts and their capability state.
+- Fixes Gemini thinking/tool signature replay and empty trailing frames; capacity retries apply only to HTTP 503.
+- Shows safe failure details and HTTP status in LLM errors. The DSH baseline remains `0.1.5-rc.1`.
 
 ## 0.1.4-rc.1: DSH 0.1.5-rc.1 adaptation
 
@@ -99,7 +106,7 @@ Stop `dsh web`, ensure the target Host uses a coherent DSH `0.1.5-rc.1` graph, t
 
 ```sh
 dsh --version
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.1
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.2
 dsh plugin --profile web list
 ```
 

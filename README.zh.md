@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH 兼容性：** `0.1.4-rc.1` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+> **DSH 兼容性：** `0.1.4-rc.2` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
 
 [![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
-发布版本：**v0.1.4-rc.1**（npm 标签：`rc`）。
+发布版本：**v0.1.4-rc.2**（npm 标签：`rc`）。
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -23,6 +23,13 @@
 
 > **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
 > 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
+
+## 0.1.4-rc.2：账号切换与 Gemini 历史重放修复
+
+- 通过 `/antigravity-auth` 或 `/anti` 缓存并手动切换本地账号，同一时刻只有一个活动账号。
+- 刷新、登出和撤销的迟到结果绑定原凭据，保留其他账号及其能力状态。
+- 修复 Gemini thinking/tool signature 历史重放和尾部空文本帧；容量重试仅用于 HTTP 503。
+- LLM 错误显示安全的失败分类和 HTTP 状态。DSH 兼容基线继续为 `0.1.5-rc.1`。
 
 ## 0.1.4-rc.1：DSH 0.1.5-rc.1 适配
 
@@ -93,7 +100,7 @@
 
 ```sh
 dsh --version
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.1
+dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.2
 dsh plugin --profile web list
 ```
 
