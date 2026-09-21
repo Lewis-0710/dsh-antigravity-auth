@@ -6,7 +6,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import type {} from '@deepseek-ai/dsh-commands'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type {} from '@deepseek-ai/dsh-llm'
-import { createAntigravityAuthService } from './auth-service.ts'
+import { createAntigravityAuthService, fetchUserEmail } from './auth-service.ts'
 import { createAntigravityAuthCommand } from './auth-command.ts'
 import { AntigravityAdapter, ANTIGRAVITY_PROVIDER } from './llm-adapter.ts'
 import { defaultAuthStorePath } from './auth-store.ts'
@@ -25,6 +25,7 @@ export function apply(ctx: Context): void {
   const service = createAntigravityAuthService({
     storePath: defaultAuthStorePath(),
     autoActivateGates: true,
+    fetchEmail: fetchUserEmail,
   })
   // Account-control activation for the slash command. A terminal composition
   // composes no public WebServer, so the command starts enabled (local-only
@@ -74,7 +75,15 @@ export function apply(ctx: Context): void {
     cleanup: unprovide,
     label: 'antigravity-auth: OAuth and LLM operations',
   })
-  ctx.inject(['commands'], commandCtx => commandCtx.commands.register(createAntigravityAuthCommand(service, () => accountMode)))
+  ctx.inject(['commands'], (commandCtx) => {
+    const mainCommand = createAntigravityAuthCommand(service, () => accountMode)
+    commandCtx.commands.register(mainCommand)
+    commandCtx.commands.register({
+      ...mainCommand,
+      name: 'anti',
+      description: 'Antigravity OAuth 多账号管理与切换 (/anti accounts | switch | login)',
+    })
+  })
 }
 
 export * from './auth-service.ts'
@@ -87,6 +96,7 @@ export * from './llm-adapter.ts'
 export * from './private-transport.ts'
 export * from './replay.ts'
 export * from './quota.ts'
+export * from './account-store.ts'
 export * from './media-admission.ts'
 export * from './model-catalog.ts'
 export * from './capability-gates.ts'

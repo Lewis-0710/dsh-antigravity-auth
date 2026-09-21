@@ -5,9 +5,9 @@ import { ACCOUNT_COMMAND_DENIED_MESSAGE, type LoopbackRpcMode } from './loopback
 import { openAuthorizationUrl } from './open-authorization-url.ts'
 import type { AntigravityStatusView } from './status.ts'
 
-type AuthCommandService = Pick<
+export type AuthCommandService = Pick<
   AntigravityAuthService,
-  'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout'
+  'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'listAccounts' | 'switchAccount' | 'removeAccount'
 >
 
 function errorMessage(error: unknown): string {
@@ -55,17 +55,88 @@ export function createAntigravityAuthCommand(
   return {
     name: 'antigravity-auth',
     description: 'Inspect or start the Antigravity OAuth login',
-    input: { hint: '[status|login|cancel|logout]' },
+    input: { hint: '[status|accounts|switch <id>|login|logout|remove <id>]' },
     handler: async ({ rawInput }) => {
       if (accountMode() === 'blocked') {
         return { kind: 'error', text: ACCOUNT_COMMAND_DENIED_MESSAGE }
       }
-      const operation = rawInput.trim() || 'status'
+      const parts = rawInput.trim().split(/\s+/)
+      const operation = parts[0] || 'status'
+      const arg = parts.slice(1).join(' ').trim()
       if (operation === 'status') {
         try {
-          return { kind: 'success', text: formatStatus(await service.status()) }
+          const status = await service.status()
+          const list = typeof service.listAccounts === 'function'
+            ? await Promise.resolve().then(() => service.listAccounts()).catch(() => undefined)
+            : undefined
+          let text = formatStatus(status)
+          if (list !== undefined && list.accounts.length > 0) {
+            const activeAcc = list.accounts.find(a => a.isActive)
+            text += `\n已缓存账号数: ${list.accounts.length}`
+            if (activeAcc !== undefined) {
+              text += ` (当前: [${activeAcc.index}] ${activeAcc.email ?? activeAcc.maskedEmail ?? activeAcc.id})`
+            }
+          }
+          return { kind: 'success', text }
         } catch (error) {
           return { kind: 'error', text: `reading Antigravity auth status failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'accounts' || operation === 'list') {
+        try {
+          const list = await service.listAccounts()
+          if (list.accounts.length === 0) {
+            return {
+              kind: 'success',
+              text: '当前暂无已缓存的 Antigravity 账号。请执行 /anti login 或 /antigravity-auth login 登录新账号。',
+            }
+          }
+          const lines = [
+            `Antigravity 账号列表 (共 ${list.accounts.length} 个):`,
+            ...list.accounts.map((acc) => {
+              const activeMark = acc.isActive ? ' * [活跃] ' : '   '
+              const emailDisplay = acc.maskedEmail ?? acc.email ?? '(未提供邮箱)'
+              return `${activeMark}[${acc.index}] ${emailDisplay} (项目: ${acc.projectId})`
+            }),
+            '',
+            '提示: 输入 /anti switch <序号或邮箱> 切换账号',
+            '      输入 /anti login 登录新账号并自动加入列表',
+          ]
+          return { kind: 'success', text: lines.join('\n') }
+        } catch (error) {
+          return { kind: 'error', text: `获取账号列表失败: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'switch' || operation === 'use') {
+        if (!arg) {
+          return {
+            kind: 'error',
+            text: '请指定要切换的账号序号或邮箱，例如: /anti switch 1 或 /anti switch user@example.com',
+          }
+        }
+        try {
+          const result = await service.switchAccount(arg)
+          return result.ok
+            ? { kind: 'success', text: result.message }
+            : { kind: 'error', text: result.message }
+        } catch (error) {
+          return { kind: 'error', text: `切换账号失败: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'remove' || operation === 'delete') {
+        if (!arg) {
+          return {
+            kind: 'error',
+            text: '请指定要移除的账号序号或邮箱，例如: /anti remove 2',
+          }
+        }
+        try {
+          const result = await service.removeAccount(arg)
+          return result.ok
+            ? { kind: 'success', text: result.message }
+            : { kind: 'error', text: result.message }
+        } catch (error) {
+          return { kind: 'error', text: `移除账号失败: ${errorMessage(error)}` }
         }
       }
       if (operation === 'login') {
@@ -116,7 +187,7 @@ export function createAntigravityAuthCommand(
           return { kind: 'error', text: `logging out of Antigravity failed: ${errorMessage(error)}` }
         }
       }
-      return { kind: 'error', text: `unknown operation "${operation}" (available: status, login, cancel, logout)` }
+      return { kind: 'error', text: `unknown operation "${operation}" (available: status, accounts, switch <id>, login, cancel, logout, remove <id>)` }
     },
   }
 }

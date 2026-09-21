@@ -104,6 +104,7 @@ export interface CredentialCoordinatorOptions {
   readonly refreshToken?: RefreshAccessToken
   readonly revokeGrant?: RevokeGrant
   readonly fetchImpl?: typeof fetch
+  readonly onTokenRotated?: (record: AntigravityAuthRecord) => Promise<void> | void
 }
 
 export interface CredentialCoordinator {
@@ -113,6 +114,7 @@ export interface CredentialCoordinator {
   revokeStatus(): RevokeStatusView
   logout(): Promise<LogoutResult>
   revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
+  resetCache(): void
   dispose(): Promise<void>
 }
 
@@ -207,6 +209,20 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     },
 
     revokeStatus: () => ({ ...revokeStatus }),
+
+    resetCache: () => {
+      generation += 1
+      abortOperations()
+      cached = undefined
+      observedRevision = 0
+      observedLineage = undefined
+      refreshFlight = undefined
+      revokeFlight = undefined
+      state = 'logged-out'
+      errorCode = undefined
+      revokeStatus = { state: 'idle' }
+      lastRefreshAt = undefined
+    },
 
     logout: async () => {
       ensureNotDisposed()
@@ -464,6 +480,9 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     state = 'logged-in'
     errorCode = undefined
     lastRefreshAt = now()
+    if (result.refreshToken !== undefined) {
+      await options.onTokenRotated?.(record)
+    }
     return { ...credential }
   }
 
