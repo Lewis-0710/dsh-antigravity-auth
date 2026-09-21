@@ -976,6 +976,7 @@ function mapMessage(message: Message, model: string, toolNames: Map<string, stri
   const replayBlocks = replay?.blocks ?? []
   const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const isClaude = antigravityModelFamily(model) === 'claude'
+  const isGemini = antigravityModelFamily(model) === 'gemini'
   let replayIndex = 0
   let sawClaudeFunctionCall = false
   for (const block of message.content) {
@@ -992,7 +993,7 @@ function mapMessage(message: Message, model: string, toolNames: Map<string, stri
       if (isClaude && blockSignature === undefined) continue
       parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
-      const callId = rememberToolName(toolNames, block.id, block.name)
+      const callId = rememberToolName(toolNames, block.id, block.name, isGemini)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
         : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
@@ -1010,7 +1011,7 @@ function mapMessage(message: Message, model: string, toolNames: Map<string, stri
       parts.push({
         functionResponse: {
           ...(isClaude ? { id: callId } : {}),
-          name: requireToolName(toolNames, callId),
+          name: requireToolName(toolNames, callId, isGemini),
           response: { content: blocksToText(block.content) },
         },
       })
@@ -1038,6 +1039,7 @@ async function mapMessageWithAttachments(
   const messageReasoningSignature = findMessageReasoningSignature(message, replayBlocks)
   const parts: Record<string, unknown>[] = []
   const isClaude = antigravityModelFamily(model) === 'claude'
+  const isGemini = antigravityModelFamily(model) === 'gemini'
   let replayIndex = 0
   let sawClaudeFunctionCall = false
   for (const block of message.content) {
@@ -1057,7 +1059,7 @@ async function mapMessageWithAttachments(
       if (isClaude && blockSignature === undefined) continue
       parts.push({ text: block.text, thought: true, ...(blockSignature === undefined ? {} : { thoughtSignature: blockSignature }) })
     } else if (block.type === 'tool-call') {
-      const callId = rememberToolName(toolNames, block.id, block.name)
+      const callId = rememberToolName(toolNames, block.id, block.name, isGemini)
       const signature = isClaude
         ? sawClaudeFunctionCall ? undefined : blockSignature ?? SKIP_THOUGHT_SIGNATURE
         : blockSignature ?? messageReasoningSignature ?? SKIP_THOUGHT_SIGNATURE
@@ -1075,7 +1077,7 @@ async function mapMessageWithAttachments(
       parts.push({
         functionResponse: {
           ...(isClaude ? { id: callId } : {}),
-          name: requireToolName(toolNames, callId),
+          name: requireToolName(toolNames, callId, isGemini),
           response: { content: blocksToText(block.content) },
         },
       })
@@ -1084,18 +1086,25 @@ async function mapMessageWithAttachments(
   return { role: message.role === 'assistant' ? 'model' : 'user', parts }
 }
 
-function rememberToolName(toolNames: Map<string, string>, callId: unknown, name: string): string {
+function rememberToolName(toolNames: Map<string, string>, callId: unknown, name: string, isGemini: boolean): string {
   if (name.length === 0 || name.length > 256 || containsControl(name)) throw new LlmError('The tool call name is invalid', 'INVALID_ARGS')
   const id = requireToolCallId(callId)
   const existing = toolNames.get(id)
+  if (isGemini && existing !== undefined) throw new LlmError('A tool call id was reused before its prior result', 'INVALID_ARGS')
   if (existing !== undefined && existing !== name) throw new LlmError('A tool call id was reused with a different name', 'INVALID_ARGS')
   toolNames.set(id, name)
   return id
 }
 
-function requireToolName(toolNames: ReadonlyMap<string, string>, callId: unknown): string {
-  const name = toolNames.get(requireToolCallId(callId))
+function requireToolName(toolNames: Map<string, string>, callId: unknown, isGemini: boolean): string {
+  const id = requireToolCallId(callId)
+  const name = toolNames.get(id)
   if (name === undefined) throw new LlmError('A tool result did not match a prior tool call', 'INVALID_ARGS')
+  // Gemini omits IDs on the wire and may reuse them in later calls. Retain only
+  // outstanding bindings, so completed calls can reuse an ID without allowing
+  // ambiguous concurrent calls or orphan results. Other families keep their
+  // existing history-wide name validation (Claude also sends IDs on the wire).
+  if (isGemini) toolNames.delete(id)
   return name
 }
 

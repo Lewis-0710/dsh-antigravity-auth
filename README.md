@@ -27,6 +27,10 @@ The settings section follows the DSH interface language (English or Chinese), in
 > may be rate-limited or changed without notice. Do not rely on it for
 > production workloads.
 
+## Unreleased: Gemini tool-call ID reuse
+
+Fixes #33: Gemini conversations can continue when a later tool call reuses the ID of a completed call. Ambiguous reuse before the first result and unmatched results still fail explicitly; Claude and GPT-OSS retain their existing validation. This fix is not included in `0.1.4-rc.2`.
+
 ## 0.1.4-rc.2: account switching and Gemini replay fixes
 
 - Adds local account caching and explicit switching through `/antigravity-auth` or `/anti`, with one active account at a time.

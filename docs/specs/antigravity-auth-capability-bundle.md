@@ -196,6 +196,7 @@
 - system、messages、image blocks、tool schemas、reasoning effort 和 supported generation options 被转换为 private request envelope；没有证据的 option fail-loud。
 - DSH session id 不直接发送；Private Client 生成 adapter-owned request/session metadata。
 - stream parser 映射 text、reasoning、function call、usage、finish 与 embedded errors；unknown provider parts 触发 bounded protocol-drift error。
+- Gemini 历史中的 tool-call ID 仅在插件内部配对，不发送到 wire；对应 tool-result 消费绑定后，后续调用可以复用该 ID。尚未收到结果时的 ID 复用、孤立或重复 tool-result 必须明确报错，不能靠覆盖名称猜测配对。普通与带图片消息使用相同规则；Claude 与 GPT-OSS 保留现有全历史名称校验，Claude 的 wire call/response ID 保持原样。
 - usage chunk 必须在 terminal finish 之前发出；tool arguments 保持 raw JSON string。成功的 provider terminal event 不得提前取消响应 reader；必须排空剩余 SSE framing/EOF 后再完成 DSH stream，避免 Node raw-to-Web bridge 的重复关闭竞态。
 - replay metadata 只在同 adapter、兼容 model family 和 schema version 下恢复；block mismatch、cross-model、fork 或 malformed metadata 触发安全降级。
 - model family 以 Gemini、Claude、GPT-OSS 独立 gate，不从单个 family 的成功推断其它 family。

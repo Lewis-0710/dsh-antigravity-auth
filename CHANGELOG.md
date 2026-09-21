@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix #33: allow Gemini to reuse a completed tool-call ID for a later tool while preserving each result's original function name. Reject IDs reused before their result and orphan/duplicate results; retain Claude and GPT-OSS history validation.
+
 ## [0.1.4-rc.2] - 2026-09-20
 
 - Preserve Gemini thinking/tool signatures and replay block alignment across empty trailing frames, repair truncated historical tool arguments, and limit capacity retries to HTTP 503; HTTP 429 and other statuses are not retried.
