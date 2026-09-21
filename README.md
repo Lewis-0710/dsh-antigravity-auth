@@ -169,6 +169,8 @@ Requests are code-owned: only fixed HTTPS Antigravity origins and enumerated `v1
 
 ## Development
 
+Maintainers: follow the [release policy](docs/release-policy.md) and [release notes template](docs/release-notes.template.md) for consistent titles, bilingual notes, channels, and publication verification.
+
 ```sh
 pnpm install
 pnpm peers check

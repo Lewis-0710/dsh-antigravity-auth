@@ -82,6 +82,13 @@ Every handoff must state:
 - tests/checks executed;
 - whether any live account, profile, remote, commit, push, publish, or deployment action occurred.
 
+## Release conventions
+
+- Before preparing any release, read `docs/release-policy.md` and fill `docs/release-notes.template.md`; these define the canonical title, body layout, channel mapping, and completion checks.
+- The GitHub Release title is exactly `<package.name> v<package.version>`, with no appended theme. Preserve the template's metadata table, five section headings, order, and bilingual correspondence.
+- A complete publication requires the pushed source and annotated tag, a public non-draft GitHub Release with the verified artifact, and the matching npm version/dist-tag. Report each result separately; a tag, draft, or successful CLI exit alone is insufficient.
+- Keep immutable-artifact and Passkey handling in the workspace npm publication skill. Do not treat this format policy as new authorization to publish, rewrite historical releases, or install into a live profile.
+
 ## Matching source verification
 
 DSH `0.1.5-rc.1` at `183f08e9c6dde7e36cd2318eaee70b0da08fb35e` is the matching source target for the published npm baseline. Use the isolated workflow in `docs/dsh-source-verification.md`; run both `pnpm run check` and the source check when changing compatibility-sensitive behavior. Keep the complete dependency graph coherent. Older release graphs are historical evidence, not the current development baseline.

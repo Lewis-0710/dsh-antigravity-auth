@@ -163,6 +163,8 @@ X-DeepSeek-Harness-Attribution: deepseek-harness/<version> (+repository-url)
 
 ## 本地开发
 
+维护者发布时请遵循[发布规范](docs/release-policy.md)和 [Release 正文模板](docs/release-notes.template.md)，统一标题、中英文说明、发布通道与完成核验。
+
 ```sh
 pnpm install
 pnpm peers check
