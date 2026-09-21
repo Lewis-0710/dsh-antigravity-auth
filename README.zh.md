@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH 兼容性：** `0.1.4-rc.2` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+> **DSH 兼容性：** `0.1.4-rc.3` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
 
 [![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
-发布版本：**v0.1.4-rc.2**（npm 标签：`rc`）。
+发布版本：**v0.1.4-rc.3**（npm 标签：`rc`）。
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -24,9 +24,9 @@
 > **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
 > 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
 
-## 未发布：Gemini 工具调用 ID 复用修复
+## 0.1.4-rc.3：Gemini 工具调用 ID 复用修复
 
-修复 #33：Gemini 在后续调用中复用已完成调用的 ID 时，会话可以继续。前一次调用尚未返回结果时的 ID 复用、无法配对的结果仍明确报错；Claude 与 GPT-OSS 保留现有校验。此修复尚未包含在 `0.1.4-rc.2` 中。
+修复 #33：Gemini 在后续调用中复用已完成调用的 ID 时，会话可以继续。前一次调用尚未返回结果时的 ID 复用、无法配对的结果仍明确报错；Claude 与 GPT-OSS 保留现有校验。
 
 ## 0.1.4-rc.2：账号切换与 Gemini 历史重放修复
 
@@ -104,7 +104,7 @@
 
 ```sh
 dsh --version
-dsh plugin --profile web add dsh-antigravity-auth@0.1.4-rc.2
+dsh plugin --profile web add --save-exact dsh-antigravity-auth@0.1.4-rc.3
 dsh plugin --profile web list
 ```
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [0.1.4-rc.3] - 2026-09-20
 
 - Fix #33: allow Gemini to reuse a completed tool-call ID for a later tool while preserving each result's original function name. Reject IDs reused before their result and orphan/duplicate results; retain Claude and GPT-OSS history validation.
 
