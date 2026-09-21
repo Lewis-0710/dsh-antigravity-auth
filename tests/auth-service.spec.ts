@@ -1,9 +1,33 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createMemoryAuthStore } from '../src/auth-store.ts'
 import { createAntigravityAuthService } from '../src/auth-service.ts'
+import { createMemoryAccountStore, type AntigravityAccountStore } from '../src/account-store.ts'
 import type { PrivateTransport, PrivateTransportRequest } from '../src/private-transport.ts'
 import type { LoopbackCallbackRequest } from '../src/oauth-flow.ts'
 import { createMemoryCapabilityGates, type CapabilityGateRegistry } from '../src/capability-gates.ts'
+import { CredentialOperationError } from '../src/credential-coordinator.ts'
+
+
+function deferred() {
+  let resolve!: () => void
+  const promise = new Promise<void>(r => { resolve = r })
+  return { promise, resolve: () => resolve() }
+}
+
+function delaySync(inner: AntigravityAccountStore, gate: Promise<void>): AntigravityAccountStore {
+  return {
+    path: inner.path,
+    read: () => inner.read(),
+    saveAccount: draft => inner.saveAccount(draft),
+    setActive: query => inner.setActive(query),
+    removeAccount: query => inner.removeAccount(query),
+    list: () => inner.list(),
+    syncRefreshToken: async update => {
+      await gate
+      return inner.syncRefreshToken(update)
+    },
+  }
+}
 
 function projectTransport(payload: unknown): PrivateTransport {
   return { request: vi.fn(async () => new Response(JSON.stringify(payload))) }
@@ -67,8 +91,9 @@ describe('Antigravity auth service', () => {
     })
 
     const record = await store.read()
-    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'alice@example.com' })
+    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'a***@example.com' })
     expect(JSON.stringify(record)).not.toContain('access-secret')
+    expect(JSON.stringify(record)).not.toContain('alice@example.com')
     expect(JSON.stringify(await service.status())).not.toContain('project-secret')
     expect(await service.status()).toMatchObject({
       riskAcknowledged: true,
@@ -344,26 +369,299 @@ describe('Antigravity auth service', () => {
     await service.dispose()
   })
 
-  it('supports listing multiple accounts, switching active account, and removing account', async () => {
+  it('supports listing multiple accounts in status, switching active account, and removing account', async () => {
     const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
-    await store.commit({ refreshToken: 'refresh-1', projectId: 'project-1', email: 'user1@example.com' })
-    await store.commit({ refreshToken: 'refresh-2', projectId: 'project-2', email: 'user2@example.com' })
-
     const service = createAntigravityAuthService({ store })
+    await service.accountStore.saveAccount({ email: 'user1@example.com', projectId: 'project-1', refreshToken: 'refresh-1' })
+    await service.accountStore.saveAccount({ email: 'user2@example.com', projectId: 'project-2', refreshToken: 'refresh-2' })
+    await service.switchAccount('user2@example.com')
+
     const status = await service.status()
     expect(status.accounts).toHaveLength(2)
-    expect(status.activeAccountId).toBe('user2@example.com')
-    expect(status.login.maskedEmail).toBe('u***@example.com')
+    const user2Id = (await service.accountStore.read()).accounts.find(a => a.email === 'user2@example.com')?.id
+    expect(status.activeAccountId).toBe(user2Id)
 
     // Switch account to user1
-    const switchedStatus = await service.switchAccount('user1@example.com')
-    expect(switchedStatus.activeAccountId).toBe('user1@example.com')
+    const switchRes = await service.switchAccount('user1@example.com')
+    expect(switchRes.ok).toBe(true)
+    const switchedStatus = await service.status()
+    const user1Id = (await service.accountStore.read()).accounts.find(a => a.email === 'user1@example.com')?.id
+    expect(switchedStatus.activeAccountId).toBe(user1Id)
 
     // Remove user1
-    const remainingStatus = await service.removeAccount('user1@example.com')
+    const removeRes = await service.removeAccount('user1@example.com')
+    expect(removeRes.ok).toBe(true)
+    const remainingStatus = await service.status()
     expect(remainingStatus.accounts).toHaveLength(1)
-    expect(remainingStatus.activeAccountId).toBe('user2@example.com')
 
+    await service.dispose()
+  })
+
+  it('backfills the active account email through the injected fetcher once per process', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'rt-1', projectId: 'p-1' })
+    const fetchEmail = vi.fn(async () => 'carol@example.com')
+    const service = createAntigravityAuthService({
+      store,
+      fetchEmail,
+      credentialOptions: {
+        refreshToken: vi.fn(async () => ({ accessToken: 'live-access', expiresAt: 10_000 })),
+      },
+    })
+
+    const first = await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledWith('live-access')
+    expect(first.accounts[0]?.email).toBe('carol@example.com')
+    expect(first.accounts[0]?.maskedEmail).toBe('c***@example.com')
+    await expect(store.read()).resolves.toMatchObject({ email: 'c***@example.com' })
+
+    // The once-per-process fence prevents a second probe.
+    await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledTimes(1)
+    await service.dispose()
+  })
+
+  it('leaves the email unset when the injected fetcher cannot answer', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'rt-1', projectId: 'p-1' })
+    const fetchEmail = vi.fn(async () => undefined)
+    const service = createAntigravityAuthService({
+      store,
+      fetchEmail,
+      credentialOptions: {
+        refreshToken: vi.fn(async () => ({ accessToken: 'live-access', expiresAt: 10_000 })),
+      },
+    })
+
+    const listed = await service.listAccounts()
+    expect(fetchEmail).toHaveBeenCalledWith('live-access')
+    expect(listed.accounts[0]?.email).toBeUndefined()
+    await expect(store.read()).resolves.not.toHaveProperty('email')
+    await service.dispose()
+  })
+
+  it('syncs rotated refresh token to account cache and preserves it across switches', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A1', projectId: 'p-1', email: 'alice@example.com' })
+    const refreshAccessToken = vi.fn(async () => ({
+      accessToken: 'access-A2',
+      refreshToken: 'token-A2',
+      expiresAt: 10_000,
+    }))
+    const service = createAntigravityAuthService({
+      store,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: refreshAccessToken,
+      },
+    })
+
+    // Seed account B into accountStore
+    await service.accountStore.saveAccount({
+      id: 'acc_2',
+      email: 'bob@example.com',
+      projectId: 'p-2',
+      refreshToken: 'token-B',
+    })
+
+    // Trigger refresh on account A, rotating its token to token-A2
+    const cred = await service.credential(undefined, { forceRefresh: true })
+    expect(cred?.refreshToken).toBe('token-A2')
+    expect((await store.read())?.refreshToken).toBe('token-A2')
+
+    // Verify account store also synced token-A2
+    const accounts = (await service.listAccounts()).accounts
+    const accA = accounts.find(a => a.email === 'alice@example.com')
+    expect(accA?.refreshToken).toBe('token-A2')
+
+    // Switch to account B
+    await service.switchAccount('bob@example.com')
+    expect((await store.read())?.refreshToken).toBe('token-B')
+
+    // Switch back to account A
+    await service.switchAccount('alice@example.com')
+    // Must write token-A2 back to store, not the obsolete token-A1!
+    expect((await store.read())?.refreshToken).toBe('token-A2')
+
+    await service.dispose()
+  })
+
+  it('cleans up cached account credentials on logout', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A1', projectId: 'p-1', email: 'alice@example.com' })
+    const service = createAntigravityAuthService({ store })
+
+    expect((await service.listAccounts()).accounts).toHaveLength(1)
+
+    // Log out
+    await service.logout()
+
+    // Both authStore and accountStore must be cleared of account A
+    expect(await store.read()).toBeUndefined()
+    expect((await service.listAccounts()).accounts).toHaveLength(0)
+
+    // Cannot switch back to account A without re-login
+    const switchRes = await service.switchAccount('alice@example.com')
+    expect(switchRes.ok).toBe(false)
+
+    await service.dispose()
+  })
+
+  it('resets error state when switching from an invalid account to a valid account', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'invalid-token-A', projectId: 'p-1', email: 'alice@example.com' })
+
+    const refreshAccessToken = vi.fn(async ({ refreshToken }: { refreshToken: string }) => {
+      if (refreshToken === 'invalid-token-A') {
+        throw new CredentialOperationError('invalid-grant')
+      }
+      return { accessToken: 'valid-access-B', expiresAt: 10_000 }
+    })
+
+    const service = createAntigravityAuthService({
+      store,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: refreshAccessToken,
+      },
+    })
+
+    // Add account B
+    await service.accountStore.saveAccount({
+      id: 'acc_2',
+      email: 'bob@example.com',
+      projectId: 'p-2',
+      refreshToken: 'valid-token-B',
+    })
+
+    // Account A fails and enters re-login-required
+    const credA = await service.credential(undefined, { forceRefresh: true })
+    expect(credA).toBeUndefined()
+    const statusA = await service.status()
+    expect(statusA.credential?.state).toBe('re-login-required')
+
+    // Switch to account B
+    await service.switchAccount('bob@example.com')
+
+    // Coordinator error state must be reset so B can successfully fetch credentials!
+    const credB = await service.credential()
+    expect(credB).toBeDefined()
+    expect(credB?.accessToken).toBe('valid-access-B')
+    expect(credB?.projectId).toBe('p-2')
+
+    const statusB = await service.status()
+    expect(statusB.credential?.state).toBe('logged-in')
+
+    await service.dispose()
+  })
+
+  it('does not write a late token rotation onto the account switched in during cache sync', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A1', projectId: 'p-1', email: 'alice@example.com' })
+    const gate = deferred()
+    let syncEntered = false
+    const inner = delaySync(createMemoryAccountStore(store), gate.promise)
+    const accountStore: AntigravityAccountStore = {
+      ...inner,
+      syncRefreshToken: async update => {
+        syncEntered = true
+        return inner.syncRefreshToken(update)
+      },
+    }
+    await accountStore.saveAccount({ email: 'alice@example.com', projectId: 'p-1', refreshToken: 'token-A1' })
+    await accountStore.saveAccount({ email: 'bob@example.com', projectId: 'p-2', refreshToken: 'token-B' })
+    await accountStore.setActive('alice@example.com')
+
+    const refreshAccessToken = vi.fn(async () => ({
+      accessToken: 'access-A2',
+      refreshToken: 'token-A2',
+      expiresAt: 10_000,
+    }))
+    const service = createAntigravityAuthService({
+      store,
+      accountStore,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: refreshAccessToken,
+      },
+    })
+
+    const pending = service.credential(undefined, { forceRefresh: true })
+    await vi.waitFor(() => expect(syncEntered).toBe(true))
+    await service.switchAccount('bob@example.com')
+    gate.resolve()
+    await pending
+
+    expect((await store.read())?.refreshToken).toBe('token-B')
+    expect((await store.read())?.projectId).toBe('p-2')
+    const listed = await accountStore.list()
+    expect(listed.accounts.find(a => a.email === 'alice@example.com')?.refreshToken).toBe('token-A2')
+    expect(listed.accounts.find(a => a.email === 'bob@example.com')?.refreshToken).toBe('token-B')
+    expect(listed.accounts.find(a => a.email === 'bob@example.com')?.projectId).toBe('p-2')
+    await service.dispose()
+  })
+
+  it('does not delete the new active account when a superseded revoke finishes', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A', projectId: 'p-1', email: 'alice@example.com' })
+    const gate = deferred()
+    const revokeGrant = vi.fn(async () => { await gate.promise })
+    const service = createAntigravityAuthService({
+      store,
+      credentialOptions: {
+        now: () => 4_000,
+        revokeGrant,
+      },
+    })
+    await service.accountStore.saveAccount({ email: 'bob@example.com', projectId: 'p-2', refreshToken: 'token-B' })
+
+    const pending = service.revoke(true)
+    await vi.waitFor(() => expect(revokeGrant).toHaveBeenCalledTimes(1))
+    await service.switchAccount('bob@example.com')
+    gate.resolve()
+    await expect(pending).resolves.toEqual({ state: 'superseded' })
+
+    expect((await store.read())?.refreshToken).toBe('token-B')
+    const listed = await service.listAccounts()
+    expect(listed.accounts.find(a => a.email === 'bob@example.com')).toBeDefined()
+    expect(listed.accounts.find(a => a.email === 'alice@example.com')).toBeDefined()
+    expect(listed.activeId).toBe(listed.accounts.find(a => a.email === 'bob@example.com')?.id)
+    await service.dispose()
+  })
+
+  it('discards an email probe that finishes after the account is no longer active', async () => {
+    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+    await store.commit({ refreshToken: 'token-A', projectId: 'p-1' })
+    const gate = deferred()
+    let fetchStarted = false
+    const fetchEmail = vi.fn(async () => {
+      fetchStarted = true
+      await gate.promise
+      return 'alice@example.com'
+    })
+    const service = createAntigravityAuthService({
+      store,
+      fetchEmail,
+      credentialOptions: {
+        now: () => 4_000,
+        refreshToken: async () => ({ accessToken: 'access-A', expiresAt: 10_000 }),
+      },
+    })
+    await service.accountStore.saveAccount({ projectId: 'p-2', refreshToken: 'token-B' })
+    const aliceId = (await service.accountStore.read()).accounts.find(a => a.refreshToken === 'token-A')!.id
+    await service.accountStore.setActive(aliceId)
+
+    const pending = service.listAccounts()
+    await vi.waitFor(() => expect(fetchStarted).toBe(true))
+    const bobId = (await service.accountStore.read()).accounts.find(a => a.refreshToken === 'token-B')!.id
+    await service.switchAccount(bobId)
+    gate.resolve()
+    await pending
+
+    const listed = await service.accountStore.list()
+    expect(listed.accounts.find(a => a.refreshToken === 'token-B')?.email).toBeUndefined()
+    expect(listed.accounts.find(a => a.refreshToken === 'token-A')?.email).toBeUndefined()
+    expect((await store.read())?.email).toBeUndefined()
     await service.dispose()
   })
 })

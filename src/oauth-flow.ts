@@ -440,8 +440,24 @@ export function buildAuthorizationUrl(state: string, verifier: string): string {
   url.searchParams.set('code_challenge_method', 'S256')
   url.searchParams.set('state', state)
   url.searchParams.set('access_type', 'offline')
-  url.searchParams.set('prompt', 'consent')
+  url.searchParams.set('prompt', 'select_account consent')
   return url.toString()
+}
+
+/** Decode the email claim from a Google id_token JWT without verifying it. */
+function decodeJwtEmail(idToken: string): string | undefined {
+  const parts = idToken.split('.')
+  if (parts.length !== 3) return undefined
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1] as string, 'base64url').toString('utf8')) as unknown
+    if (typeof payload === 'object' && payload !== null) {
+      const email = (payload as { email?: unknown }).email
+      return typeof email === 'string' && email.length > 0 ? email : undefined
+    }
+  } catch {
+    // malformed JWT
+  }
+  return undefined
 }
 
 /** Testable Google token exchange; response bodies are parsed only in Host memory. */
@@ -478,13 +494,11 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
     const expiresIn = typeof payload.expires_in === 'number' && Number.isFinite(payload.expires_in) && payload.expires_in > 0
       ? payload.expires_in
       : 3_600
-    let email = extractEmailFromIdToken(payload.id_token)
-    if (email === undefined && typeof payload.email === 'string' && payload.email.includes('@')) {
-      email = payload.email
-    }
-    if (email === undefined) {
-      email = await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
-    }
+    const email = typeof payload.email === 'string' && payload.email.includes('@')
+      ? payload.email
+      : typeof payload.id_token === 'string'
+        ? decodeJwtEmail(payload.id_token)
+        : await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
     return {
       accessToken: payload.access_token,
       refreshToken: payload.refresh_token,
@@ -492,23 +506,6 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
       ...(email === undefined ? {} : { email }),
     }
   }
-}
-
-function extractEmailFromIdToken(idToken: unknown): string | undefined {
-  if (typeof idToken !== 'string') return undefined
-  const parts = idToken.split('.')
-  const payloadPart = parts[1]
-  if (payloadPart === undefined) return undefined
-  try {
-    const raw = Buffer.from(payloadPart, 'base64url').toString('utf8')
-    const parsed: unknown = JSON.parse(raw)
-    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
-      return parsed.email
-    }
-  } catch {
-    return undefined
-  }
-  return undefined
 }
 
 async function fetchUserInfoEmail(fetchImpl: typeof fetch, accessToken: string, signal: AbortSignal): Promise<string | undefined> {

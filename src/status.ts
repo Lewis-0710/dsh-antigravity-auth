@@ -92,8 +92,8 @@ export interface BootstrapStatusService {
   completeCallback(callbackUrl: string): Promise<LoginCompletionResult>
   cancelLogin(): Promise<{ readonly phase: LoginPhase; readonly errorCode?: LoginErrorCode }>
   logout(accountId?: string): Promise<LogoutResult>
-  switchAccount?(accountId: string): Promise<AntigravityStatusView>
-  removeAccount?(accountId: string): Promise<AntigravityStatusView>
+  switchAccount?(accountId: string): Promise<{ ok: boolean; message: string; account?: unknown } | AntigravityStatusView>
+  removeAccount?(accountId: string): Promise<{ ok: boolean; message: string } | AntigravityStatusView>
   revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
   usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<QuotaStatusView>
   dispose(): Promise<void>

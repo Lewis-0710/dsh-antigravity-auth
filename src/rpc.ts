@@ -60,12 +60,20 @@ export async function handleAntigravityAuthRpc(
     if (endpoint === 'switch-account') {
       if (!isAccountPayload(payload)) return badRequest('switch-account expects { accountId: string }')
       if (typeof service.switchAccount !== 'function') return badRequest('switch-account is not supported')
-      return { ok: true, value: { status: await service.switchAccount(payload.accountId) } }
+      const switchResult = await service.switchAccount(payload.accountId)
+      if (typeof switchResult === 'object' && switchResult !== null && 'ok' in switchResult && !switchResult.ok) {
+        return badRequest((switchResult as { message?: string }).message || 'Failed to switch account')
+      }
+      return { ok: true, value: { status: await service.status() } }
     }
     if (endpoint === 'remove-account') {
       if (!isAccountPayload(payload)) return badRequest('remove-account expects { accountId: string }')
       if (typeof service.removeAccount !== 'function') return badRequest('remove-account is not supported')
-      return { ok: true, value: { status: await service.removeAccount(payload.accountId) } }
+      const removeResult = await service.removeAccount(payload.accountId)
+      if (typeof removeResult === 'object' && removeResult !== null && 'ok' in removeResult && !removeResult.ok) {
+        return badRequest((removeResult as { message?: string }).message || 'Failed to remove account')
+      }
+      return { ok: true, value: { status: await service.status() } }
     }
     if (endpoint === 'revoke') {
       if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
