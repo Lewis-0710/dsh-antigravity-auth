@@ -2,7 +2,7 @@
 
 import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
 import { createAuthStore, defaultAuthStorePath } from './auth-store.ts'
-import { createCredentialCoordinator, createGoogleRefreshTransport, type CredentialCoordinator, type CredentialCoordinatorOptions, type HostCredential } from './credential-coordinator.ts'
+import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type CredentialMutationBinding, type HostCredential } from './credential-coordinator.ts'
 import { createOAuthFlow, OAuthFlowError } from './oauth-flow.ts'
 import type {
   OAuthFlow,
@@ -97,7 +97,6 @@ export class AntigravityAuthService implements BootstrapStatusService {
   readonly accountStore: AntigravityAccountStore
   private readonly fetchEmail: ((accessToken: string) => Promise<string | undefined>) | undefined
   private emailBackfillAttempted = false
-  private refreshTarget: { accountId: string; lineage?: string } | undefined
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
@@ -117,22 +116,16 @@ export class AntigravityAuthService implements BootstrapStatusService {
       : options.store === undefined
         ? createFileCapabilityGates(defaultCapabilityGatePath(storePath))
         : createMemoryCapabilityGates())
-    const userRefresh = options.credentialOptions?.refreshToken
     this.credentials = createCredentialCoordinator({
       ...options.credentialOptions,
       store: this.store,
-      refreshToken: async (args) => {
-        await this.captureRefreshTarget(args.refreshToken)
-        if (userRefresh !== undefined) return await userRefresh(args)
-        return await createGoogleRefreshTransport(options.credentialOptions?.fetchImpl, options.credentialOptions?.now)(args)
-      },
-      onTokenRotated: async (record) => {
-        const target = this.refreshTarget
-        this.refreshTarget = undefined
+      onTokenRotated: async (record, previous) => {
+        const target = await this.accountForRecord(previous)
         if (target === undefined) return
         await this.accountStore.syncRefreshToken({
-          accountId: target.accountId,
+          accountId: target.id,
           refreshToken: record.refreshToken,
+          previousRefreshToken: previous.refreshToken,
           ...(target.lineage === undefined ? {} : { lineage: target.lineage }),
         })
       },
@@ -213,12 +206,23 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
   }
 
-  private async captureRefreshTarget(refreshToken: string): Promise<void> {
+  private async accountForRecord(record: AntigravityAuthRecord): Promise<CachedAccount | undefined> {
     const accounts = await this.accountStore.read()
-    const match = accounts.accounts.find(account => account.refreshToken === refreshToken)
-    this.refreshTarget = match === undefined
-      ? undefined
-      : { accountId: match.id, ...(match.lineage === undefined ? {} : { lineage: match.lineage }) }
+    return accounts.accounts.find(account => account.refreshToken === record.refreshToken
+      && account.projectId === record.projectId
+      && (account.lineage === undefined || account.lineage === record.lineage))
+  }
+
+  private async bindCredentialMutation(): Promise<CredentialMutationBinding> {
+    const record = await this.readRecord()
+    const account = record === undefined ? undefined : await this.accountForRecord(record)
+    return {
+      record,
+      onCleared: async () => {
+        if (account !== undefined) await this.accountStore.removeAccount(account.id, account)
+        if (record !== undefined) await this.gates.clear(gateSubject(record))
+      },
+    }
   }
 
   async switchAccount(idOrEmailOrIndex: string): Promise<{
@@ -375,12 +379,10 @@ export class AntigravityAuthService implements BootstrapStatusService {
   async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     this.activeFlowGeneration = 0
-    await this.flow.cancel()
-    const boundId = (await this.accountStore.read()).activeId
     try {
-      const result = await this.credentials.logout()
-      await this.gates.clear()
-      if (boundId !== undefined) await this.accountStore.removeAccount(boundId)
+      const binding = await this.bindCredentialMutation()
+      await this.flow.cancel()
+      const result = await this.credentials.logout(binding)
       this.notifyStatus()
       return result
     } catch {
@@ -390,12 +392,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
 
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-    const boundId = (await this.accountStore.read()).activeId
-    const result = await this.credentials.revoke(confirmed, signal)
-    if (result.state === 'revoked' || result.state === 'logged-out') {
-      await this.gates.clear()
-      if (boundId !== undefined) await this.accountStore.removeAccount(boundId)
-    }
+    const binding = confirmed ? await this.bindCredentialMutation() : undefined
+    const result = await this.credentials.revoke(confirmed, signal, binding)
     this.notifyStatus()
     return result
   }

@@ -30,6 +30,7 @@ export interface AccountStoreOptions {
 export interface RefreshTokenSync {
   readonly accountId: string
   readonly refreshToken: string
+  readonly previousRefreshToken?: string
   readonly lineage?: string | undefined
 }
 
@@ -45,7 +46,7 @@ export interface AntigravityAccountStore {
     readonly id?: string | undefined
   }): Promise<{ activeId: string; account: CachedAccount; isNew: boolean }>
   setActive(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
-  removeAccount(idOrEmailOrIndex: string): Promise<CachedAccount | undefined>
+  removeAccount(idOrEmailOrIndex: string, expected?: CachedAccount): Promise<CachedAccount | undefined>
   /** Update one cached account by stable id. Never falls back to the current active account. */
   syncRefreshToken(update: RefreshTokenSync): Promise<boolean>
   list(): Promise<{ activeId: string | undefined; accounts: readonly (CachedAccount & { isActive: boolean; index: number })[] }>
@@ -134,6 +135,7 @@ function applyBoundRefreshToken(
   if (index < 0) return undefined
   const existing = accounts[index]
   if (existing === undefined) return undefined
+  if (update.previousRefreshToken !== undefined && existing.refreshToken !== update.previousRefreshToken) return undefined
   if (
     update.lineage !== undefined
     && existing.lineage !== undefined
@@ -148,6 +150,30 @@ function applyBoundRefreshToken(
     updatedAt: new Date().toISOString(),
   }
   return next
+}
+
+function sameCachedCredential(current: CachedAccount, expected: CachedAccount): boolean {
+  return current.id === expected.id && current.lineage === expected.lineage
+    && current.refreshToken === expected.refreshToken && current.projectId === expected.projectId
+}
+
+/** Keep each read/compare/write in one queue, including first-read seeding. */
+function serializeStore(store: AntigravityAccountStore): AntigravityAccountStore {
+  let pending = Promise.resolve()
+  const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
+    const result = pending.then(operation)
+    pending = result.then(() => {}, () => {})
+    return result
+  }
+  return {
+    path: store.path,
+    read: () => enqueue(() => store.read()),
+    saveAccount: draft => enqueue(() => store.saveAccount(draft)),
+    setActive: query => enqueue(() => store.setActive(query)),
+    removeAccount: (query, expected) => enqueue(() => store.removeAccount(query, expected)),
+    syncRefreshToken: update => enqueue(() => store.syncRefreshToken(update)),
+    list: () => enqueue(() => store.list()),
+  }
 }
 
 /** Create the multi-account store managing accounts.json. */
@@ -259,7 +285,7 @@ export function createAccountStore(
     await rename(tempPath, accountsPath)
   }
 
-  return {
+  return serializeStore({
     path: accountsPath,
     read: readRaw,
 
@@ -330,10 +356,12 @@ export function createAccountStore(
       return match.account
     },
 
-    removeAccount: async (idOrEmailOrIndex) => {
+    removeAccount: async (idOrEmailOrIndex, expected) => {
       const current = await readRaw()
       const match = findMatchingAccount(current.accounts, idOrEmailOrIndex)
       if (match === undefined) return undefined
+
+      if (expected !== undefined && !sameCachedCredential(match.account, expected)) return undefined
 
       const remaining = current.accounts.filter(a => a.id !== match.account.id)
       let activeId = current.activeId
@@ -367,7 +395,7 @@ export function createAccountStore(
         })),
       }
     },
-  }
+  })
 }
 
 /** In-memory account store for tests and in-memory auth compositions. */
@@ -403,7 +431,7 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
       // ignore
     }
   }
-  return {
+  return serializeStore({
     path: ':memory:',
     read: async () => {
       await ensureSeeded()
@@ -457,10 +485,11 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
       data = { ...data, activeId: match.account.id }
       return match.account
     },
-    removeAccount: async (query) => {
+    removeAccount: async (query, expected) => {
       await ensureSeeded()
       const match = findMatchingAccount(data.accounts, query)
       if (match === undefined) return undefined
+      if (expected !== undefined && !sameCachedCredential(match.account, expected)) return undefined
       const remaining = data.accounts.filter(a => a.id !== match.account.id)
       const activeId = data.activeId === match.account.id ? remaining[0]?.id : data.activeId
       data = { version: ACCOUNTS_RECORD_VERSION, activeId, accounts: remaining }
@@ -484,5 +513,5 @@ export function createMemoryAccountStore(authStore?: { read(): Promise<{ refresh
       })),
       }
     },
-  }
+  })
 }

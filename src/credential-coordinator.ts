@@ -96,6 +96,12 @@ export interface LogoutResult {
   readonly state: 'logged-out'
 }
 
+/** Host-only snapshot and cleanup belonging to one destructive operation. */
+export interface CredentialMutationBinding {
+  readonly record: AntigravityAuthRecord | undefined
+  readonly onCleared: () => Promise<void>
+}
+
 export interface CredentialCoordinatorOptions {
   readonly store: AntigravityAuthStore
   readonly now?: () => number
@@ -104,7 +110,7 @@ export interface CredentialCoordinatorOptions {
   readonly refreshToken?: RefreshAccessToken
   readonly revokeGrant?: RevokeGrant
   readonly fetchImpl?: typeof fetch
-  readonly onTokenRotated?: (record: AntigravityAuthRecord) => Promise<void> | void
+  readonly onTokenRotated?: (record: AntigravityAuthRecord, previous: AntigravityAuthRecord) => Promise<void> | void
 }
 
 export interface CredentialCoordinator {
@@ -112,8 +118,8 @@ export interface CredentialCoordinator {
   replaceFromLogin(credential: HostCredential, record: AntigravityAuthRecord): void
   status(): Promise<CredentialStatusView>
   revokeStatus(): RevokeStatusView
-  logout(): Promise<LogoutResult>
-  revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
+  logout(binding?: CredentialMutationBinding): Promise<LogoutResult>
+  revoke(confirmed: boolean, signal?: AbortSignal, binding?: CredentialMutationBinding): Promise<RevokeActionResult>
   resetCache(): void
   dispose(): Promise<void>
 }
@@ -224,7 +230,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       lastRefreshAt = undefined
     },
 
-    logout: async () => {
+    logout: async (binding) => {
       ensureNotDisposed()
       generation += 1
       const logoutGeneration = generation
@@ -236,11 +242,18 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       observedLineage = undefined
       const record = await options.store.read()
       if (!isActive(logoutGeneration)) return { state: 'logged-out' }
+      if (binding !== undefined && !matchesBinding(record, binding.record)) {
+        if (record !== undefined) observe(record)
+        return { state: 'logged-out' }
+      }
       let cleared = true
       if (record !== undefined) {
         cleared = await options.store.clearIfCurrent(record.revision, record.lineage)
       }
-      if (!isActive(logoutGeneration)) return { state: 'logged-out' }
+      if (!isActive(logoutGeneration)) {
+        if (cleared && record !== undefined) await binding?.onCleared()
+        return { state: 'logged-out' }
+      }
       if (!cleared) {
         const latest = await options.store.read()
         if (!isActive(logoutGeneration)) return { state: 'logged-out' }
@@ -256,10 +269,11 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       errorCode = undefined
       lastRefreshAt = undefined
       revokeStatus = { state: 'logged-out' }
+      await binding?.onCleared()
       return { state: 'logged-out' }
     },
 
-    revoke: async (confirmed, signal) => {
+    revoke: async (confirmed, signal, binding) => {
       ensureNotDisposed()
       if (!confirmed) {
         revokeStatus = { state: 'confirmation-required' }
@@ -274,13 +288,14 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       const revokeGeneration = generation
       const record = await options.store.read()
       if (!isActive(revokeGeneration)) return { state: 'superseded' }
+      if (binding !== undefined && !matchesBinding(record, binding.record)) return { state: 'superseded' }
       if (record === undefined) {
         clearObservedCredential()
         revokeStatus = { state: 'logged-out' }
         return { state: 'logged-out' }
       }
       revokeStatus = { state: 'pending' }
-      const flight = revokeCredential(record, revokeGeneration)
+      const flight = revokeCredential(record, revokeGeneration, binding)
       revokeFlight = flight
       void flight.then(
         () => clearRevokeFlight(flight),
@@ -418,7 +433,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       }
       if (sameLineage(current, record) && current.revision !== record.revision) {
         if (current.refreshToken === responseRefreshToken) {
-          return adoptRefreshedCredential(result, current, startGeneration)
+          return adoptRefreshedCredential(result, current, startGeneration, record)
         }
         record = current
         observe(record)
@@ -440,7 +455,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
         },
         record.lineage,
       )
-      if (committed !== undefined) return adoptRefreshedCredential(result, committed, startGeneration)
+      if (committed !== undefined) return adoptRefreshedCredential(result, committed, startGeneration, record)
 
       const latest = await options.store.read()
       if (!isActive(startGeneration)) return undefined
@@ -449,7 +464,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
         return undefined
       }
       if (latest.refreshToken === responseRefreshToken && sameLineage(latest, record)) {
-        return adoptRefreshedCredential(result, latest, startGeneration)
+        return adoptRefreshedCredential(result, latest, startGeneration, record)
       }
       record = latest
       observe(record)
@@ -466,6 +481,7 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     result: RefreshAccessTokenResult,
     record: AntigravityAuthRecord,
     startGeneration: number,
+    previous: AntigravityAuthRecord,
   ): Promise<HostCredential | undefined> {
     if (!isActive(startGeneration)) return undefined
     const credential: HostCredential = {
@@ -481,12 +497,13 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
     errorCode = undefined
     lastRefreshAt = now()
     if (result.refreshToken !== undefined) {
-      await options.onTokenRotated?.(record)
+      await options.onTokenRotated?.(record, previous)
     }
+    if (!isActive(startGeneration)) return undefined
     return { ...credential }
   }
 
-  async function revokeCredential(record: AntigravityAuthRecord, revokeGeneration: number): Promise<RevokeActionResult> {
+  async function revokeCredential(record: AntigravityAuthRecord, revokeGeneration: number, binding?: CredentialMutationBinding): Promise<RevokeActionResult> {
     const operation = beginOperation()
     try {
       await runBounded(
@@ -512,21 +529,34 @@ export function createCredentialCoordinator(options: CredentialCoordinatorOption
       revokeStatus = { state: 'failed', errorCode: 'storage' }
       return { state: 'failed', errorCode: 'storage' }
     }
-    if (!isActive(revokeGeneration)) return { state: 'superseded' }
     if (!cleared) {
-      revokeStatus = { state: 'superseded' }
+      if (isActive(revokeGeneration)) revokeStatus = { state: 'superseded' }
       return { state: 'superseded' }
     }
-    cached = undefined
-    observedRevision = 0
-    observedLineage = undefined
-    state = 'logged-out'
-    errorCode = undefined
-    lastRefreshAt = undefined
-    revokeStatus = { state: 'revoked' }
-    return { state: 'revoked' }
+    const superseded = !isActive(revokeGeneration)
+    if (!superseded) {
+      cached = undefined
+      observedRevision = 0
+      observedLineage = undefined
+      state = 'logged-out'
+      errorCode = undefined
+      lastRefreshAt = undefined
+      revokeStatus = { state: 'revoked' }
+    }
+    try {
+      await binding?.onCleared()
+    } catch {
+      if (isActive(revokeGeneration)) revokeStatus = { state: 'failed', errorCode: 'storage' }
+      return { state: 'failed', errorCode: 'storage' }
+    }
+    return { state: superseded ? 'superseded' : 'revoked' }
   }
 
+  function matchesBinding(current: AntigravityAuthRecord | undefined, expected: AntigravityAuthRecord | undefined): boolean {
+    if (current === undefined || expected === undefined) return current === expected
+    return current.revision === expected.revision && current.lineage === expected.lineage
+      && current.refreshToken === expected.refreshToken
+  }
 
   function isActive(expectedGeneration: number): boolean {
     return !disposed && expectedGeneration === generation

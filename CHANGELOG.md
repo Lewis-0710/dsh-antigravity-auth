@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Fix account-switch races during refresh, logout, and revoke: each operation retains its credential snapshot, stale cache updates and removals are rejected, and cleanup preserves the new account's capability evidence.
 - Private LLM transport failures now surface a safe failure kind and HTTP status (for example `protocol drift (HTTP 400)`) instead of the opaque "failed safely" card. Gemini thinking-signature replay remains as landed in #29.
 - Caches multiple Antigravity Google accounts locally and activates one at a time through `/antigravity-auth` (`/anti`) `accounts`, `switch`, `login`, `logout`, and `remove`. Refresh-token rotation, logout/revoke cleanup, and userinfo email backfill bind to the account that started the operation, so a late result cannot overwrite or delete a different active account.
 

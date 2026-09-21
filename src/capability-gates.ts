@@ -24,7 +24,7 @@ export interface CapabilityGateRegistry {
   recordGate0(subject: string, outcome: CapabilityGateOutcome): Promise<CapabilityGateEvidence>
   recordLlmFamily(subject: string, family: LlmFamilyId, outcome: CapabilityGateOutcome): Promise<CapabilityGateEvidence>
   recordCapability(subject: string, id: PersistedCapabilityId, outcome: CapabilityGateOutcome): Promise<CapabilityGateEvidence>
-  clear(): Promise<void>
+  clear(expectedSubject?: string): Promise<void>
 }
 
 export interface FileCapabilityGateOptions {
@@ -59,7 +59,9 @@ export function createMemoryCapabilityGates(
       current = { ...current, capabilities: { ...current.capabilities, [id]: result(outcome, now) } }
       return cloneEvidence(current)
     },
-    clear: async () => { current = {} },
+    clear: async (expectedSubject) => {
+      if (expectedSubject === undefined || current.subject === expectedSubject) current = {}
+    },
   }
 }
 
@@ -109,8 +111,10 @@ export function createFileCapabilityGates(
       const owned = evidenceForSubject(current, subject)
       return { ...owned, capabilities: { ...owned.capabilities, [id]: result(outcome, now) } }
     }),
-    clear: async () => {
-      const operation = mutation.then(async () => { await rm(path, { force: true }) })
+    clear: async (expectedSubject) => {
+      const operation = mutation.then(async () => {
+        if (expectedSubject === undefined || (await read()).subject === expectedSubject) await rm(path, { force: true })
+      })
       mutation = operation.catch(() => {})
       await operation
     },

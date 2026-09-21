@@ -146,6 +146,7 @@ X-DeepSeek-Harness-Attribution: deepseek-harness/<version> (+repository-url)
 - auth、gate evidence 与受控 live image 文件在 POSIX 上严格校验属主 mode；Windows 由 ACL 管理访问权限，因此不把合成的 POSIX group/other bits 作为访问判据，但仍执行 symlink、文件类型、大小、schema 与内容校验。
 - 本地多账号缓存与手动切换：`accounts.json` 可保存多个 refresh token，`auth.json` 只保存当前活动记录。不提供额度池、自动账号轮换、身份回退或 fingerprint regeneration。
 - 本地登出会清空 Host 内存和 `auth.json`，并删除该账号的缓存凭据，因此无法再用 `switch` 恢复。其余缓存账号保留。撤销是独立的显式动作，清理范围同样只覆盖启动该操作的账号；`superseded` 不能授权删除另一个活动账号。
+- 旧账号的刷新、登出或撤销仍在等待时切换账号，会保留新账号的凭据与能力状态。迟到的清理只针对原凭据，不会删除该账号后来重新登录的凭据。
 - DSH alpha.5 不再提供逐 method 或 Host 侧 carrier authority。插件只在公开 WebServer bind 恰为 `127.0.0.1` 时启用真实 account RPC；缺失、all-interface 与未知 bind 只返回 `loopback-required`。浏览器在 `ConnectionHandle.isLoopback` 为 false 时也不会注册该设置分区，但该客户端提示仅用于 UX：在 DSH 提供对应 Host 侧事实前，owner-contained 自定义 carrier 仍不能获得授权。
 - 原始多媒体 base64 绝不注入会话正文或前端 RPC。
 

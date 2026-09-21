@@ -171,6 +171,7 @@
 - auth store（`auth.json`）是单个 versioned record，保存当前活动账号的 refresh token、可选 project metadata、可选 masked-display email、revision 与 update time。Access token 不持久化。Gate evidence 绑定该 record 的 login lineage；替换 commit 是线性化点，旧 lineage 的证据即使因 crash/清理失败仍留在文件中也不能授权新账号。
 - 账号缓存（`accounts.json`）可保存多个 refresh token，每条记录有稳定、不因删除而复用的账号 id。同一时刻只有 `auth.json` 中的那一条对 LLM/Search/Image/Video/Quota 生效。切换把选中缓存记录写回 `auth.json` 并重置 coordinator 的旧账号状态。
 - 刷新令牌轮换必须按刷新开始时绑定的稳定账号 id（及可选 lineage）写回缓存，不得用显示邮箱或完成时的 `activeId` 代替。userinfo 邮箱回填同样绑定发起查询的账号；账号已切换则丢弃结果。
+- 每次刷新回调携带该次请求的原凭据快照，不使用 service 共享的可变目标字段；缓存同步还须核对原 refresh token。登出与撤销的 coordinator 在操作前核对同一份 revision/lineage/令牌快照，清理回调仅在该快照确实被清除后执行。缓存删除核对原凭据，gate 清理核对原 subject；单个 Host 的账号缓存读取与修改按队列串行，避免读改写互相覆盖。
 - parent directory 在 POSIX 上为 `0700`，auth file 为 `0600`；Windows 使用用户数据目录 ACL，不把合成的 POSIX group/other mode bits 作为访问判据。所有平台仍执行 symlink、文件类型、大小与 schema 校验，且不创建明文 backup copy。
 - refresh 使用锁内读取、锁外 network、锁内 lineage compare-and-commit；旧结果不得覆盖较新的 Login、Logout 或 refresh。
 - userinfo 是可选、非关键 operation；插件不解码未验证 access token 来推断账号、plan 或权限。
@@ -269,6 +270,7 @@
 - 刷新 A 完成轮换后、缓存同步结束前切换到 B：A 的新 token 只更新 A，B 的 token 与 projectId 不变。
 - 撤销 A 等待期间切换到 B：coordinator 返回 `superseded` 时 B 的缓存与当前 `auth.json` 均保留。
 - 对尚无邮箱的 A 发起 userinfo 后切换到 B：A 的邮箱不得写入 B 或当前 `auth.json`。
+- 账号身份读取迟到时交叠 A/B 刷新，或在撤销/登出身份读取期间切换账号：轮换、远端撤销与本地删除始终属于同一凭据。认证记录清除后、缓存清理前切换账号：清理 A 的剩余副本，同时保留 B 的认证与 gate evidence；内存与文件缓存均拒绝迟到的旧令牌更新和删除。
 - `invalid_grant`、401、429、5xx 与 timeout 的状态转换。
 - read-only project discovery；任何 fixture 中出现 onboarding 或 hard-coded fallback 都使测试失败。
 
