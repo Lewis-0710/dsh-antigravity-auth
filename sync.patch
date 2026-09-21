@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index 669b24d..44d7812 100644
+index a33805b..81a623d 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,15 @@
@@ -17,12 +17,12 @@ index 669b24d..44d7812 100644
 +
  # dsh-antigravity-auth
  
- > **DSH compatibility:** `0.1.4-rc.1` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
+ > **DSH compatibility:** `0.1.4-rc.3` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 diff --git a/README.zh.md b/README.zh.md
-index ba168e1..c4b4542 100644
+index d24f15d..218ccea 100644
 --- a/README.zh.md
 +++ b/README.zh.md
-@@ -75,8 +75,7 @@
+@@ -86,8 +86,7 @@
  
  ### 用量与配额可视化仪表盘
  
@@ -185,64 +185,116 @@ index 0000000..4a99813
 +# 执行原始语言服务器
 +exec "$ORIGINAL_LS" "${ARGS[@]}"
 diff --git a/src/auth-service.ts b/src/auth-service.ts
-index 792aa12..23a4f57 100644
+index 153067f..59fa7a9 100644
 --- a/src/auth-service.ts
 +++ b/src/auth-service.ts
-@@ -2,7 +2,13 @@
+@@ -2,7 +2,14 @@
  
  import type { AntigravityAuthRecord, AntigravityAuthStore } from './auth-store.ts'
  import { createAuthStore, defaultAuthStorePath } from './auth-store.ts'
--import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type HostCredential } from './credential-coordinator.ts'
+-import { createCredentialCoordinator, type CredentialCoordinator, type CredentialCoordinatorOptions, type CredentialMutationBinding, type HostCredential } from './credential-coordinator.ts'
 +import {
 +  createCredentialCoordinator,
 +  createGoogleRefreshTransport,
 +  type CredentialCoordinator,
 +  type CredentialCoordinatorOptions,
++  type CredentialMutationBinding,
 +  type HostCredential,
 +} from './credential-coordinator.ts'
  import { createOAuthFlow, OAuthFlowError } from './oauth-flow.ts'
  import type {
    OAuthFlow,
-@@ -56,6 +62,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
+@@ -94,6 +101,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
    private readonly quota: QuotaService
    private readonly gates: CapabilityGateRegistry
    private readonly autoActivate: boolean
 +  private readonly credentialOptions?: Omit<CredentialCoordinatorOptions, 'store'> | undefined
 +  private readonly quotaOptions?: Omit<QuotaServiceOptions, 'auth'> | undefined
 +  private readonly perAccountQuotaServices = new Map<string, QuotaService>()
-   private riskAcknowledged = false
-   private activeFlowGeneration = 0
-   private disposed = false
-@@ -63,6 +72,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
+   readonly accountStore: AntigravityAccountStore
+   private readonly fetchEmail: ((accessToken: string) => Promise<string | undefined>) | undefined
+   private emailBackfillAttempted = false
+@@ -104,6 +114,8 @@ export class AntigravityAuthService implements BootstrapStatusService {
  
    constructor(options: AntigravityAuthServiceOptions = {}) {
      this.autoActivate = options.autoActivateGates ?? false
 +    this.credentialOptions = options.credentialOptions
 +    this.quotaOptions = options.quotaOptions
+     this.fetchEmail = options.fetchEmail
      const storePath = options.storePath ?? defaultAuthStorePath()
      this.store = options.store ?? createAuthStore(storePath)
-     this.gates = options.gates ?? (options.gatePath !== undefined
-@@ -93,6 +104,19 @@ export class AntigravityAuthService implements BootstrapStatusService {
+@@ -235,6 +247,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
+     if (account === undefined) {
+       return { ok: false, message: `未找到匹配的 Antigravity 账号 "${idOrEmailOrIndex}"` }
+     }
++    const service = this.perAccountQuotaServices.get(account.id)
++    if (service) {
++      void service.dispose()
++      this.perAccountQuotaServices.delete(account.id)
++    }
+     const maskedAccountEmail = maskEmail(account.email)
+     const draft = {
+       refreshToken: account.refreshToken,
+@@ -261,6 +278,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
+     if (removed === undefined) {
+       return { ok: false, message: `未找到匹配的 Antigravity 账号 "${idOrEmailOrIndex}"` }
+     }
++    const service = this.perAccountQuotaServices.get(removed.id)
++    if (service) {
++      void service.dispose()
++      this.perAccountQuotaServices.delete(removed.id)
++    }
+     const current = await this.accountStore.read()
+     if (current.activeId !== undefined) {
+       await this.switchAccount(current.activeId)
+@@ -272,12 +294,46 @@ export class AntigravityAuthService implements BootstrapStatusService {
+   }
+ 
+   async status(): Promise<AntigravityStatusView> {
++    await this.backfillActiveAccountEmail()
+     const record = await this.readRecord()
+     const flowStatus = this.flow.status()
+     const phase = flowStatus.phase === 'idle' && record !== undefined ? 'success' : flowStatus.phase
      const maskedEmail = maskEmail(record?.email)
      const credentialStatus = await this.credentials.status()
      const gateEvidence = await this.gateEvidenceFor(record)
-+    const storedAccounts = await this.store.listAccounts?.() ?? []
-+    const activeId = await this.store.getActiveAccountId?.()
-+    const accounts: import('./status.ts').AccountSummaryView[] = storedAccounts.map(acc => {
-+      const masked = maskEmail(acc.email)
++    const listed = await this.accountStore.list().catch(() => ({ activeId: undefined, accounts: [] }))
++    let accounts: import('./status.ts').AccountSummaryView[] = listed.accounts.map(acc => {
++      const masked = acc.maskedEmail ?? maskEmail(acc.email)
 +      return {
 +        id: acc.id,
 +        projectAvailable: acc.projectId !== undefined && acc.projectId.length > 0,
-+        active: acc.id === (activeId ?? storedAccounts[0]?.id),
++        active: acc.isActive,
 +        ...(acc.email === undefined ? {} : { email: acc.email }),
 +        ...(masked === undefined ? {} : { maskedEmail: masked }),
-+        ...(acc.addedAt === undefined ? {} : { addedAt: acc.addedAt }),
++        ...(acc.updatedAt === undefined ? {} : { addedAt: acc.updatedAt }),
 +      }
 +    })
++    let activeId = listed.activeId
++
++    if (accounts.length === 0 && typeof this.store.listAccounts === 'function') {
++      const storedAccounts = await this.store.listAccounts().catch(() => [])
++      const storeActiveId = await this.store.getActiveAccountId?.().catch(() => undefined)
++      if (storedAccounts.length > 0) {
++        activeId = storeActiveId ?? storedAccounts[0]?.id
++        accounts = storedAccounts.map(acc => {
++          const masked = maskEmail(acc.email)
++          return {
++            id: acc.id,
++            projectAvailable: acc.projectId !== undefined && acc.projectId.length > 0,
++            active: acc.id === activeId,
++            ...(acc.email === undefined ? {} : { email: acc.email }),
++            ...(masked === undefined ? {} : { maskedEmail: masked }),
++            ...(acc.addedAt === undefined ? {} : { addedAt: acc.addedAt }),
++          }
++        })
++      }
++    }
++
      const login: LoginStatusView = {
        phase,
        configured: record !== undefined,
-@@ -102,7 +126,15 @@ export class AntigravityAuthService implements BootstrapStatusService {
+@@ -287,7 +343,15 @@ export class AntigravityAuthService implements BootstrapStatusService {
        ...(maskedEmail === undefined ? {} : { maskedEmail }),
        ...(flowStatus.errorCode === undefined ? {} : { errorCode: flowStatus.errorCode }),
      }
@@ -254,72 +306,44 @@ index 792aa12..23a4f57 100644
 +      this.credentials.revokeStatus(),
 +      gateEvidence,
 +      accounts.length > 0 ? accounts : undefined,
-+      activeId ?? storedAccounts[0]?.id,
++      activeId,
 +    )
    }
  
    async acknowledgeRisk(): Promise<RiskAcknowledgementResult> {
-@@ -153,6 +185,41 @@ export class AntigravityAuthService implements BootstrapStatusService {
-     return status.capabilities.some(capability => capability.id === id && capability.state === 'available')
-   }
- 
-+  async switchAccount(accountId: string): Promise<AntigravityStatusView> {
-+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-+    const updatedRecord = await this.store.setActiveAccount(accountId)
-+    if (updatedRecord === undefined) {
-+      throw new OAuthFlowError('internal', 'Account not found')
-+    }
-+    const service = this.perAccountQuotaServices.get(accountId)
-+    if (service) {
-+      void service.dispose()
-+      this.perAccountQuotaServices.delete(accountId)
-+    }
-+    if (this.autoActivate) {
-+      await this.autoActivateGates(gateSubject(updatedRecord))
-+    }
-+    this.notifyStatus()
-+    return await this.status()
-+  }
-+
-+  async removeAccount(accountId: string): Promise<AntigravityStatusView> {
-+    if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-+    await this.store.removeAccount(accountId)
-+    const service = this.perAccountQuotaServices.get(accountId)
-+    if (service) {
-+      void service.dispose()
-+      this.perAccountQuotaServices.delete(accountId)
-+    }
-+    const remaining = await this.store.listAccounts()
-+    if (remaining.length === 0) {
-+      await this.credentials.logout()
-+      await this.gates.clear()
-+    }
-+    this.notifyStatus()
-+    return await this.status()
-+  }
-+
-   async startLogin(): Promise<LoginStartResult> {
-     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
-     if (!this.riskAcknowledged) {
-@@ -187,19 +254,83 @@ export class AntigravityAuthService implements BootstrapStatusService {
+@@ -372,14 +436,78 @@ export class AntigravityAuthService implements BootstrapStatusService {
      return await this.credentials.credential(signal, options)
    }
  
 -  async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {
 -    return await this.quota.refresh(signal, force)
 +  async usage(signal?: AbortSignal, force = false, accountId?: string): Promise<import('./quota.ts').QuotaStatusView> {
-+    const activeId = await this.store.getActiveAccountId?.()
++    const accountsData = await this.accountStore.read().catch(() => undefined)
++    const activeId = accountsData?.activeId ?? await this.store.getActiveAccountId?.()
 +    if (accountId === undefined || accountId === activeId) {
 +      return await this.quota.refresh(signal, force)
 +    }
-+    const accounts = await this.store.listAccounts?.() ?? []
-+    const target = accounts.find(a => a.id === accountId)
++    let target = accountsData?.accounts.find(a => a.id === accountId)
++    if (!target && typeof this.store.listAccounts === 'function') {
++      const legacy = await this.store.listAccounts().catch(() => [])
++      const found = legacy.find(a => a.id === accountId)
++      if (found) {
++        target = {
++          id: found.id,
++          refreshToken: found.refreshToken,
++          projectId: found.projectId,
++          updatedAt: found.addedAt ?? new Date().toISOString(),
++          email: found.email,
++        }
++      }
++    }
 +    if (!target) return { state: 'unauthenticated' }
 +
 +    let service = this.perAccountQuotaServices.get(target.id)
 +    if (!service) {
 +      let cachedToken: { accessToken: string; expiresAt: number } | undefined
 +      const refreshTransport = this.credentialOptions?.refreshToken ?? createGoogleRefreshTransport(this.credentialOptions?.fetchImpl)
++      const targetAccount = target
 +      service = createQuotaService({
 +        ...this.quotaOptions,
 +        auth: {
@@ -328,21 +352,21 @@ index 792aa12..23a4f57 100644
 +            if (cachedToken && cachedToken.expiresAt > now + 60_000) {
 +              return {
 +                accessToken: cachedToken.accessToken,
-+                refreshToken: target.refreshToken,
++                refreshToken: targetAccount.refreshToken,
 +                expiresAt: cachedToken.expiresAt,
-+                projectId: target.projectId,
++                projectId: targetAccount.projectId,
 +              }
 +            }
 +            const token = await refreshTransport({
-+              refreshToken: target.refreshToken,
++              refreshToken: targetAccount.refreshToken,
 +              signal: credSignal ?? new AbortController().signal,
 +            })
 +            cachedToken = { accessToken: token.accessToken, expiresAt: token.expiresAt }
 +            return {
 +              accessToken: token.accessToken,
-+              refreshToken: token.refreshToken ?? target.refreshToken,
++              refreshToken: token.refreshToken ?? targetAccount.refreshToken,
 +              expiresAt: token.expiresAt,
-+              projectId: target.projectId,
++              projectId: targetAccount.projectId,
 +            }
 +          },
 +        },
@@ -356,42 +380,20 @@ index 792aa12..23a4f57 100644
 +  async logout(accountId?: string): Promise<import('./credential-coordinator.ts').LogoutResult> {
      if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
      this.activeFlowGeneration = 0
-     await this.flow.cancel()
      try {
--      const result = await this.credentials.logout()
--      await this.gates.clear()
 +      if (accountId !== undefined) {
-+        await this.store.removeAccount(accountId)
++        await this.removeAccount(accountId)
 +        const s = this.perAccountQuotaServices.get(accountId)
 +        if (s) {
 +          void s.dispose()
 +          this.perAccountQuotaServices.delete(accountId)
 +        }
-+      } else {
-+        const activeId = await this.store.getActiveAccountId()
-+        if (activeId !== undefined) {
-+          await this.store.removeAccount(activeId)
-+          const s = this.perAccountQuotaServices.get(activeId)
-+          if (s) {
-+            void s.dispose()
-+            this.perAccountQuotaServices.delete(activeId)
-+          }
-+        } else {
-+          await this.store.clear()
-+        }
++        return { state: 'logged-out' }
 +      }
-+      const remaining = await this.store.listAccounts()
-+      if (remaining.length === 0) {
-+        await this.credentials.logout()
-+        await this.gates.clear()
-+      }
-       this.notifyStatus()
--      return result
-+      return { state: 'logged-out' }
-     } catch {
-       throw new OAuthFlowError('persistence-failed', 'The local Antigravity credential could not be cleared')
-     }
-@@ -218,7 +349,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
+       const binding = await this.bindCredentialMutation()
+       await this.flow.cancel()
+       const result = await this.credentials.logout(binding)
+@@ -403,7 +531,9 @@ export class AntigravityAuthService implements BootstrapStatusService {
      this.disposed = true
      this.activeFlowGeneration = 0
      this.statusListeners.clear()
@@ -402,20 +404,6 @@ index 792aa12..23a4f57 100644
    }
  
    private async commitCredential(token: OAuthToken, project: ProjectValidation, signal: AbortSignal): Promise<void> {
-@@ -230,11 +363,11 @@ export class AntigravityAuthService implements BootstrapStatusService {
-     if (this.disposed || flowGeneration !== this.activeFlowGeneration || signal.aborted) {
-       throw new OAuthFlowError('cancelled', 'The OAuth login was cancelled')
-     }
--    const email = maskEmail(project.email ?? token.email)
-+    const rawEmail = project.email ?? token.email
-     const draft = {
-       refreshToken: token.refreshToken,
-       projectId: project.projectId,
--      ...(email === undefined ? {} : { email }),
-+      ...(rawEmail === undefined ? {} : { email: rawEmail }),
-     }
-     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
-     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
 diff --git a/src/auth-store.ts b/src/auth-store.ts
 index 14cffec..9cf515d 100644
 --- a/src/auth-store.ts
@@ -1443,7 +1431,7 @@ index ba85a4a..91edece 100644
        {error === null ? null : <p className="agy-alert" role="alert">{error}</p>}
      </div>
 diff --git a/src/client/locales.ts b/src/client/locales.ts
-index fba2ec1..9ee2b98 100644
+index e28b273..8a29af4 100644
 --- a/src/client/locales.ts
 +++ b/src/client/locales.ts
 @@ -30,7 +30,7 @@ export const en = {
@@ -1801,10 +1789,10 @@ index 8f26ffe..1b75dae 100644
  
  @keyframes agy-spin {
 diff --git a/src/llm-adapter.ts b/src/llm-adapter.ts
-index 5ded8b2..42e3e51 100644
+index 1d8c28d..1227a7c 100644
 --- a/src/llm-adapter.ts
 +++ b/src/llm-adapter.ts
-@@ -149,7 +149,7 @@ export class AntigravityAdapter extends LlmAdapter {
+@@ -154,7 +154,7 @@ export class AntigravityAdapter extends LlmAdapter {
  
    override providerInfo(provider: string): LlmProviderInfo {
      if (provider !== ANTIGRAVITY_PROVIDER) throw new LlmError('Unknown Antigravity provider route', 'NO_ADAPTER')
@@ -1814,47 +1802,30 @@ index 5ded8b2..42e3e51 100644
  
    override providerRetryPolicy(): ReturnType<typeof resolveRetryPolicy> {
 diff --git a/src/oauth-flow.ts b/src/oauth-flow.ts
-index 369b5de..13152c8 100644
+index 6639380..d475dad 100644
 --- a/src/oauth-flow.ts
 +++ b/src/oauth-flow.ts
-@@ -478,13 +478,55 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
+@@ -494,20 +494,38 @@ export function createGoogleTokenExchanger(fetchImpl: typeof fetch, clock: OAuth
      const expiresIn = typeof payload.expires_in === 'number' && Number.isFinite(payload.expires_in) && payload.expires_in > 0
        ? payload.expires_in
        : 3_600
-+    let email = extractEmailFromIdToken(payload.id_token)
-+    if (email === undefined && typeof payload.email === 'string' && payload.email.includes('@')) {
-+      email = payload.email
-+    }
-+    if (email === undefined) {
-+      email = await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
-+    }
+-    const email = typeof payload.email === 'string'
++    const email = typeof payload.email === 'string' && payload.email.includes('@')
+       ? payload.email
+       : typeof payload.id_token === 'string'
+         ? decodeJwtEmail(payload.id_token)
+-        : undefined
++        : await fetchUserInfoEmail(fetchImpl, payload.access_token, signal)
      return {
        accessToken: payload.access_token,
        refreshToken: payload.refresh_token,
        expiresAt: clock.now() + expiresIn * 1000,
--      ...typeof payload.email === 'string' ? { email: payload.email } : {},
+-      ...email === undefined ? {} : { email },
 +      ...(email === undefined ? {} : { email }),
-+    }
-+  }
-+}
-+
-+function extractEmailFromIdToken(idToken: unknown): string | undefined {
-+  if (typeof idToken !== 'string') return undefined
-+  const parts = idToken.split('.')
-+  const payloadPart = parts[1]
-+  if (payloadPart === undefined) return undefined
-+  try {
-+    const raw = Buffer.from(payloadPart, 'base64url').toString('utf8')
-+    const parsed: unknown = JSON.parse(raw)
-+    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
-+      return parsed.email
-+    }
-+  } catch {
-+    return undefined
-+  }
-+  return undefined
-+}
-+
+     }
+   }
+ }
+ 
 +async function fetchUserInfoEmail(fetchImpl: typeof fetch, accessToken: string, signal: AbortSignal): Promise<string | undefined> {
 +  try {
 +    const res = await fetchImpl('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -1866,14 +1837,16 @@ index 369b5de..13152c8 100644
 +    const parsed: unknown = JSON.parse(text)
 +    if (isRecord(parsed) && typeof parsed.email === 'string' && parsed.email.includes('@')) {
 +      return parsed.email
-     }
++    }
 +  } catch {
 +    return undefined
-   }
++  }
 +  return undefined
- }
- 
++}
++
  function assertCallbackRequest(request: LoopbackCallbackRequest): void {
+   if (request.method !== 'GET') throw new OAuthFlowError('invalid-method', 'The OAuth callback method is not accepted')
+   if (typeof request.host !== 'string' || !isAllowedCallbackHost(request.host)) {
 diff --git a/src/rpc-contract.ts b/src/rpc-contract.ts
 index ce3f2f3..162780c 100644
 --- a/src/rpc-contract.ts
@@ -1996,7 +1969,7 @@ index ce3f2f3..162780c 100644
  }
  
 diff --git a/src/rpc.ts b/src/rpc.ts
-index 3489c10..a97d875 100644
+index 3489c10..c4fc0d3 100644
 --- a/src/rpc.ts
 +++ b/src/rpc.ts
 @@ -7,12 +7,13 @@ import type { BootstrapStatusService } from './status.ts'
@@ -2026,24 +1999,32 @@ index 3489c10..a97d875 100644
      }
      if (endpoint === 'acknowledge-risk') {
        if (!isAcknowledgement(payload)) return badRequest('acknowledge-risk expects { acknowledge: true }')
-@@ -56,6 +57,16 @@ export async function handleAntigravityAuthRpc(
+@@ -56,6 +57,24 @@ export async function handleAntigravityAuthRpc(
        if (!isEmptyRecord(payload)) return badRequest('logout expects an empty payload')
        return { ok: true, value: await service.logout() }
      }
 +    if (endpoint === 'switch-account') {
 +      if (!isAccountPayload(payload)) return badRequest('switch-account expects { accountId: string }')
 +      if (typeof service.switchAccount !== 'function') return badRequest('switch-account is not supported')
-+      return { ok: true, value: { status: await service.switchAccount(payload.accountId) } }
++      const switchResult = await service.switchAccount(payload.accountId)
++      if (typeof switchResult === 'object' && switchResult !== null && 'ok' in switchResult && !switchResult.ok) {
++        return badRequest((switchResult as { message?: string }).message || 'Failed to switch account')
++      }
++      return { ok: true, value: { status: await service.status() } }
 +    }
 +    if (endpoint === 'remove-account') {
 +      if (!isAccountPayload(payload)) return badRequest('remove-account expects { accountId: string }')
 +      if (typeof service.removeAccount !== 'function') return badRequest('remove-account is not supported')
-+      return { ok: true, value: { status: await service.removeAccount(payload.accountId) } }
++      const removeResult = await service.removeAccount(payload.accountId)
++      if (typeof removeResult === 'object' && removeResult !== null && 'ok' in removeResult && !removeResult.ok) {
++        return badRequest((removeResult as { message?: string }).message || 'Failed to remove account')
++      }
++      return { ok: true, value: { status: await service.status() } }
 +    }
      if (endpoint === 'revoke') {
        if (!isRevokePayload(payload)) return badRequest('revoke expects { confirmed: true }')
        return { ok: true, value: await service.revoke(true, signal) }
-@@ -66,6 +77,14 @@ export async function handleAntigravityAuthRpc(
+@@ -66,6 +85,14 @@ export async function handleAntigravityAuthRpc(
    }
  }
  
@@ -2058,7 +2039,7 @@ index 3489c10..a97d875 100644
  function badRequest(message: string): RpcResult<never> {
    return { ok: false, error: { code: 'bad-request', message, details: { issues: [] } } }
  }
-@@ -96,10 +115,11 @@ function isEmptyRecord(value: unknown): value is Record<string, never> {
+@@ -96,10 +123,11 @@ function isEmptyRecord(value: unknown): value is Record<string, never> {
    return isRecord(value) && Object.keys(value).length === 0
  }
  
@@ -2073,7 +2054,7 @@ index 3489c10..a97d875 100644
  
  function isAcknowledgement(value: unknown): value is { acknowledge: true } {
 diff --git a/src/status.ts b/src/status.ts
-index 74b521c..9eee5f4 100644
+index 74b521c..13bfda8 100644
 --- a/src/status.ts
 +++ b/src/status.ts
 @@ -56,6 +56,15 @@ export interface CapabilityGateStatus {
@@ -2107,8 +2088,8 @@ index 74b521c..9eee5f4 100644
    cancelLogin(): Promise<{ readonly phase: LoginPhase; readonly errorCode?: LoginErrorCode }>
 -  logout(): Promise<LogoutResult>
 +  logout(accountId?: string): Promise<LogoutResult>
-+  switchAccount?(accountId: string): Promise<AntigravityStatusView>
-+  removeAccount?(accountId: string): Promise<AntigravityStatusView>
++  switchAccount?(accountId: string): Promise<{ ok: boolean; message: string; account?: unknown } | AntigravityStatusView>
++  removeAccount?(accountId: string): Promise<{ ok: boolean; message: string } | AntigravityStatusView>
    revoke(confirmed: boolean, signal?: AbortSignal): Promise<RevokeActionResult>
 -  usage?(signal?: AbortSignal, force?: boolean): Promise<QuotaStatusView>
 +  usage?(signal?: AbortSignal, force?: boolean, accountId?: string): Promise<QuotaStatusView>
@@ -2300,48 +2281,44 @@ index 0000000..e3a30a3
 +
 +echo "=== $REPO_NAME 同步完成 ==="
 diff --git a/tests/auth-service.spec.ts b/tests/auth-service.spec.ts
-index f51fcba..db155ed 100644
+index 0bf1235..4610da3 100644
 --- a/tests/auth-service.spec.ts
 +++ b/tests/auth-service.spec.ts
-@@ -67,9 +67,8 @@ describe('Antigravity auth service', () => {
-     })
- 
-     const record = await store.read()
--    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'a***@example.com' })
-+    expect(record).toMatchObject({ refreshToken: 'refresh-secret', projectId: 'project-secret', email: 'alice@example.com' })
-     expect(JSON.stringify(record)).not.toContain('access-secret')
--    expect(JSON.stringify(record)).not.toContain('alice@example.com')
-     expect(JSON.stringify(await service.status())).not.toContain('project-secret')
-     expect(await service.status()).toMatchObject({
-       riskAcknowledged: true,
-@@ -344,4 +343,27 @@ describe('Antigravity auth service', () => {
-     await expect(service.status()).resolves.toMatchObject({ login: { configured: true, projectAvailable: true } })
+@@ -369,6 +369,34 @@ describe('Antigravity auth service', () => {
      await service.dispose()
    })
-+
-+  it('supports listing multiple accounts, switching active account, and removing account', async () => {
+ 
++  it('supports listing multiple accounts in status, switching active account, and removing account', async () => {
 +    const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
-+    await store.commit({ refreshToken: 'refresh-1', projectId: 'project-1', email: 'user1@example.com' })
-+    await store.commit({ refreshToken: 'refresh-2', projectId: 'project-2', email: 'user2@example.com' })
-+
 +    const service = createAntigravityAuthService({ store })
++    await service.accountStore.saveAccount({ email: 'user1@example.com', projectId: 'project-1', refreshToken: 'refresh-1' })
++    await service.accountStore.saveAccount({ email: 'user2@example.com', projectId: 'project-2', refreshToken: 'refresh-2' })
++    await service.switchAccount('user2@example.com')
++
 +    const status = await service.status()
 +    expect(status.accounts).toHaveLength(2)
-+    expect(status.activeAccountId).toBe('user2@example.com')
-+    expect(status.login.maskedEmail).toBe('u***@example.com')
++    const user2Id = (await service.accountStore.read()).accounts.find(a => a.email === 'user2@example.com')?.id
++    expect(status.activeAccountId).toBe(user2Id)
 +
 +    // Switch account to user1
-+    const switchedStatus = await service.switchAccount('user1@example.com')
-+    expect(switchedStatus.activeAccountId).toBe('user1@example.com')
++    const switchRes = await service.switchAccount('user1@example.com')
++    expect(switchRes.ok).toBe(true)
++    const switchedStatus = await service.status()
++    const user1Id = (await service.accountStore.read()).accounts.find(a => a.email === 'user1@example.com')?.id
++    expect(switchedStatus.activeAccountId).toBe(user1Id)
 +
 +    // Remove user1
-+    const remainingStatus = await service.removeAccount('user1@example.com')
++    const removeRes = await service.removeAccount('user1@example.com')
++    expect(removeRes.ok).toBe(true)
++    const remainingStatus = await service.status()
 +    expect(remainingStatus.accounts).toHaveLength(1)
-+    expect(remainingStatus.activeAccountId).toBe('user2@example.com')
 +
 +    await service.dispose()
 +  })
- })
++
+   it('backfills the active account email through the injected fetcher once per process', async () => {
+     const store = createMemoryAuthStore(undefined, { now: () => 4_000 })
+     await store.commit({ refreshToken: 'rt-1', projectId: 'p-1' })
 diff --git a/tests/auth-store.spec.ts b/tests/auth-store.spec.ts
 index 7638238..847bf8a 100644
 --- a/tests/auth-store.spec.ts
