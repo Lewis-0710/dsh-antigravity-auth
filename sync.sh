@@ -4,33 +4,32 @@
 #==============================================================================
 #
 # 功能：
-#   将本地修改同步到上游最新代码。采用 **Patch-First, Smart-Merge** 策略：
-#   优先用 patch 方案保持干净的线性历史；若 patch 冲突则按文件类型智能处理。
+#   将本地定制修改同步到上游（upstream/main）最新代码。
+#   采用 **Patch-First, Smart-Merge** 策略：
+#   优先使用 patch 方案保持干净的线性历史；若 patch 冲突则回退到智能合并。
 #
-# 作用范围：
-#   - 仅针对当前仓库（dsh-antigravity-auth）
-#   - 需要 remote 配置：upstream（原上游）、origin（你的 fork）
-#   - 需要分支：custom（本地修改）、main（跟踪 upstream/main）
-#   - 需要文件：sync.patch（本地修改的快照）
+# 依赖与前提：
+#   - remote 配置：upstream（原上游）、origin（个人 fork）
+#   - 分支约定：custom（本地定制修改分支）、main（跟踪 upstream/main）
+#   - 文件：sync.patch（定制修改的干净快照，已排除 sync.patch/sync.sh 自身）
 #
-# 实现策略（Patch-First, Smart-Merge）：
-#
+# 同步策略：
 #   ── 策略 1：Patch Apply（优先）──────────────────────────────
-#   步骤：
-#     1. git checkout main && git reset --hard upstream/main
-#     2. git checkout -b custom-new main
-#     3. git apply sync.patch
-#     4. git branch -f custom custom-new && git checkout custom
+#     1. 备份 sync.patch 与 sync.sh 到临时目录
+#     2. 重置 main 分支到 upstream/main
+#     3. 从 main 检出临时分支并测试应用 patch
+#     4. 若无冲突，直接基于最新上游应用定制修改并更新 custom 分支
 #
-#   ── 策略 2：Smart Merge（回退，按文件类型处理）──────────────
-#   README 文件（README*.md）：
-#     - 保持本地头部的 Fork 维护说明（> [!NOTE] 块）
-#     - 其余部分全部使用上游版本
+#   ── 策略 2：Smart Merge（回退，按文件类型智能处理）────────────
+#     1. 将 main 分支合并到 custom 分支
+#     2. 对 README*.md：保留 Fork 说明（> [!NOTE] 块），其余使用上游最新内容
+#     3. 对其它冲突文件：列出差异并以本地版本（--ours）为准
+#     4. 提交合并结果
 #
-#   其他文件：
-#     - 列出上游与本地的具体差异
-#     - 冲突以本地优先（-X ours）
-#
+#   ── 收尾工作：
+#     1. 重新生成干净的 sync.patch（自动排除 sync.patch 与 sync.sh）
+#     2. 运行自动化测试与类型检查（若环境支持）
+#     3. 提示或执行推送到 origin/custom
 #==============================================================================
 
 set -e
@@ -41,120 +40,197 @@ cd "$SCRIPT_DIR"
 REPO_NAME="$(basename "$SCRIPT_DIR")"
 PATCH_FILE="$SCRIPT_DIR/sync.patch"
 
-echo "=== 同步 $REPO_NAME (Patch-First, Smart-Merge) ==="
+AUTO_YES=false
+SKIP_TEST=false
 
-# Step 1: 拉取上游最新
-echo "[1/4] 拉取上游最新代码..."
-git fetch upstream
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes) AUTO_YES=true ;;
+        --skip-test) SKIP_TEST=true ;;
+        -h|--help)
+            echo "用法: $0 [选项]"
+            echo "选项:"
+            echo "  -y, --yes      非交互模式，自动确认推送"
+            echo "  --skip-test    跳过 pnpm 编译与测试验证"
+            echo "  -h, --help     显示帮助信息"
+            exit 0
+            ;;
+    esac
+done
 
-# Step 1.5: 暂存本地未提交的修改
-echo "[1.5] 暂存本地未提交修改..."
+echo "=================================================="
+echo "  同步 $REPO_NAME (Patch-First, Smart-Merge)"
+echo "=================================================="
+
+# 检查 git remote
+if ! git remote get-url upstream >/dev/null 2>&1; then
+    echo "❌ 错误: 未配置 upstream 远程仓库。"
+    echo "💡 请先运行: git remote add upstream https://github.com/suntianc/dsh-antigravity-auth.git"
+    exit 1
+fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+    echo "❌ 错误: 未配置 origin 远程仓库。"
+    exit 1
+fi
+
+# Step 0: 创建安全临时备份目录
+TMP_DIR="$(mktemp -d /tmp/dsh_antigravity_auth_sync_XXXXXX)"
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT INT TERM
+
+if [ -f "$PATCH_FILE" ]; then
+    cp "$PATCH_FILE" "$TMP_DIR/sync.patch"
+fi
+if [ -f "$SCRIPT_DIR/sync.sh" ]; then
+    cp "$SCRIPT_DIR/sync.sh" "$TMP_DIR/sync.sh"
+fi
+
+# Step 1: 拉取上游与远端
+echo "[1/4] 拉取 upstream 与 origin 最新提交..."
+git fetch upstream --tags 2>/dev/null || git fetch upstream
+git fetch origin 2>/dev/null || true
+
+# 暂存本地未提交的修改（如果有）
 STASHED=false
 if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-    git stash push -m "sync.sh auto-stash" 2>/dev/null || true
+    echo "📦 检测到工作区未提交修改，正在暂存..."
+    git stash push -u -m "sync.sh-auto-stash-$(date +%s)" 2>/dev/null || true
     STASHED=true
 fi
 
-# Step 2: 重置 main 到上游最新
-echo "[2/4] 重置 main 到 upstream/main..."
-git checkout main
-git reset --hard upstream/main
-
-# Step 3: 尝试 Patch Apply（策略 1）
-echo "[3/4] 尝试 Patch Apply..."
-git checkout -b custom-new main
-
-if git apply --check "$PATCH_FILE" 2>/dev/null; then
-    git apply "$PATCH_FILE"
-    git add -A
-    git commit -m "feat(custom): apply custom modifications ($(date +%Y-%m-%d))" 2>/dev/null || true
-    git branch -f custom custom-new
-    git checkout custom
-    git branch -D custom-new 2>/dev/null || true
-    echo "✅ Patch 应用成功（策略 1：线性历史）"
+# Step 2: 重置 main 分支到 upstream/main
+echo "[2/4] 更新 local main 分支到 upstream/main..."
+if git show-ref --verify --quiet refs/heads/main; then
+    git branch -f main upstream/main
 else
-    # Patch 冲突，进入策略 2
-    echo "⚠️  Patch 存在冲突，进入 Smart Merge..."
-    git checkout custom
-    git branch -D custom-new 2>/dev/null || true
+    git branch main upstream/main
+fi
 
-    echo "[3/4] Smart Merge 处理冲突..."
+# Step 3: 应用同步策略
+echo "[3/4] 应用定制修改..."
+APPLIED_VIA_PATCH=false
 
-    # 先执行 merge 获取冲突列表，但不提交
+if [ -s "$TMP_DIR/sync.patch" ]; then
+    echo "   正在测试 Patch 是否适用于最新 upstream/main..."
+    git checkout main --quiet
+    if git apply --check "$TMP_DIR/sync.patch" 2>/dev/null; then
+        echo "   ✅ Patch 校验通过，应用干净线性历史（策略 1）..."
+        git checkout -B custom main --quiet
+        git apply "$TMP_DIR/sync.patch"
+        cp "$TMP_DIR/sync.sh" "$SCRIPT_DIR/sync.sh"
+        chmod +x "$SCRIPT_DIR/sync.sh"
+        git add -A
+        git commit -m "sync: 与 upstream/main 同步 ($(date +%Y-%m-%d))" --quiet || true
+        APPLIED_VIA_PATCH=true
+        echo "   ✅ 策略 1 应用成功"
+    else
+        echo "   ⚠️  Patch 与上游存在变动冲突，切换到 Smart Merge（策略 2）..."
+    fi
+fi
+
+if [ "$APPLIED_VIA_PATCH" = false ]; then
+    git checkout custom --quiet
+    cp "$TMP_DIR/sync.sh" "$SCRIPT_DIR/sync.sh"
+    chmod +x "$SCRIPT_DIR/sync.sh"
+
+    echo "   执行 Smart Merge..."
     git merge main --no-commit --no-ff 2>/dev/null || true
-
-    # 获取冲突文件列表
     CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
 
     if [ -z "$CONFLICTS" ]; then
         git add -A
-        git commit -m "merge: sync upstream/main $(date +%Y-%m-%d)" 2>/dev/null || true
+        git commit -m "merge: 合并 upstream/main ($(date +%Y-%m-%d))" --quiet 2>/dev/null || true
     else
         for f in $CONFLICTS; do
             case "$f" in
                 README*|readme*)
-                    echo ""
-                    echo "📄 $f — README 文件：保持 Fork 说明 + 其余使用上游版本"
+                    echo "   📄 $f: 保留本地 Fork 头部说明 + 结合上游内容"
                     FORK_HEADER=$(awk '/^> \[!NOTE\]/{p=1} p{print} /^$/{if(p)exit}' "$f" 2>/dev/null || true)
                     if [ -n "$FORK_HEADER" ]; then
                         git show "upstream/main:$f" > "$f.upstream"
-                        printf '%s\n' "$FORK_HEADER" > "$f.header"
+                        printf '%s\n\n' "$FORK_HEADER" > "$f.header"
                         cat "$f.header" "$f.upstream" > "$f"
                         rm -f "$f.upstream" "$f.header"
-                        echo "   ✅ Fork 说明已保留，其余使用上游版本"
                     else
                         git checkout upstream/main -- "$f"
-                        echo "   ✅ 无 Fork 说明，使用上游版本"
                     fi
                     git add "$f"
                     ;;
+                sync.sh|sync.patch)
+                    git checkout --ours "$f" 2>/dev/null || cp "$TMP_DIR/$f" "$SCRIPT_DIR/$f"
+                    git add "$f"
+                    ;;
                 *)
-                    echo ""
-                    echo "📄 $f — 其他冲突文件"
-                    echo "   ┌─ 上游修改（upstream/main）："
-                    git show "upstream/main:$f" 2>/dev/null | head -30 | diff - "$f" 2>/dev/null | head -20 | sed 's/^/   │ /' || true
-                    echo "   └─ 本地版本优先（ours）"
+                    echo "   📄 $f: 冲突文件以本地定制优先（ours）"
                     git checkout --ours "$f"
                     git add "$f"
                     ;;
             esac
         done
-
         git add -A
-        git commit -m "merge: sync upstream/main (smart merge, $(date +%Y-%m-%d))" 2>/dev/null || true
-        echo "✅ Smart Merge 完成"
+        git commit -m "merge: 智能合并 upstream/main ($(date +%Y-%m-%d))" --quiet 2>/dev/null || true
+        echo "   ✅ Smart Merge 完成"
     fi
 fi
 
-# 恢复暂存的修改
+# 恢复此前暂存的内容
 if [ "$STASHED" = true ]; then
-    git stash pop 2>/dev/null || true
+    echo "📦 恢复此前暂存的工作区改动..."
+    git stash pop --quiet 2>/dev/null || true
 fi
 
-# Step 4: 重新生成 patch（排除 sync.patch 自身，保证补丁纯净）
-echo "[4/4] 重新生成 sync.patch..."
-git diff upstream/main...custom -- . ':!sync.patch' > "$PATCH_FILE"
-echo "✅ sync.patch 已更新 ($(wc -l < "$PATCH_FILE") 行)"
+# Step 4: 重新生成干净的 sync.patch（排除 sync.patch 和 sync.sh 自身）
+echo "[4/4] 重新生成干净的 sync.patch..."
+git diff upstream/main...custom ':!sync.patch' ':!sync.sh' > "$PATCH_FILE"
+PATCH_LINES=$(wc -l < "$PATCH_FILE" | tr -d ' ')
+echo "✅ sync.patch 生成完毕 (共 $PATCH_LINES 行，已排除同步脚本与快照自身)"
 
-# 自动提交更新后的 patch 文件（如果存在变动）
-git add "$PATCH_FILE"
-if ! git diff --cached --quiet 2>/dev/null; then
-    git commit -m "chore: regenerate sync.patch" 2>/dev/null || true
-    echo "✅ sync.patch 已自动提交"
+# 确保 sync.sh 和 sync.patch 都被暂存并提交
+git add sync.patch sync.sh
+
+if ! git diff --cached --quiet; then
+    git commit -m "chore: 更新 sync.patch 与 sync.sh 快照 ($(date +%Y-%m-%d))" --quiet || true
 fi
 
-# 推送到 fork
-if [ -t 0 ]; then
+# 自动测试与检查
+if [ "$SKIP_TEST" = false ]; then
+    if command -v pnpm >/dev/null 2>&1; then
+        echo ""
+        echo "🔍 正在运行项目测试与构建验证..."
+        if pnpm run typecheck && pnpm run test && pnpm run build; then
+            echo "✅ 测试与构建验证全部通过！"
+        else
+            echo "❌ 警告: 测试或构建失败，请检查代码！"
+        fi
+    fi
+fi
+
+# 推送到 origin/custom
+echo ""
+DO_PUSH=false
+if [ "$AUTO_YES" = true ]; then
+    DO_PUSH=true
+elif [ -t 0 ]; then
     read -p "是否推送到 origin/custom? [y/N] " -n 1 -r < /dev/tty
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
-        git push origin custom
-        echo "✅ 已推送到 origin/custom"
-    else
-        echo "跳过推送"
+        DO_PUSH=true
     fi
-else
-    echo "非交互终端环境，跳过交互推送提示"
 fi
 
-echo "=== $REPO_NAME 同步完成 ==="
+if [ "$DO_PUSH" = true ]; then
+    echo "🚀 正在推送到 origin/custom..."
+    if [ "$APPLIED_VIA_PATCH" = true ]; then
+        git push --force-with-lease origin custom
+    else
+        git push origin custom
+    fi
+    echo "✅ 已成功推送到 origin/custom"
+else
+    echo "ℹ️  跳过远程推送（可稍后手动执行 git push origin custom）"
+fi
+
+echo "🎉 $REPO_NAME 同步流程全部完成！"
