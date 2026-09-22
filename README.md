@@ -1,12 +1,21 @@
 > [!NOTE]
 > **Fork 维护版本** | 本仓库是 [suntianc/dsh-antigravity-auth](https://github.com/suntianc/dsh-antigravity-auth) 的维护分支。
 > 
-> **与上游差异**：
-> 1. **多账号登录与切换**：将 auth-store 从单账号重构为多账号存储（accounts 数组 + activeAccountId），提供 listAccounts / setActiveAccount / removeAccount 等完整账号管理 API，支持添加多个 Google 账号并随时切换
-> 2. **多账号管理 UI**：重写 AntigravityAuthSettings 客户端组件，新增账号列表面板、添加/删除账号按钮、切换活跃账号下拉器、OAuth 流程引导与状态指示
-> 3. **DSH OAuth 凭证注入**：新增 antigravity-auth-wrapper.sh 与 ls-wrapper.sh，通过 DSH auth-core 获取 OAuth 凭据并注入 Antigravity 桌面端，绕过地区限制
-> 4. **自定义样式与本地化**：添加玻璃拟态风格样式（styles.ts）与完整中文本地化文案（locales.ts）
-> 5. **适配 Cordis 4.0.2 与 DSH 0.1.5-rc.1 客户端包拆分**
+> **与上游主要差异与定制增强**：
+> 1. **多账号体系与独立配额管理**：全面支持多账号存储、添加与无缝切换；支持各账号独立查询与刷新配额（`usage` 支持 `accountId` 参数），并在登录与切换时自动同步与反填邮箱。
+> 2. **多账号管理 UI 与交互深度优化**：
+>    - **卡片置顶与高亮**：当前活动账号自动置顶展示，并采用白色加粗边框突出高亮。
+>    - **状态指示与按钮布局**：就绪绿点移至邮箱后方展示；规范“添加账号”、“退出登录”、“刷新配额”等操作按钮的水平对齐与紧凑间距。
+>    - **开关滑块颜色适配**：配置项（网页搜索/图片创作/视频理解）开关按钮的圆球滑块颜色适配页面背景色，大幅提升开关状态可辨识度。
+> 3. **文案与配额倒计时模板优化**：
+>    - 移除 “Google” 前缀，统一定制为 “Antigravity”；规范中文操作文案（“退出登录”、“刷新配额”等）。
+>    - 配额倒计时模板精简格式化（5小时限额：`{hours}小时{minutes}分{seconds}秒后刷新`；周限额：`{days}天{hours}小时{minutes}分后刷新`；去除前缀百分比）。
+> 4. **DSH Desktop 兼容性修复**：
+>    - 允许 `parseUsageResult` 解析 `groups: []` 空数组，彻底解决 DSH Desktop 升级后报 `invalid usage response from Host` 的异常。
+>    - OAuth 流程增强 Email 解析容错（支持 ID Token JWT 解码与 Google UserInfo 接口兜底拉取）。
+> 5. **同步工具与桌面端集成脚本**：
+>    - 提供 `sync.sh` 智能双策略同步脚本（自动合并上游更新并保留 Fork 特性）与纯净的 `sync.patch`。
+>    - 提供 `antigravity-auth-wrapper.sh` 与 `ls-wrapper.sh` 凭据注入脚本。
 > 
 > 详见 [sync.patch](./sync.patch)。
 
