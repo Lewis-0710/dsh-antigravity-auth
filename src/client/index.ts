@@ -16,10 +16,13 @@ import type { AntigravityVideoSettings } from '../video.ts'
 
 const NS = 'settings.antigravityAuth'
 
+import { installSettingsNavIcon } from './settings-nav-icon.ts'
+
 export { AntigravityAuthSettings } from './AntigravityAuthSettings.tsx'
 export type { AntigravityAuthSettingsProps } from './AntigravityAuthSettings.tsx'
 export { en, zh } from './locales.ts'
 export type { AntigravityAuthKey } from './locales.ts'
+export { installSettingsNavIcon } from './settings-nav-icon.ts'
 
 /** Client services required by the settings section and its loopback RPC. */
 export const inject = ['slots', 'locale', 'connection', 'settingsScope']
@@ -52,6 +55,8 @@ export function apply(ctx: ClientContext): void {
     for (const listener of listeners) listener()
   }
   ctx.effect(() => ctx.on('connection/reset', reset), 'antigravity-auth: connection invalidation')
+
+  installSettingsNavIcon(ctx, () => t('nav'))
 
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
