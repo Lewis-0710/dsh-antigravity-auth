@@ -1,17 +1,26 @@
 diff --git a/README.md b/README.md
-index a33805b..81a623d 100644
+index a33805b..0856be4 100644
 --- a/README.md
 +++ b/README.md
-@@ -1,3 +1,15 @@
+@@ -1,3 +1,24 @@
 +> [!NOTE]
 +> **Fork 维护版本** | 本仓库是 [suntianc/dsh-antigravity-auth](https://github.com/suntianc/dsh-antigravity-auth) 的维护分支。
 +> 
-+> **与上游差异**：
-+> 1. **多账号登录与切换**：将 auth-store 从单账号重构为多账号存储（accounts 数组 + activeAccountId），提供 listAccounts / setActiveAccount / removeAccount 等完整账号管理 API，支持添加多个 Google 账号并随时切换
-+> 2. **多账号管理 UI**：重写 AntigravityAuthSettings 客户端组件，新增账号列表面板、添加/删除账号按钮、切换活跃账号下拉器、OAuth 流程引导与状态指示
-+> 3. **DSH OAuth 凭证注入**：新增 antigravity-auth-wrapper.sh 与 ls-wrapper.sh，通过 DSH auth-core 获取 OAuth 凭据并注入 Antigravity 桌面端，绕过地区限制
-+> 4. **自定义样式与本地化**：添加玻璃拟态风格样式（styles.ts）与完整中文本地化文案（locales.ts）
-+> 5. **适配 Cordis 4.0.2 与 DSH 0.1.5-rc.1 客户端包拆分**
++> **与上游主要差异与定制增强**：
++> 1. **多账号体系与独立配额管理**：全面支持多账号存储、添加与无缝切换；支持各账号独立查询与刷新配额（`usage` 支持 `accountId` 参数），并在登录与切换时自动同步与反填邮箱。
++> 2. **多账号管理 UI 与交互深度优化**：
++>    - **卡片置顶与高亮**：当前活动账号自动置顶展示，并采用白色加粗边框突出高亮。
++>    - **状态指示与按钮布局**：就绪绿点移至邮箱后方展示；规范“添加账号”、“退出登录”、“刷新配额”等操作按钮的水平对齐与紧凑间距。
++>    - **开关滑块颜色适配**：配置项（网页搜索/图片创作/视频理解）开关按钮的圆球滑块颜色适配页面背景色，大幅提升开关状态可辨识度。
++> 3. **文案与配额倒计时模板优化**：
++>    - 移除 “Google” 前缀，统一定制为 “Antigravity”；规范中文操作文案（“退出登录”、“刷新配额”等）。
++>    - 配额倒计时模板精简格式化（5小时限额：`{hours}小时{minutes}分{seconds}秒后刷新`；周限额：`{days}天{hours}小时{minutes}分后刷新`；去除前缀百分比）。
++> 4. **DSH Desktop 兼容性修复**：
++>    - 允许 `parseUsageResult` 解析 `groups: []` 空数组，彻底解决 DSH Desktop 升级后报 `invalid usage response from Host` 的异常。
++>    - OAuth 流程增强 Email 解析容错（支持 ID Token JWT 解码与 Google UserInfo 接口兜底拉取）。
++> 5. **同步工具与桌面端集成脚本**：
++>    - 提供 `sync.sh` 智能双策略同步脚本（自动合并上游更新并保留 Fork 特性）与纯净的 `sync.patch`。
++>    - 提供 `antigravity-auth-wrapper.sh` 与 `ls-wrapper.sh` 凭据注入脚本。
 +> 
 +> 详见 [sync.patch](./sync.patch)。
 +
@@ -19,10 +28,35 @@ index a33805b..81a623d 100644
  
  > **DSH compatibility:** `0.1.4-rc.3` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 diff --git a/README.zh.md b/README.zh.md
-index d24f15d..218ccea 100644
+index d24f15d..f19a08a 100644
 --- a/README.zh.md
 +++ b/README.zh.md
-@@ -86,8 +86,7 @@
+@@ -1,3 +1,24 @@
++> [!NOTE]
++> **Fork 维护版本** | 本仓库是 [suntianc/dsh-antigravity-auth](https://github.com/suntianc/dsh-antigravity-auth) 的维护分支。
++> 
++> **与上游主要差异与定制增强**：
++> 1. **多账号体系与独立配额管理**：全面支持多账号存储、添加与无缝切换；支持各账号独立查询与刷新配额（`usage` 支持 `accountId` 参数），并在登录与切换时自动同步与反填邮箱。
++> 2. **多账号管理 UI 与交互深度优化**：
++>    - **卡片置顶与高亮**：当前活动账号自动置顶展示，并采用白色加粗边框突出高亮。
++>    - **状态指示与按钮布局**：就绪绿点移至邮箱后方展示；规范“添加账号”、“退出登录”、“刷新配额”等操作按钮的水平对齐与紧凑间距。
++>    - **开关滑块颜色适配**：配置项（网页搜索/图片创作/视频理解）开关按钮的圆球滑块颜色适配页面背景色，大幅提升开关状态可辨识度。
++> 3. **文案与配额倒计时模板优化**：
++>    - 移除 “Google” 前缀，统一定制为 “Antigravity”；规范中文操作文案（“退出登录”、“刷新配额”等）。
++>    - 配额倒计时模板精简格式化（5小时限额：`{hours}小时{minutes}分{seconds}秒后刷新`；周限额：`{days}天{hours}小时{minutes}分后刷新`；去除前缀百分比）。
++> 4. **DSH Desktop 兼容性修复**：
++>    - 允许 `parseUsageResult` 解析 `groups: []` 空数组，彻底解决 DSH Desktop 升级后报 `invalid usage response from Host` 的异常。
++>    - OAuth 流程增强 Email 解析容错（支持 ID Token JWT 解码与 Google UserInfo 接口兜底拉取）。
++> 5. **同步工具与桌面端集成脚本**：
++>    - 提供 `sync.sh` 智能双策略同步脚本（自动合并上游更新并保留 Fork 特性）与纯净的 `sync.patch`。
++>    - 提供 `antigravity-auth-wrapper.sh` 与 `ls-wrapper.sh` 凭据注入脚本。
++> 
++> 详见 [sync.patch](./sync.patch)。
++
+ # dsh-antigravity-auth
+ 
+ > **DSH 兼容性：** `0.1.4-rc.3` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+@@ -86,8 +107,7 @@
  
  ### 用量与配额可视化仪表盘
  
@@ -883,7 +917,7 @@ index 14cffec..9cf515d 100644
    const required = ['projectId', 'refreshToken', 'revision', 'updatedAt', 'version']
    const withEmail = [...required, 'email'].sort()
 diff --git a/src/client/AntigravityAuthSettings.tsx b/src/client/AntigravityAuthSettings.tsx
-index ba85a4a..91edece 100644
+index ba85a4a..11e63f8 100644
 --- a/src/client/AntigravityAuthSettings.tsx
 +++ b/src/client/AntigravityAuthSettings.tsx
 @@ -1,6 +1,6 @@
@@ -1301,7 +1335,7 @@ index ba85a4a..91edece 100644
 +                    </button>
 +                  </>
 +                ) : (
-+                  <button className="agy-btn agy-btn-relogin" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
++                  <button className="agy-btn agy-btn-relogin" type="button" disabled={loginBusy} onClick={() => { void startLogin() }}>
 +                    {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
 +                  </button>
 +                )}
@@ -1788,6 +1822,32 @@ index 8f26ffe..1b75dae 100644
  }
  
  @keyframes agy-spin {
+diff --git a/src/index.ts b/src/index.ts
+index 1e5b2e1..6678ec9 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -49,14 +49,19 @@ export function apply(ctx: Context): void {
+   ctx.inject(['connection'], (connectionCtx) => {
+     const webServer = connectionCtx.get('webServer')
+     accountMode = commandAccountMode(webServer)
++    const isDesktopLoopback = (connectionCtx.connection as unknown as { isLoopback?: boolean })?.isLoopback === true
++    const host = webServer?.host ?? (isDesktopLoopback ? '127.0.0.1' : undefined)
+     const guard = createLoopbackRpcGuard(
+-      webServer?.host,
++      host,
+       (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
+     )
+     if (guard.mode === 'blocked') {
+       connectionCtx.logger.warn('antigravity-auth: account RPC is disabled because the WebServer is not loopback-bound')
+     }
+-    return registerAccountRoutes(connectionCtx.connection, ANTIGRAVITY_AUTH_RPC_NAMESPACE, ['status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke'], guard.handler)
++    return registerAccountRoutes(connectionCtx.connection, ANTIGRAVITY_AUTH_RPC_NAMESPACE, [
++      'status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke',
++      'switch-account', 'remove-account',
++    ], guard.handler)
+   })
+   mountCapabilityLifecycle({
+     ctx,
 diff --git a/src/llm-adapter.ts b/src/llm-adapter.ts
 index 1d8c28d..1227a7c 100644
 --- a/src/llm-adapter.ts
@@ -1801,6 +1861,21 @@ index 1d8c28d..1227a7c 100644
    }
  
    override providerRetryPolicy(): ReturnType<typeof resolveRetryPolicy> {
+diff --git a/src/loopback-rpc.ts b/src/loopback-rpc.ts
+index c07ad3e..c526644 100644
+--- a/src/loopback-rpc.ts
++++ b/src/loopback-rpc.ts
+@@ -23,7 +23,9 @@ export const LOOPBACK_REQUIRED_MESSAGE = 'Antigravity account controls require a
+  * 0.1.2-alpha.5 exposes no public method-level or carrier authority context.
+  */
+ export function loopbackMode(webServerHost: string | undefined): LoopbackRpcMode {
+-  return webServerHost === '127.0.0.1' ? 'enabled' : 'blocked'
++  if (webServerHost === undefined) return 'blocked'
++  const normalized = webServerHost.trim().toLowerCase()
++  return (normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1' || normalized === '[::1]') ? 'enabled' : 'blocked'
+ }
+ 
+ /** Command-entry denial shown when the Host exposes the commands seam beyond loopback. */
 diff --git a/src/oauth-flow.ts b/src/oauth-flow.ts
 index 6639380..d475dad 100644
 --- a/src/oauth-flow.ts
@@ -1848,7 +1923,7 @@ index 6639380..d475dad 100644
    if (request.method !== 'GET') throw new OAuthFlowError('invalid-method', 'The OAuth callback method is not accepted')
    if (typeof request.host !== 'string' || !isAllowedCallbackHost(request.host)) {
 diff --git a/src/rpc-contract.ts b/src/rpc-contract.ts
-index ce3f2f3..162780c 100644
+index ce3f2f3..de63e84 100644
 --- a/src/rpc-contract.ts
 +++ b/src/rpc-contract.ts
 @@ -33,9 +33,11 @@ export interface AntigravityAuthRpcClient {
@@ -1968,6 +2043,23 @@ index ce3f2f3..162780c 100644
    }
  }
  
+@@ -353,6 +405,7 @@ function isSafeAuthorizationUrl(value: unknown): value is string {
+     const state = parsed.searchParams.get('state')
+     const clientId = parsed.searchParams.get('client_id')
+     const challenge = parsed.searchParams.get('code_challenge')
++    const prompt = parsed.searchParams.get('prompt')
+     return parsed.protocol === 'https:'
+       && parsed.hostname === 'accounts.google.com'
+       && parsed.port === ''
+@@ -368,7 +421,7 @@ function isSafeAuthorizationUrl(value: unknown): value is string {
+       && (parsed.searchParams.get('redirect_uri') === null || parsed.searchParams.get('redirect_uri') === 'http://localhost:51121/oauth-callback')
+       && (parsed.searchParams.get('code_challenge_method') === null || parsed.searchParams.get('code_challenge_method') === 'S256')
+       && (parsed.searchParams.get('access_type') === null || parsed.searchParams.get('access_type') === 'offline')
+-      && (parsed.searchParams.get('prompt') === null || parsed.searchParams.get('prompt') === 'consent')
++      && (prompt === null || prompt === 'consent' || prompt === 'select_account consent' || prompt === 'select_account')
+   } catch {
+     return false
+   }
 diff --git a/src/rpc.ts b/src/rpc.ts
 index 3489c10..c4fc0d3 100644
 --- a/src/rpc.ts
@@ -2114,248 +2206,6 @@ index 74b521c..13bfda8 100644
    })
  }
  
-diff --git a/sync.sh b/sync.sh
-new file mode 100755
-index 0000000..2f46c4e
---- /dev/null
-+++ b/sync.sh
-@@ -0,0 +1,236 @@
-+#!/usr/bin/env bash
-+#==============================================================================
-+# sync.sh — dsh-antigravity-auth 上游同步脚本
-+#==============================================================================
-+#
-+# 功能：
-+#   将本地定制修改同步到上游（upstream/main）最新代码。
-+#   采用 **Patch-First, Smart-Merge** 策略：
-+#   优先使用 patch 方案保持干净的线性历史；若 patch 冲突则回退到智能合并。
-+#
-+# 依赖与前提：
-+#   - remote 配置：upstream（原上游）、origin（个人 fork）
-+#   - 分支约定：custom（本地定制修改分支）、main（跟踪 upstream/main）
-+#   - 文件：sync.patch（定制修改的干净快照，已排除 sync.patch/sync.sh 自身）
-+#
-+# 同步策略：
-+#   ── 策略 1：Patch Apply（优先）──────────────────────────────
-+#     1. 备份 sync.patch 与 sync.sh 到临时目录
-+#     2. 重置 main 分支到 upstream/main
-+#     3. 从 main 检出临时分支并测试应用 patch
-+#     4. 若无冲突，直接基于最新上游应用定制修改并更新 custom 分支
-+#
-+#   ── 策略 2：Smart Merge（回退，按文件类型智能处理）────────────
-+#     1. 将 main 分支合并到 custom 分支
-+#     2. 对 README*.md：保留 Fork 说明（> [!NOTE] 块），其余使用上游最新内容
-+#     3. 对其它冲突文件：列出差异并以本地版本（--ours）为准
-+#     4. 提交合并结果
-+#
-+#   ── 收尾工作：
-+#     1. 重新生成干净的 sync.patch（自动排除 sync.patch 与 sync.sh）
-+#     2. 运行自动化测试与类型检查（若环境支持）
-+#     3. 提示或执行推送到 origin/custom
-+#==============================================================================
-+
-+set -e
-+
-+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-+cd "$SCRIPT_DIR"
-+
-+REPO_NAME="$(basename "$SCRIPT_DIR")"
-+PATCH_FILE="$SCRIPT_DIR/sync.patch"
-+
-+AUTO_YES=false
-+SKIP_TEST=false
-+
-+for arg in "$@"; do
-+    case "$arg" in
-+        -y|--yes) AUTO_YES=true ;;
-+        --skip-test) SKIP_TEST=true ;;
-+        -h|--help)
-+            echo "用法: $0 [选项]"
-+            echo "选项:"
-+            echo "  -y, --yes      非交互模式，自动确认推送"
-+            echo "  --skip-test    跳过 pnpm 编译与测试验证"
-+            echo "  -h, --help     显示帮助信息"
-+            exit 0
-+            ;;
-+    esac
-+done
-+
-+echo "=================================================="
-+echo "  同步 $REPO_NAME (Patch-First, Smart-Merge)"
-+echo "=================================================="
-+
-+# 检查 git remote
-+if ! git remote get-url upstream >/dev/null 2>&1; then
-+    echo "❌ 错误: 未配置 upstream 远程仓库。"
-+    echo "💡 请先运行: git remote add upstream https://github.com/suntianc/dsh-antigravity-auth.git"
-+    exit 1
-+fi
-+
-+if ! git remote get-url origin >/dev/null 2>&1; then
-+    echo "❌ 错误: 未配置 origin 远程仓库。"
-+    exit 1
-+fi
-+
-+# Step 0: 创建安全临时备份目录
-+TMP_DIR="$(mktemp -d /tmp/dsh_antigravity_auth_sync_XXXXXX)"
-+cleanup() {
-+    rm -rf "$TMP_DIR"
-+}
-+trap cleanup EXIT INT TERM
-+
-+if [ -f "$PATCH_FILE" ]; then
-+    cp "$PATCH_FILE" "$TMP_DIR/sync.patch"
-+fi
-+if [ -f "$SCRIPT_DIR/sync.sh" ]; then
-+    cp "$SCRIPT_DIR/sync.sh" "$TMP_DIR/sync.sh"
-+fi
-+
-+# Step 1: 拉取上游与远端
-+echo "[1/4] 拉取 upstream 与 origin 最新提交..."
-+git fetch upstream --tags 2>/dev/null || git fetch upstream
-+git fetch origin 2>/dev/null || true
-+
-+# 暂存本地未提交的修改（如果有）
-+STASHED=false
-+if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-+    echo "📦 检测到工作区未提交修改，正在暂存..."
-+    git stash push -u -m "sync.sh-auto-stash-$(date +%s)" 2>/dev/null || true
-+    STASHED=true
-+fi
-+
-+# Step 2: 重置 main 分支到 upstream/main
-+echo "[2/4] 更新 local main 分支到 upstream/main..."
-+if git show-ref --verify --quiet refs/heads/main; then
-+    git branch -f main upstream/main
-+else
-+    git branch main upstream/main
-+fi
-+
-+# Step 3: 应用同步策略
-+echo "[3/4] 应用定制修改..."
-+APPLIED_VIA_PATCH=false
-+
-+if [ -s "$TMP_DIR/sync.patch" ]; then
-+    echo "   正在测试 Patch 是否适用于最新 upstream/main..."
-+    git checkout main --quiet
-+    if git apply --check "$TMP_DIR/sync.patch" 2>/dev/null; then
-+        echo "   ✅ Patch 校验通过，应用干净线性历史（策略 1）..."
-+        git checkout -B custom main --quiet
-+        git apply "$TMP_DIR/sync.patch"
-+        cp "$TMP_DIR/sync.sh" "$SCRIPT_DIR/sync.sh"
-+        chmod +x "$SCRIPT_DIR/sync.sh"
-+        git add -A
-+        git commit -m "sync: 与 upstream/main 同步 ($(date +%Y-%m-%d))" --quiet || true
-+        APPLIED_VIA_PATCH=true
-+        echo "   ✅ 策略 1 应用成功"
-+    else
-+        echo "   ⚠️  Patch 与上游存在变动冲突，切换到 Smart Merge（策略 2）..."
-+    fi
-+fi
-+
-+if [ "$APPLIED_VIA_PATCH" = false ]; then
-+    git checkout custom --quiet
-+    cp "$TMP_DIR/sync.sh" "$SCRIPT_DIR/sync.sh"
-+    chmod +x "$SCRIPT_DIR/sync.sh"
-+
-+    echo "   执行 Smart Merge..."
-+    git merge main --no-commit --no-ff 2>/dev/null || true
-+    CONFLICTS=$(git diff --name-only --diff-filter=U 2>/dev/null || true)
-+
-+    if [ -z "$CONFLICTS" ]; then
-+        git add -A
-+        git commit -m "merge: 合并 upstream/main ($(date +%Y-%m-%d))" --quiet 2>/dev/null || true
-+    else
-+        for f in $CONFLICTS; do
-+            case "$f" in
-+                README*|readme*)
-+                    echo "   📄 $f: 保留本地 Fork 头部说明 + 结合上游内容"
-+                    FORK_HEADER=$(awk '/^> \[!NOTE\]/{p=1} p{print} /^$/{if(p)exit}' "$f" 2>/dev/null || true)
-+                    if [ -n "$FORK_HEADER" ]; then
-+                        git show "upstream/main:$f" > "$f.upstream"
-+                        printf '%s\n\n' "$FORK_HEADER" > "$f.header"
-+                        cat "$f.header" "$f.upstream" > "$f"
-+                        rm -f "$f.upstream" "$f.header"
-+                    else
-+                        git checkout upstream/main -- "$f"
-+                    fi
-+                    git add "$f"
-+                    ;;
-+                sync.sh|sync.patch)
-+                    git checkout --ours "$f" 2>/dev/null || cp "$TMP_DIR/$f" "$SCRIPT_DIR/$f"
-+                    git add "$f"
-+                    ;;
-+                *)
-+                    echo "   📄 $f: 冲突文件以本地定制优先（ours）"
-+                    git checkout --ours "$f"
-+                    git add "$f"
-+                    ;;
-+            esac
-+        done
-+        git add -A
-+        git commit -m "merge: 智能合并 upstream/main ($(date +%Y-%m-%d))" --quiet 2>/dev/null || true
-+        echo "   ✅ Smart Merge 完成"
-+    fi
-+fi
-+
-+# 恢复此前暂存的内容
-+if [ "$STASHED" = true ]; then
-+    echo "📦 恢复此前暂存的工作区改动..."
-+    git stash pop --quiet 2>/dev/null || true
-+fi
-+
-+# Step 4: 重新生成干净的 sync.patch（排除 sync.patch 和 sync.sh 自身）
-+echo "[4/4] 重新生成干净的 sync.patch..."
-+git diff upstream/main...custom ':!sync.patch' ':!sync.sh' > "$PATCH_FILE"
-+PATCH_LINES=$(wc -l < "$PATCH_FILE" | tr -d ' ')
-+echo "✅ sync.patch 生成完毕 (共 $PATCH_LINES 行，已排除同步脚本与快照自身)"
-+
-+# 确保 sync.sh 和 sync.patch 都被暂存并提交
-+git add sync.patch sync.sh
-+
-+if ! git diff --cached --quiet; then
-+    git commit -m "chore: 更新 sync.patch 与 sync.sh 快照 ($(date +%Y-%m-%d))" --quiet || true
-+fi
-+
-+# 自动测试与检查
-+if [ "$SKIP_TEST" = false ]; then
-+    if command -v pnpm >/dev/null 2>&1; then
-+        echo ""
-+        echo "🔍 正在运行项目测试与构建验证..."
-+        if pnpm run typecheck && pnpm run test && pnpm run build; then
-+            echo "✅ 测试与构建验证全部通过！"
-+        else
-+            echo "❌ 警告: 测试或构建失败，请检查代码！"
-+        fi
-+    fi
-+fi
-+
-+# 推送到 origin/custom
-+echo ""
-+DO_PUSH=false
-+if [ "$AUTO_YES" = true ]; then
-+    DO_PUSH=true
-+elif [ -t 0 ]; then
-+    read -p "是否推送到 origin/custom? [y/N] " -n 1 -r < /dev/tty
-+    echo
-+    if [[ $REPLY =~ ^[Yy]$ ]]; then
-+        DO_PUSH=true
-+    fi
-+fi
-+
-+if [ "$DO_PUSH" = true ]; then
-+    echo "🚀 正在推送到 origin/custom..."
-+    if [ "$APPLIED_VIA_PATCH" = true ]; then
-+        git push --force-with-lease origin custom
-+    else
-+        git push origin custom
-+    fi
-+    echo "✅ 已成功推送到 origin/custom"
-+else
-+    echo "ℹ️  跳过远程推送（可稍后手动执行 git push origin custom）"
-+fi
-+
-+echo "🎉 $REPO_NAME 同步流程全部完成！"
 diff --git a/tests/auth-service.spec.ts b/tests/auth-service.spec.ts
 index 0bf1235..4610da3 100644
 --- a/tests/auth-service.spec.ts
@@ -2611,6 +2461,43 @@ index 0c8ffe2..28cebfd 100644
 +    unmount()
 +  })
  })
+diff --git a/tests/lifecycle.spec.ts b/tests/lifecycle.spec.ts
+index c8fe362..9428772 100644
+--- a/tests/lifecycle.spec.ts
++++ b/tests/lifecycle.spec.ts
+@@ -46,7 +46,7 @@ describe('bootstrap lifecycle boundary', () => {
+ 
+     expect(fetch).not.toHaveBeenCalled()
+     expect(setTimeout).not.toHaveBeenCalled()
+-    expect(handle).toHaveBeenCalledTimes(9)
++    expect(handle).toHaveBeenCalledTimes(11)
+     expect(handle.mock.calls[0]).toHaveLength(1)
+     expect(handle.mock.calls[0]?.[0].path).toBe('/api/antigravity-auth/status')
+ 
+@@ -71,7 +71,7 @@ describe('bootstrap lifecycle boundary', () => {
+ 
+     applyAuth({ inject } as never)
+ 
+-    expect(handle).toHaveBeenCalledTimes(9)
++    expect(handle).toHaveBeenCalledTimes(11)
+     const route = handle.mock.calls[0]![0]
+     const response = await route.fetch(new Request('http://dsh.test' + route.path, {
+       method: 'POST', headers: { 'content-type': 'application/json' },
+@@ -97,12 +97,12 @@ describe('bootstrap lifecycle boundary', () => {
+     try {
+       applyAuth(ctx)
+       await new Promise<void>(resolve => setImmediate(resolve))
+-      expect(handle).toHaveBeenCalledTimes(9)
++      expect(handle).toHaveBeenCalledTimes(11)
+     } finally {
+       await ctx.fiber.dispose()
+       await unprovide()
+     }
+-    expect(dispose).toHaveBeenCalledTimes(9)
++    expect(dispose).toHaveBeenCalledTimes(11)
+   })
+ 
+   it('registers the public LLM adapter only while authenticated Gate 0/L evidence passes', async () => {
 diff --git a/tests/oauth-flow.spec.ts b/tests/oauth-flow.spec.ts
 index 830769e..73229c0 100644
 --- a/tests/oauth-flow.spec.ts
