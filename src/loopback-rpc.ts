@@ -23,7 +23,9 @@ export const LOOPBACK_REQUIRED_MESSAGE = 'Antigravity account controls require a
  * 0.1.2-alpha.5 exposes no public method-level or carrier authority context.
  */
 export function loopbackMode(webServerHost: string | undefined): LoopbackRpcMode {
-  return webServerHost === '127.0.0.1' ? 'enabled' : 'blocked'
+  if (webServerHost === undefined) return 'blocked'
+  const normalized = webServerHost.trim().toLowerCase()
+  return (normalized === '127.0.0.1' || normalized === 'localhost' || normalized === '::1' || normalized === '[::1]') ? 'enabled' : 'blocked'
 }
 
 /** Command-entry denial shown when the Host exposes the commands seam beyond loopback. */

@@ -501,7 +501,7 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, searchScope, imageS
                     </button>
                   </>
                 ) : (
-                  <button className="agy-btn agy-btn-relogin" type="button" disabled={status === null || loginBusy} onClick={() => { void startLogin() }}>
+                  <button className="agy-btn agy-btn-relogin" type="button" disabled={loginBusy} onClick={() => { void startLogin() }}>
                     {loginBusy ? t('startingLogin') : isConfigured ? t('relogin') : t('login')}
                   </button>
                 )}

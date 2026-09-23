@@ -49,14 +49,19 @@ export function apply(ctx: Context): void {
   ctx.inject(['connection'], (connectionCtx) => {
     const webServer = connectionCtx.get('webServer')
     accountMode = commandAccountMode(webServer)
+    const isDesktopLoopback = (connectionCtx.connection as unknown as { isLoopback?: boolean })?.isLoopback === true
+    const host = webServer?.host ?? (isDesktopLoopback ? '127.0.0.1' : undefined)
     const guard = createLoopbackRpcGuard(
-      webServer?.host,
+      host,
       (endpoint, payload, signal) => handleAntigravityAuthRpc(service, endpoint, payload, signal, adapter),
     )
     if (guard.mode === 'blocked') {
       connectionCtx.logger.warn('antigravity-auth: account RPC is disabled because the WebServer is not loopback-bound')
     }
-    return registerAccountRoutes(connectionCtx.connection, ANTIGRAVITY_AUTH_RPC_NAMESPACE, ['status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke'], guard.handler)
+    return registerAccountRoutes(connectionCtx.connection, ANTIGRAVITY_AUTH_RPC_NAMESPACE, [
+      'status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke',
+      'switch-account', 'remove-account',
+    ], guard.handler)
   })
   mountCapabilityLifecycle({
     ctx,
