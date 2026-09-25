@@ -1,5 +1,5 @@
 diff --git a/README.md b/README.md
-index a33805b..0856be4 100644
+index 8bb5b73..c2303d0 100644
 --- a/README.md
 +++ b/README.md
 @@ -1,3 +1,24 @@
@@ -26,9 +26,9 @@ index a33805b..0856be4 100644
 +
  # dsh-antigravity-auth
  
- > **DSH compatibility:** `0.1.4-rc.3` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
+ > **DSH compatibility:** `0.1.4-rc.4` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 diff --git a/README.zh.md b/README.zh.md
-index d24f15d..f19a08a 100644
+index b7560f6..fe0d3af 100644
 --- a/README.zh.md
 +++ b/README.zh.md
 @@ -1,3 +1,24 @@
@@ -55,8 +55,8 @@ index d24f15d..f19a08a 100644
 +
  # dsh-antigravity-auth
  
- > **DSH 兼容性：** `0.1.4-rc.3` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
-@@ -86,8 +107,7 @@
+ > **DSH 兼容性：** `0.1.4-rc.4` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+@@ -90,8 +111,7 @@
  
  ### 用量与配额可视化仪表盘
  
