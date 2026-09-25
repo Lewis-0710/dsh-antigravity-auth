@@ -1465,10 +1465,10 @@ index ba85a4a..11e63f8 100644
        {error === null ? null : <p className="agy-alert" role="alert">{error}</p>}
      </div>
 diff --git a/src/client/index.ts b/src/client/index.ts
-index 0671d76..ffa53f6 100644
+index 0671d76..ec0f4c8 100644
 --- a/src/client/index.ts
 +++ b/src/client/index.ts
-@@ -16,10 +16,13 @@ import type { AntigravityVideoSettings } from '../video.ts'
+@@ -16,13 +16,16 @@ import type { AntigravityVideoSettings } from '../video.ts'
  
  const NS = 'settings.antigravityAuth'
  
@@ -1481,8 +1481,57 @@ index 0671d76..ffa53f6 100644
 +export { installSettingsNavIcon } from './settings-nav-icon.ts'
  
  /** Client services required by the settings section and its loopback RPC. */
- export const inject = ['slots', 'locale', 'connection', 'settingsScope']
-@@ -53,6 +56,8 @@ export function apply(ctx: ClientContext): void {
+-export const inject = ['slots', 'locale', 'connection', 'settingsScope']
++export const inject = ['slots', 'locale', 'connection']
+ 
+ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   interface LocaleNamespaceMap {
+@@ -31,6 +34,19 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+   }
+ }
+ 
++function resolveService<T = unknown>(ctx: ClientContext, name: string): T | undefined {
++  try {
++    if (typeof (ctx as unknown as { get?: (name: string) => unknown }).get === 'function') {
++      const svc = (ctx as unknown as { get: (name: string) => unknown }).get(name)
++      if (svc !== undefined) return svc as T
++    }
++  } catch {}
++  try {
++    return (ctx as unknown as Record<string, unknown>)[name] as T
++  } catch {}
++  return undefined
++}
++
+ /** Register one disposable settings section and no capability controls. */
+ export function apply(ctx: ClientContext): void {
+   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'antigravity-auth: copy dictionaries')
+@@ -39,10 +55,20 @@ export function apply(ctx: ClientContext): void {
+   if (!connection.isLoopback) return
+   const rpc = createAntigravityAuthRpcClient(connection.rpc)
+   const t = ctx.locale.bind(NS) as AntigravityAuthSettingsProps['t']
+-  const settingsScope = (ctx as ClientContext & { settingsScope?: { bind<T>(spec: { namespace: string; decode?: (value: unknown) => T | undefined }): SettingsScope<T> } }).settingsScope
+-  const searchScope = settingsScope?.bind<AntigravitySearchSettings>({ namespace: 'antigravity-search', decode: decodeSearchSettings })
+-  const imageScope = settingsScope?.bind<AntigravityImageSettings>({ namespace: 'antigravity-image', decode: decodeImageSettings })
+-  const videoScope = settingsScope?.bind<AntigravityVideoSettings>({ namespace: 'antigravity-video', decode: decodeVideoSettings })
++  const configForms = resolveService<{ get<T>(namespace: string): SettingsScope<T> }>(ctx, 'configForms')
++  const settingsScope = resolveService<{ bind<T>(spec: { namespace: string; decode?: (value: unknown) => T | undefined }): SettingsScope<T> }>(ctx, 'settingsScope')
++  const bindScope = <T>(namespace: string, decode?: (value: unknown) => T | undefined): SettingsScope<T> | undefined => {
++    if (configForms && typeof configForms.get === 'function') {
++      return configForms.get<T>(namespace)
++    }
++    if (settingsScope && typeof settingsScope.bind === 'function') {
++      return settingsScope.bind<T>({ namespace, ...(decode !== undefined ? { decode } : {}) })
++    }
++    return undefined
++  }
++  const searchScope = bindScope<AntigravitySearchSettings>('antigravity-search', decodeSearchSettings)
++  const imageScope = bindScope<AntigravityImageSettings>('antigravity-image', decodeImageSettings)
++  const videoScope = bindScope<AntigravityVideoSettings>('antigravity-video', decodeVideoSettings)
+   const listeners = new Set<() => void>()
+   const subscribe = (listener: () => void): (() => void) => {
+     listeners.add(listener)
+@@ -53,12 +79,21 @@ export function apply(ctx: ClientContext): void {
    }
    ctx.effect(() => ctx.on('connection/reset', reset), 'antigravity-auth: connection invalidation')
  
@@ -1491,6 +1540,20 @@ index 0671d76..ffa53f6 100644
    ctx.slots.inject('settings.section', () => ctx.slots.register({
      name: 'settings.section',
      id: 'antigravity-auth',
+     order: 20,
+     label: () => t('nav'),
+-    inject: (): AntigravityAuthSettingsProps => ({ rpc, t, subscribe, searchScope, imageScope, videoScope }),
++    inject: (): AntigravityAuthSettingsProps => ({
++      rpc,
++      t,
++      subscribe,
++      ...(searchScope !== undefined ? { searchScope } : {}),
++      ...(imageScope !== undefined ? { imageScope } : {}),
++      ...(videoScope !== undefined ? { videoScope } : {}),
++    }),
+   }, AntigravityAuthSettings))
+ }
+ 
 diff --git a/src/client/locales.ts b/src/client/locales.ts
 index e28b273..8a29af4 100644
 --- a/src/client/locales.ts
@@ -2451,6 +2514,19 @@ index 7638238..847bf8a 100644
 +    expect(accounts[0]?.email).toBe('legacy@example.com')
 +  })
  })
+diff --git a/tests/client-apply.client.spec.ts b/tests/client-apply.client.spec.ts
+index e3ca541..446048d 100644
+--- a/tests/client-apply.client.spec.ts
++++ b/tests/client-apply.client.spec.ts
+@@ -70,7 +70,7 @@ function bench(isLoopback = true) {
+ 
+ describe('Antigravity client apply', () => {
+   it('declares its services and removes dictionaries, slots, and listeners on teardown', async () => {
+-    expect(inject).toEqual(['slots', 'locale', 'connection', 'settingsScope'])
++    expect(inject).toEqual(['slots', 'locale', 'connection'])
+     const b = bench()
+ 
+     expect(b.slots.map(record => record.options)).toEqual([
 diff --git a/tests/client-settings.client.spec.tsx b/tests/client-settings.client.spec.tsx
 index 0c8ffe2..28cebfd 100644
 --- a/tests/client-settings.client.spec.tsx
