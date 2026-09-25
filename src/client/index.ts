@@ -25,13 +25,26 @@ export type { AntigravityAuthKey } from './locales.ts'
 export { installSettingsNavIcon } from './settings-nav-icon.ts'
 
 /** Client services required by the settings section and its loopback RPC. */
-export const inject = ['slots', 'locale', 'connection', 'settingsScope']
+export const inject = ['slots', 'locale', 'connection']
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
     /** Copy for the Antigravity bootstrap settings section. */
     'settings.antigravityAuth': AntigravityAuthKey
   }
+}
+
+function resolveService<T = unknown>(ctx: ClientContext, name: string): T | undefined {
+  try {
+    if (typeof (ctx as unknown as { get?: (name: string) => unknown }).get === 'function') {
+      const svc = (ctx as unknown as { get: (name: string) => unknown }).get(name)
+      if (svc !== undefined) return svc as T
+    }
+  } catch {}
+  try {
+    return (ctx as unknown as Record<string, unknown>)[name] as T
+  } catch {}
+  return undefined
 }
 
 /** Register one disposable settings section and no capability controls. */
@@ -42,10 +55,20 @@ export function apply(ctx: ClientContext): void {
   if (!connection.isLoopback) return
   const rpc = createAntigravityAuthRpcClient(connection.rpc)
   const t = ctx.locale.bind(NS) as AntigravityAuthSettingsProps['t']
-  const settingsScope = (ctx as ClientContext & { settingsScope?: { bind<T>(spec: { namespace: string; decode?: (value: unknown) => T | undefined }): SettingsScope<T> } }).settingsScope
-  const searchScope = settingsScope?.bind<AntigravitySearchSettings>({ namespace: 'antigravity-search', decode: decodeSearchSettings })
-  const imageScope = settingsScope?.bind<AntigravityImageSettings>({ namespace: 'antigravity-image', decode: decodeImageSettings })
-  const videoScope = settingsScope?.bind<AntigravityVideoSettings>({ namespace: 'antigravity-video', decode: decodeVideoSettings })
+  const configForms = resolveService<{ get<T>(namespace: string): SettingsScope<T> }>(ctx, 'configForms')
+  const settingsScope = resolveService<{ bind<T>(spec: { namespace: string; decode?: (value: unknown) => T | undefined }): SettingsScope<T> }>(ctx, 'settingsScope')
+  const bindScope = <T>(namespace: string, decode?: (value: unknown) => T | undefined): SettingsScope<T> | undefined => {
+    if (configForms && typeof configForms.get === 'function') {
+      return configForms.get<T>(namespace)
+    }
+    if (settingsScope && typeof settingsScope.bind === 'function') {
+      return settingsScope.bind<T>({ namespace, ...(decode !== undefined ? { decode } : {}) })
+    }
+    return undefined
+  }
+  const searchScope = bindScope<AntigravitySearchSettings>('antigravity-search', decodeSearchSettings)
+  const imageScope = bindScope<AntigravityImageSettings>('antigravity-image', decodeImageSettings)
+  const videoScope = bindScope<AntigravityVideoSettings>('antigravity-video', decodeVideoSettings)
   const listeners = new Set<() => void>()
   const subscribe = (listener: () => void): (() => void) => {
     listeners.add(listener)
@@ -63,7 +86,14 @@ export function apply(ctx: ClientContext): void {
     id: 'antigravity-auth',
     order: 20,
     label: () => t('nav'),
-    inject: (): AntigravityAuthSettingsProps => ({ rpc, t, subscribe, searchScope, imageScope, videoScope }),
+    inject: (): AntigravityAuthSettingsProps => ({
+      rpc,
+      t,
+      subscribe,
+      ...(searchScope !== undefined ? { searchScope } : {}),
+      ...(imageScope !== undefined ? { imageScope } : {}),
+      ...(videoScope !== undefined ? { videoScope } : {}),
+    }),
   }, AntigravityAuthSettings))
 }
 
