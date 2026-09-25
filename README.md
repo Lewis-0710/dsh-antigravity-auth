@@ -21,14 +21,14 @@
 
 # dsh-antigravity-auth
 
-> **DSH compatibility:** `0.1.4-rc.3` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
+> **DSH compatibility:** `0.1.4-rc.4` targets DSH `0.1.5-rc.1` as its development and minimum supported baseline, with a coherent dependency graph. Keep compatible older plugin releases for older DSH Hosts. See [verification](docs/dsh-source-verification.md).
 
 [![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 English | [中文](README.zh.md)
 
-Release: **v0.1.4-rc.3** (npm tag: `rc`).
+Release: **v0.1.4-rc.4** (npm tag: `rc`).
 
 A self-contained [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity Capability Bundle**. It integrates Antigravity's private OAuth session
@@ -47,6 +47,10 @@ The settings section follows the DSH interface language (English or Chinese), in
 > account-gated Antigravity backend surface is unsupported, revocable, and
 > may be rate-limited or changed without notice. Do not rely on it for
 > production workloads.
+
+## 0.1.4-rc.4: concurrent search cancellation
+
+Fixes #35: if one query in a concurrent `web_search` fails, cancelling the other pending requests no longer emits an unhandled TLS socket error that exits the DSH Host.
 
 ## 0.1.4-rc.3: Gemini tool-call ID reuse
 
@@ -131,7 +135,7 @@ Stop `dsh web`, ensure the target Host uses a coherent DSH `0.1.5-rc.1` graph, t
 
 ```sh
 dsh --version
-dsh plugin --profile web add --save-exact dsh-antigravity-auth@0.1.4-rc.3
+dsh plugin --profile web add --save-exact dsh-antigravity-auth@0.1.4-rc.4
 dsh plugin --profile web list
 ```
 

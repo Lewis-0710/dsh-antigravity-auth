@@ -42,10 +42,8 @@ export function createRawPrivateDispatcher(): (input: RawPrivateRequest) => Prom
     })
     const socket = await connectTls(url, input.responseHeaderTimeoutMs, input.signal)
     let dispatched = false
-    const abort = (): void => { socket.destroy(cancelled(dispatched)) }
     try {
       if (isAborted(input.signal)) throw cancelled(false)
-      input.signal?.addEventListener('abort', abort, { once: true })
       socket.write(request)
       dispatched = true
       const { head, leftover } = await waitForHead(socket, input.responseHeaderTimeoutMs, dispatched, input.signal)
@@ -60,8 +58,6 @@ export function createRawPrivateDispatcher(): (input: RawPrivateRequest) => Prom
       socket.destroy()
       if (error instanceof PrivateTransportError) throw error
       throw new PrivateTransportError('offline', 'The private endpoint could not be reached', { accepted: dispatched })
-    } finally {
-      input.signal?.removeEventListener('abort', abort)
     }
   }
 }
