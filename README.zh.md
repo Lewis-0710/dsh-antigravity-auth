@@ -1,13 +1,13 @@
 # dsh-antigravity-auth
 
-> **DSH 兼容性：** `0.1.4-rc.3` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
+> **DSH 兼容性：** `0.1.4-rc.4` 以 DSH `0.1.5-rc.1` 为开发与最低支持基线，依赖图必须保持一致。旧 DSH 用户请使用兼容的旧插件版本。见[验证说明](docs/dsh-source-verification.md)。
 
 [![npm rc version](https://img.shields.io/npm/v/dsh-antigravity-auth/rc.svg?label=npm%20rc)](https://www.npmjs.com/package/dsh-antigravity-auth)
 [![awesome · DSH plugin](https://awesome-dsh-plugin.com/badge.svg)](https://awesome-dsh-plugin.com)
 
 [English](README.md) | 中文
 
-发布版本：**v0.1.4-rc.3**（npm 标签：`rc`）。
+发布版本：**v0.1.4-rc.4**（npm 标签：`rc`）。
 
 这是一个自包含的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
 **Antigravity 能力包**。它集成了 Antigravity 的私有 OAuth 登录态与 Wire Identity 线路身份，提供：
@@ -23,6 +23,10 @@
 
 > **⚠️ 非官方通道——仅限个人开发。** 私有、受账户权限控制的 Antigravity
 > 后端服务未获官方支持、可随时撤销，也可能在没有通知的情况下被限流或变更。请勿依赖它承载生产任务。
+
+## 0.1.4-rc.4：并发搜索取消修复
+
+修复 #35：并发 `web_search` 中一条查询失败后，取消其余等待中的请求不会再触发无人处理的 TLS socket 错误，导致 DSH Host 退出。
 
 ## 0.1.4-rc.3：Gemini 工具调用 ID 复用修复
 
@@ -104,7 +108,7 @@
 
 ```sh
 dsh --version
-dsh plugin --profile web add --save-exact dsh-antigravity-auth@0.1.4-rc.3
+dsh plugin --profile web add --save-exact dsh-antigravity-auth@0.1.4-rc.4
 dsh plugin --profile web list
 ```
 
